@@ -1,0 +1,58 @@
+[project]
+name = "xret-workspace"
+version = "0.0.0"
+requires-python = ">=3.12"
+dependencies = [
+    "xret-data",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+xret-data = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "ruff",
+    "ty",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["packages/*/tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "-m",
+    "not network",
+]
+markers = [
+    "network: exercises a real network call against a live exchange (excluded by default).",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "W",
+    "F",
+    "I",
+    "B",
+    "C4",
+    "UP",
+    "SIM",
+]
+
+[tool.ty.environment]
+python-version = "3.12"
+root = ["packages"]
+
+[tool.ty.src]
+include = ["packages/*/src"]
