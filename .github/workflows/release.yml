@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "xret-*-v*"
+
+jobs:
+  publish:
+    name: Build and publish to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: "0.11.28"
+
+      - name: Install Python
+        run: uv python install 3.12
+
+      - name: Extract package name from tag
+        id: tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # xret-data-v0.3.0 → xret-data
+          PACKAGE="${TAG%-v*}"
+          echo "package=${PACKAGE}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PACKAGE="${{ steps.tag.outputs.package }}"
+          TAG_VERSION="${TAG##*-v}"
+          PYPROJECT_VERSION=$(grep '^version' "packages/${PACKAGE}/pyproject.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$TAG_VERSION" != "$PYPROJECT_VERSION" ]; then
+            echo "::error::Tag version ${TAG_VERSION} does not match pyproject.toml version ${PYPROJECT_VERSION}"
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build --package "${{ steps.tag.outputs.package }}" --out-dir dist
+
+      - name: Smoke test (wheel)
+        run: |
+          uv venv .smoke --python 3.12
+          uv pip install --python .smoke/bin/python dist/*.whl
+          .smoke/bin/python -c "import xret.data"
+
+      - name: Publish to PyPI
+        run: uv publish dist/*
