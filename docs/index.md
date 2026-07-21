@@ -1,6 +1,8 @@
 # Xret documentation
 
-Xret provides explicit, research-grade acquisition and local management of financial market data.
+Quant research for the market, not the backtest.
+
+Xret is an ecosystem for individual quant researchers. Each package owns a focused responsibility within the research workflow and enforces correct practice at that boundary. The first distribution is `xret-data`: explicit, research-grade acquisition and local management of financial market data.
 
 ## Start here
 

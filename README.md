@@ -1,98 +1,90 @@
-# Xret
+<p align="center">
+  <img src=".github/assets/hero.webp" alt="Xret" width="100%">
+</p>
 
-Xret is an AI-native quantitative research and execution ecosystem.
+<p align="center">
+  <b>Test ideas. Challenge results. Trade what survives.</b>
+</p>
 
-The initial distribution is `xret-data`, imported in Python as `xret.data`.
+<p align="center">
+  <a href="https://github.com/nbsp1221/xret/actions/workflows/ci.yml">
+    <img src="https://github.com/nbsp1221/xret/actions/workflows/ci.yml/badge.svg" alt="CI">
+  </a>
+  <a href="https://pypi.org/project/xret-data/">
+    <img src="https://img.shields.io/pypi/v/xret-data" alt="PyPI">
+  </a>
+  <a href="https://pypi.org/project/xret-data/">
+    <img src="https://img.shields.io/pypi/pyversions/xret-data" alt="Python">
+  </a>
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
+  </a>
+</p>
 
-## xret-data
+---
+
+Most backtest results are noise. Parameter sweeps, in-sample fitting, and survivorship bias produce numbers that look like alpha and die on contact with the market.
+
+Xret is a quant research ecosystem for individuals who want to know if their edge is real. One pipeline from market data to live execution, where every experiment is tracked, every backtest must survive out-of-sample scrutiny, and overfitting is structurally harder than honesty.
+
+> [!NOTE]
+> **Current status:** Xret is being built in stages. `xret-data` is available today. The end-to-end workflow described here is the direction of the ecosystem; `xret-backtest` and `xret-cli` are planned.
+
+## Ecosystem
+
+Xret is a family of composable Python packages for the quant research lifecycle.
+
+| Package | Purpose | Status |
+|---------|---------|--------|
+| `xret-data` | Acquire, validate, and store market data | Active |
+| `xret-backtest` | Test strategies and challenge results through reproducible experiments | Planned |
+| `xret-cli` | Operate and automate the Xret workflow from the command line | Planned |
+
+Each package stands on its own. Together, they form a path from market data to strategies ready for real-world trading.
+
+## Quick start
+
+```bash
+uv init market-research && cd market-research
+uv add xret-data
+```
 
 ```python
 from xret.data import MarketData
 
-market_data = MarketData()
-bars = market_data.bars(
-    exchange="binance", symbol="BTC/USDT", market="perpetual",
-    settle="USDT", timeframe="1h",
+md = MarketData()
+bars = md.bars(
+    exchange="binance", symbol="BTC/USDT",
+    market="perpetual", settle="USDT", timeframe="1h",
 )
 
-bars.sync("2024-01-01", "2024-02-01")
-frame = bars.scan("2024-01-01", "2024-02-01")
+# Acquire and validate — only missing intervals are fetched
+result = bars.sync("2024-01-01", "2024-06-01")
+result.require_complete()
+
+# Read — raises CoverageError if any bar is missing
+df = bars.scan("2024-01-01", "2024-06-01").collect()
 ```
 
-`MarketData(config=None)` is the public entry point (`from xret.data import
-MarketData`). `config` defaults to `resolve_config()`; passing an explicit
-`MarketDataConfig` bypasses resolution entirely. `market_data.bars(...)`
-binds one canonical market identity plus timeframe and performs no I/O;
-identity resolution against the provider happens lazily inside
-`fetch`/`sync`.
+`scan` never returns incomplete data. If coverage is missing, it fails loudly instead of silently giving you a wrong answer. This is the Xret contract: **the tool refuses to lie to you.**
 
-Market identity is provider-independent: `exchange` is a lowercase canonical
-slug (`"binance"`), `symbol` is an NFC-normalized `BASE/QUOTE` pair with one
-structural `/` and nonempty Unicode components, and `market` is `"spot"` or
-`"perpetual"`. A resolved perpetual identity always has a nonempty `settle`
-component; spot omits `settle`. For `fetch`/`sync`, an omitted perpetual
-`settle` is inferred only when provider metadata has exactly one nonempty
-settlement value and exactly one listed perpetual market matching the
-base/quote and that settlement. Local reads infer an omitted `settle` only from
-exactly one locally known dataset candidate.
+## Principles
 
-Every `BarDataset` verb takes a `start` and an optional `end` (an ISO date
-string, an offset-bearing ISO timestamp, or a timezone-aware `datetime`)
-describing a UTC-aware, half-open `[start, end)` range. Both bounds must align
-to the dataset timeframe.
+**Prove it or fail.** Data is validated on ingestion. Backtests require out-of-sample splits. Results that don't survive statistical scrutiny are labeled noise, not alpha.
 
-### Verb semantics
+**One pipeline, no glue.** Xret packages are designed to compose through shared contracts and consistent market identities. Move from data to research to execution without hand-built adapters becoming the workflow. CSV can be an output, but it should never be the integration layer.
 
-- `bars.fetch(start, end=None) -> pl.DataFrame` — provider network call
-  only; never reads or writes canonical local state. Returns completed
-  bars only. When `end` is omitted, it resolves to the end of the latest
-  completed bar at call time.
-- `bars.sync(start, end=None) -> SyncResult` — reconciles implicit `missing`
-  coverage against the provider and commits validated data. A successful
-  provider observation records each absent completed bar boundary as
-  `unavailable`; provider failures leave coverage `missing` and raise a domain
-  error. A fully covered request is a canonical data/coverage no-op but still
-  records operational ingestion-run provenance.
-- `bars.scan(start, end=None) -> pl.LazyFrame` — local-only; raises
-  `CoverageError` unless the requested range has full local coverage.
-  When `end` is omitted, it resolves to the local timeframe boundary at
-  call time (no provider finalization grace).
-- `bars.scan_partial(start, end=None) -> PartialScanResult` — local-only;
-  returns available rows plus structured `covered`/`gaps` intervals without
-  weakening strict `scan`.
+**Explicit over implicit.** Every I/O boundary is named (`fetch`, `sync`, `scan`). Every error explains what failed and why. No hidden state, no magic defaults that bite you six months later.
 
-`fetch` always uses the provider; `sync` uses it only for implicit `missing`
-intervals. `scan` and `scan_partial` never use the provider.
+**Built for one person.** No server, no cloud, no team infrastructure. Local Parquet, local SQLite index, one researcher owns the entire pipeline. If an AI agent works alongside you, it follows the same explicit workflow.
 
-### Maintenance
+## Documentation
 
-- `market_data.maintenance.validate() -> CatalogValidationResult` —
-  compares the SQLite operational index against canonical Parquet without
-  mutating either.
-- `market_data.maintenance.rebuild_catalog() -> CatalogRebuildResult` —
-  exclusively rebuilds SQLite from validated canonical Parquet metadata.
-  Parquet is never changed. Operational history that Parquet cannot prove is
-  intentionally reset; unreadable or insufficient evidence fails closed.
-
-### Config
-
-`resolve_config()` resolves the highest-precedence source: `XRET_CONFIG`
-environment variable (must name an existing TOML file) >
-`~/.xret/config.toml` (used only if present) > built-in defaults
-(`~/.xret` for `state_dir`, `<state_dir>/data` for `data_dir`). No I/O
-happens at import time; `MarketData(config=...)` bypasses resolution
-entirely when given an explicit `MarketDataConfig`.
-
-### Errors
-
-Every public domain or operational error raised by `xret.data` inherits from
-`xret.data.errors.XretDataError`: `ConfigurationError`, `InvalidRequestError`,
-`UnsupportedMarketError`, `ProviderError`, `CoverageError`, `SyncError`,
-`CatalogError`. Errors chain (`raise ... from exc`) through the underlying
-provider, SQLite, or filesystem exception where applicable.
-
-See the [documentation](docs/index.md) for guides, reference, data lifecycle,
-configuration, errors, and verified support.
+- [Getting started](docs/getting-started/index.md)
+- [Synchronization guide](docs/guides/synchronization.md)
+- [API reference](docs/reference/api.md)
+- [Data lifecycle](docs/explanation/data-lifecycle.md)
+- [Verified support](docs/quality/verified-support.md)
 
 ## Development
 
@@ -107,4 +99,4 @@ uv build --package xret-data
 
 ## License
 
-Xret is licensed under the MIT License.
+MIT
