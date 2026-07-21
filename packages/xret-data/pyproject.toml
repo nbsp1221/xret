@@ -1,6 +1,6 @@
 [project]
 name = "xret-data"
-version = "0.2.0"
+version = "0.1.0"
 description = "Trusted market data infrastructure for Xret."
 license = "MIT"
 requires-python = ">=3.12"
