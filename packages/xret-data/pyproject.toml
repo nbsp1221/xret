@@ -2,12 +2,34 @@
 name = "xret-data"
 version = "0.1.0"
 description = "Trusted market data infrastructure for Xret."
+readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
+authors = [
+    { name = "nbsp1221" },
+]
+keywords = ["quant", "market-data", "trading", "crypto", "parquet", "polars"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Typing :: Typed",
+]
 dependencies = [
     "polars",
     "ccxt>=4.4,<5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/nbsp1221/xret"
+Repository = "https://github.com/nbsp1221/xret"
+Documentation = "https://github.com/nbsp1221/xret/tree/main/docs"
+Changelog = "https://github.com/nbsp1221/xret/releases"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12"]
