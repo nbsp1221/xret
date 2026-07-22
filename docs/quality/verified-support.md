@@ -36,7 +36,7 @@ provider adapter
 Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
 ## Currently verified
-The currently listed matrix was requalified on 2026-07-19 using the built `xret-data` 0.2.0 distribution in a fresh external uv environment after the readable metadata-first storage change.
+The currently listed matrix was requalified on 2026-07-19 using the built `xret-data` 0.1.0 distribution in a fresh external uv environment after the readable metadata-first storage change.
 
 ### Binance
 
