@@ -763,6 +763,24 @@ class Catalog:
             self._replace_coverage(dataset_id, normalized)
             return normalized
 
+    def apply_coverage_batch(
+        self, key: DatasetKey, segments: Sequence[CoverageSegment]
+    ) -> tuple[CoverageSegment, ...]:
+        """Merge multiple `segments` into stored coverage in one pass.
+
+        Equivalent to calling `apply_coverage` for each segment in order,
+        but reads existing coverage once and normalizes once: O((e+k)²)
+        instead of O(k³) for k new segments against e existing ones.
+        """
+        if not segments:
+            return self.get_coverage_segments(key)
+        with self.transaction():
+            dataset_id = self.ensure_dataset(key)
+            existing = self.get_coverage_segments(key)
+            normalized = normalize_segments((*existing, *segments))
+            self._replace_coverage(dataset_id, normalized)
+            return normalized
+
     def set_coverage(self, key: DatasetKey, segments: Sequence[CoverageSegment]) -> None:
         """Replace a dataset's entire stored coverage with a normalized set."""
         with self.transaction():

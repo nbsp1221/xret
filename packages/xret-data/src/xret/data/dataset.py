@@ -371,6 +371,7 @@ class BarDataset:
                     )
 
                     with catalog.transaction():
+                        new_segments: list[CoverageSegment] = []
                         for gap, observation in observations:
                             finalizable_end = _finalizable_end(
                                 time_bar, gap.end, observation.completed_at
@@ -383,11 +384,14 @@ class BarDataset:
                             ):
                                 clipped_start = max(gap.start, month_start)
                                 clipped_end = min(finalizable_end, month_end)
-                                for segment in _bar_segments_for_range(
-                                    present, time_bar, clipped_start, clipped_end
-                                ):
-                                    catalog.apply_coverage(dataset_key, segment)
-                                    coverage_changed = True
+                                new_segments.extend(
+                                    _bar_segments_for_range(
+                                        present, time_bar, clipped_start, clipped_end
+                                    )
+                                )
+                        if new_segments:
+                            catalog.apply_coverage_batch(dataset_key, new_segments)
+                            coverage_changed = True
                         for artifact in prepared:
                             committed = artifact.committed_file
                             catalog.record_file(

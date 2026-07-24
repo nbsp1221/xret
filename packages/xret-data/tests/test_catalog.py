@@ -147,6 +147,67 @@ def test_missing_is_computed_not_persisted(catalog: Catalog) -> None:
     )
 
 
+def test_apply_coverage_batch_matches_sequential_apply_coverage(catalog: Catalog) -> None:
+    """Batch and sequential application produce identical stored coverage."""
+    segments = [
+        CoverageSegment(_dt(0), _dt(1), CoverageStatus.AVAILABLE),
+        CoverageSegment(_dt(1), _dt(2), CoverageStatus.UNAVAILABLE),
+        CoverageSegment(_dt(2), _dt(4), CoverageStatus.AVAILABLE),
+    ]
+    batch_key = _key()
+    sequential_key = _key("ETH/USDT")
+
+    catalog.apply_coverage_batch(batch_key, segments)
+    for seg in segments:
+        catalog.apply_coverage(sequential_key, seg)
+
+    assert catalog.get_coverage_segments(batch_key) == catalog.get_coverage_segments(sequential_key)
+
+
+def test_apply_coverage_batch_empty_is_noop(catalog: Catalog) -> None:
+    key = _key()
+    catalog.apply_coverage(key, CoverageSegment(_dt(0), _dt(2), CoverageStatus.AVAILABLE))
+    before = catalog.get_coverage_segments(key)
+
+    result = catalog.apply_coverage_batch(key, ())
+
+    assert result == before
+    assert catalog.get_coverage_segments(key) == before
+
+
+def test_apply_coverage_batch_merges_with_existing_coverage(catalog: Catalog) -> None:
+    key = _key()
+    catalog.apply_coverage(key, CoverageSegment(_dt(0), _dt(2), CoverageStatus.AVAILABLE))
+
+    result = catalog.apply_coverage_batch(
+        key,
+        [
+            CoverageSegment(_dt(1), _dt(3), CoverageStatus.UNAVAILABLE),
+            CoverageSegment(_dt(3), _dt(5), CoverageStatus.AVAILABLE),
+        ],
+    )
+
+    assert result == (
+        CoverageSegment(_dt(0), _dt(2), CoverageStatus.AVAILABLE),
+        CoverageSegment(_dt(2), _dt(3), CoverageStatus.UNAVAILABLE),
+        CoverageSegment(_dt(3), _dt(5), CoverageStatus.AVAILABLE),
+    )
+    assert catalog.get_coverage_segments(key) == result
+
+
+def test_apply_coverage_batch_coalesces_adjacent_same_status(catalog: Catalog) -> None:
+    result = catalog.apply_coverage_batch(
+        _key(),
+        [
+            CoverageSegment(_dt(0), _dt(1), CoverageStatus.AVAILABLE),
+            CoverageSegment(_dt(1), _dt(2), CoverageStatus.AVAILABLE),
+            CoverageSegment(_dt(2), _dt(3), CoverageStatus.AVAILABLE),
+        ],
+    )
+
+    assert result == (CoverageSegment(_dt(0), _dt(3), CoverageStatus.AVAILABLE),)
+
+
 def test_coverage_segment_rejects_missing_status(catalog: Catalog) -> None:
     with pytest.raises(CatalogError):
         CoverageSegment(_dt(0), _dt(1), CoverageStatus.MISSING)
