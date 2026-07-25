@@ -344,7 +344,7 @@ def test_prepare_month_rejects_off_timeframe_timestamp_before_publication(tmp_pa
         (pl.col("timestamp") + pl.duration(seconds=30)).alias("timestamp")
     )
 
-    with pytest.raises(InvalidRequestError, match=r"off '1m' boundaries"):
+    with pytest.raises(InvalidRequestError, match="off_timeframe_boundary"):
         parquet.prepare_month(tmp_path, DATASET_KEY, YEAR_MONTH, batch, provider=PROVIDER)
 
     directory = paths.month_dir(tmp_path, DATASET_KEY, YEAR_MONTH)
@@ -487,11 +487,11 @@ def test_off_timeframe_committed_file_is_rejected_for_canonical_and_rebuild_evid
     }
     frame.write_parquet(committed.absolute_path, metadata=metadata)
 
-    with pytest.raises(CatalogError, match=r"off '1m' boundaries"):
+    with pytest.raises(CatalogError, match="off_timeframe_boundary"):
         parquet.read_committed_file(tmp_path, committed.absolute_path)
 
     config = MarketDataConfig(state_dir=tmp_path / "state", data_dir=tmp_path)
-    with pytest.raises(CatalogError, match=r"off '1m' boundaries"):
+    with pytest.raises(CatalogError, match="off_timeframe_boundary"):
         list(discover_committed_files(config))
 
 

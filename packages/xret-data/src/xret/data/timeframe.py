@@ -102,6 +102,13 @@ class TimeBar:
         """Whether this timeframe uses true calendar (variable-length) boundaries."""
         return self.unit in _CALENDAR_UNITS
 
+    @property
+    def fixed_step_ms(self) -> int | None:
+        """Step in milliseconds for fixed-duration units; None for calendar units."""
+        if self.unit in _FIXED_UNIT_SECONDS:
+            return self.amount * _FIXED_UNIT_SECONDS[self.unit] * 1000
+        return None
+
     def floor(self, value: datetime) -> datetime:
         """The latest boundary at or before `value` (UTC)."""
         value = _ensure_utc(value)

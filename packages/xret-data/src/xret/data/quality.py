@@ -19,6 +19,7 @@ from xret.data.timeframe import TimeBar
 __all__ = [
     "QualityFinding",
     "QualityResult",
+    "count_misaligned_timestamps",
     "evaluate_canonical_ohlcv",
     "enforce_canonical_ohlcv",
     "evaluate_ohlcv_batch",
@@ -254,11 +255,42 @@ def _check_request_range(data: pl.DataFrame, request: BarRequest) -> list[Qualit
     return []
 
 
-def _check_timestamp_alignment(data: pl.DataFrame, time_bar: TimeBar) -> list[QualityFinding]:
-    misaligned = sum(
-        time_bar.floor(timestamp) != timestamp
-        for timestamp in data.get_column("timestamp").to_list()
+def count_misaligned_timestamps(timestamps: pl.Series, time_bar: TimeBar) -> int:
+    """Count timestamps not aligned to ``time_bar`` boundaries.
+
+    Fixed-duration units (``s``/``m``/``h``/``d``) use a vectorized
+    integer-modulus check.  Calendar units (``1w``/``1M``) use Polars
+    datetime-component checks (Monday midnight / 1st-of-month midnight).
+    """
+    if timestamps.is_empty():
+        return 0
+    step_ms = time_bar.fixed_step_ms
+    if step_ms is not None:
+        return int((timestamps.cast(pl.Int64) % step_ms != 0).sum())
+    if time_bar.unit == "M":
+        return int(
+            (
+                timestamps.dt.day().ne(1)
+                | timestamps.dt.hour().ne(0)
+                | timestamps.dt.minute().ne(0)
+                | timestamps.dt.second().ne(0)
+                | timestamps.dt.millisecond().ne(0)
+            ).sum()
+        )
+    # unit == "w": Monday 00:00:00.000 UTC (Polars weekday: 1 = Monday)
+    return int(
+        (
+            timestamps.dt.weekday().ne(1)
+            | timestamps.dt.hour().ne(0)
+            | timestamps.dt.minute().ne(0)
+            | timestamps.dt.second().ne(0)
+            | timestamps.dt.millisecond().ne(0)
+        ).sum()
     )
+
+
+def _check_timestamp_alignment(data: pl.DataFrame, time_bar: TimeBar) -> list[QualityFinding]:
+    misaligned = count_misaligned_timestamps(data.get_column("timestamp"), time_bar)
     if misaligned:
         return [
             _fatal(

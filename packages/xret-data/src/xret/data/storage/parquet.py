@@ -19,7 +19,6 @@ from xret.data.models import NONE_SETTLE_SENTINEL, DatasetKey, Market, YearMonth
 from xret.data.quality import enforce_canonical_ohlcv
 from xret.data.schema import IDENTITY_COLUMNS, OHLCV_COLUMNS, OHLCV_SCHEMA
 from xret.data.storage import paths
-from xret.data.timeframe import TimeBar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -260,22 +259,34 @@ def _validate_frame_identity(
         | (pl.col("timestamp").dt.month() != year_month.month)
     ).height:
         raise error_cls(f"{source}: contains rows outside {year_month}")
-    time_bar = TimeBar.parse(dataset_key.timeframe)
-    if any(
-        time_bar.floor(timestamp) != timestamp
-        for timestamp in frame.get_column("timestamp").to_list()
-    ):
-        raise error_cls(f"{source}: contains timestamps off {dataset_key.timeframe!r} boundaries")
+
+
+def _validate_storage_frame(
+    dataset_key: DatasetKey,
+    year_month: YearMonth,
+    frame: pl.DataFrame,
+    *,
+    error_cls: type[XretDataError],
+    source: str,
+) -> None:
+    """Composite storage validation: partition identity + canonical row invariants.
+
+    ``_validate_frame_identity`` checks metadata/partition consistency only;
+    ``enforce_canonical_ohlcv`` owns every row-level invariant including
+    timestamp alignment.  Callsites must use this composite so the two
+    validators are always paired.
+    """
+    _validate_frame_identity(dataset_key, year_month, frame, error_cls=error_cls, source=source)
+    enforce_canonical_ohlcv(frame, dataset_key.timeframe, error_cls=error_cls)
 
 
 def _validate_batch(dataset_key: DatasetKey, year_month: YearMonth, batch: pl.DataFrame) -> None:
     _validate_schema(batch, source="batch", error_cls=InvalidRequestError)
     if batch.height == 0:
         raise InvalidRequestError("batch must not be empty")
-    _validate_frame_identity(
+    _validate_storage_frame(
         dataset_key, year_month, batch, error_cls=InvalidRequestError, source="batch"
     )
-    enforce_canonical_ohlcv(batch, dataset_key.timeframe, error_cls=InvalidRequestError)
 
 
 def merge_frames(existing: pl.DataFrame | None, batch: pl.DataFrame) -> pl.DataFrame:
@@ -419,10 +430,9 @@ def _validate_complete_artifact(
     except Exception as exc:  # noqa: BLE001
         raise SyncError(f"failed to reopen prepared artifact {path}: {exc}") from exc
     _validate_schema(reopened, source=str(path))
-    _validate_frame_identity(
+    _validate_storage_frame(
         dataset_key, year_month, reopened, error_cls=SyncError, source=str(path)
     )
-    enforce_canonical_ohlcv(reopened, dataset_key.timeframe)
     actual_count, actual_min, actual_max = _row_bounds(reopened)
     if (actual_count, actual_min, actual_max) != (row_count, min_timestamp, max_timestamp):
         raise SyncError(f"reopen validation failed for {path}: row bounds differ")
@@ -458,10 +468,9 @@ def prepare_month(
         raise InvalidRequestError("derivative interpretation is only valid for perpetual markets")
     derivative_metadata = _derivative_metadata_for_rewrite(final_path, derivative)
     merged = merge_frames(existing, batch)
-    _validate_frame_identity(
+    _validate_storage_frame(
         dataset_key, year_month, merged, error_cls=SyncError, source="merged artifact"
     )
-    enforce_canonical_ohlcv(merged, dataset_key.timeframe)
     row_count, min_timestamp, max_timestamp = _row_bounds(merged)
     metadata = _build_metadata(
         dataset_key=dataset_key,
@@ -562,10 +571,9 @@ def read_committed_file(data_dir: Path, path: Path) -> CommittedFile:
         raise CatalogError(
             f"{path}: does not match canonical metadata-derived path {expected_path}"
         )
-    _validate_frame_identity(
+    _validate_storage_frame(
         dataset_key, year_month, frame, error_cls=CatalogError, source=str(path)
     )
-    enforce_canonical_ohlcv(frame, dataset_key.timeframe, error_cls=CatalogError)
     row_count, min_timestamp, max_timestamp = _row_bounds(frame, error_cls=CatalogError)
     expected = _build_metadata(
         dataset_key=dataset_key,
