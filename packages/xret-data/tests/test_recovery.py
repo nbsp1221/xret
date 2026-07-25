@@ -30,7 +30,12 @@ from xret.data.storage.catalog import (
     IngestionRunMetadata,
 )
 from xret.data.storage.locking import catalog_gate
-from xret.data.storage.recovery import rebuild_catalog_state, validate_catalog_state
+from xret.data.storage.recovery import (
+    _available_segments,
+    rebuild_catalog_state,
+    validate_catalog_state,
+)
+from xret.data.timeframe import TimeBar
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,3 +524,168 @@ def test_current_rebuild_rolls_back_after_later_catalog_write_failure(
         assert catalog.list_files() == files_before
         assert catalog.list_ingestion_run_ids(first.dataset_key) == ingestion_before
         assert catalog.get_coverage_segments(first.dataset_key) == coverage_before
+
+
+def _key_1m() -> DatasetKey:
+    return DatasetKey(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market=Market.SPOT,
+        settle=NONE_SETTLE_SENTINEL,
+        timeframe="1m",
+    )
+
+
+def _file_with_timestamps(
+    tmp_path: Path,
+    timestamps: list[datetime],
+    timeframe: str = "1m",
+) -> _File:
+    """Create a committed Parquet file containing the given timestamps."""
+    key = DatasetKey(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market=Market.SPOT,
+        settle=NONE_SETTLE_SENTINEL,
+        timeframe=timeframe,
+    )
+    n = len(timestamps)
+    year_month = YearMonth(timestamps[0].year, timestamps[0].month)
+    frame = pl.DataFrame(
+        {
+            "exchange": ["binance"] * n,
+            "symbol": ["BTC/USDT"] * n,
+            "market": ["spot"] * n,
+            "settle": [None] * n,
+            "timeframe": [timeframe] * n,
+            "timestamp": timestamps,
+            "open": [1.0] * n,
+            "high": [2.0] * n,
+            "low": [0.5] * n,
+            "close": [1.5] * n,
+            "volume": [10.0] * n,
+        },
+        schema=OHLCV_SCHEMA,
+    )
+    committed = parquet.publish_prepared_file(
+        parquet.prepare_month(
+            tmp_path / "data",
+            key,
+            year_month,
+            frame,
+            provider=parquet.ProviderIdentity("binance", "4.5.66", "BTCUSDT", "BTC/USDT"),
+        )
+    )
+    return _File(
+        committed.dataset_key,
+        committed.year_month,
+        committed.relative_path,
+        committed.absolute_path,
+        committed.row_count,
+        committed.min_timestamp,
+        committed.max_timestamp,
+        committed.physical_hash,
+    )
+
+
+def _contiguous_timestamps(n: int, timeframe: str, start: datetime) -> list[datetime]:
+    bar = TimeBar.parse(timeframe)
+    result = []
+    cursor = start
+    for _ in range(n):
+        result.append(cursor)
+        cursor = bar.next_boundary(cursor)
+    return result
+
+
+def test_available_segments_coalesces_contiguous_bars(tmp_path: Path) -> None:
+    """Contiguous 1m bars produce one coverage segment, not one per bar."""
+    bar = TimeBar.parse("1m")
+    timestamps = _contiguous_timestamps(10, "1m", datetime(2024, 1, 1, tzinfo=UTC))
+    file = _file_with_timestamps(tmp_path, timestamps)
+
+    segments = _available_segments(tmp_path / "data", file)
+
+    assert len(segments) == 1
+    assert segments[0].start == timestamps[0]
+    assert segments[0].end == bar.next_boundary(timestamps[-1])
+    assert segments[0].status == CoverageStatus.AVAILABLE
+
+
+def test_available_segments_splits_on_gap(tmp_path: Path) -> None:
+    """A gap in the middle produces two separate coverage segments."""
+    bar = TimeBar.parse("1m")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    first_run = _contiguous_timestamps(5, "1m", base)
+    # skip 2 minutes (00:05, 00:06 missing)
+    second_start = bar.next_boundary(bar.next_boundary(first_run[-1]))
+    second_start = bar.next_boundary(second_start)
+    second_run = _contiguous_timestamps(5, "1m", second_start)
+    timestamps = first_run + second_run
+    file = _file_with_timestamps(tmp_path, timestamps)
+
+    segments = _available_segments(tmp_path / "data", file)
+
+    assert len(segments) == 2
+    assert segments[0] == CoverageSegment(
+        first_run[0], bar.next_boundary(first_run[-1]), CoverageStatus.AVAILABLE
+    )
+    assert segments[1] == CoverageSegment(
+        second_run[0], bar.next_boundary(second_run[-1]), CoverageStatus.AVAILABLE
+    )
+
+
+def test_available_segments_multiple_gaps(tmp_path: Path) -> None:
+    """Three contiguous runs separated by gaps produce three segments."""
+    bar = TimeBar.parse("1m")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    runs = []
+    cursor = base
+    for _ in range(3):
+        run = _contiguous_timestamps(3, "1m", cursor)
+        runs.append(run)
+        # skip 2 bars after each run
+        cursor = bar.next_boundary(bar.next_boundary(bar.next_boundary(run[-1])))
+    timestamps = [ts for run in runs for ts in run]
+    file = _file_with_timestamps(tmp_path, timestamps)
+
+    segments = _available_segments(tmp_path / "data", file)
+
+    assert len(segments) == 3
+    for seg, run in zip(segments, runs, strict=True):
+        assert seg.start == run[0]
+        assert seg.end == bar.next_boundary(run[-1])
+        assert seg.status == CoverageStatus.AVAILABLE
+
+
+def test_available_segments_single_bar(tmp_path: Path) -> None:
+    """A single bar produces exactly one segment."""
+    bar = TimeBar.parse("1m")
+    timestamps = [datetime(2024, 1, 1, tzinfo=UTC)]
+    file = _file_with_timestamps(tmp_path, timestamps)
+
+    segments = _available_segments(tmp_path / "data", file)
+
+    assert len(segments) == 1
+    assert segments[0].start == timestamps[0]
+    assert segments[0].end == bar.next_boundary(timestamps[0])
+    assert segments[0].status == CoverageStatus.AVAILABLE
+
+
+def test_rebuild_coverage_uses_coalesced_segments(tmp_path: Path) -> None:
+    """Full rebuild produces coalesced coverage, not per-bar segments."""
+    config = _config(tmp_path)
+    db_path = config.state_dir / "catalog.sqlite3"
+    timestamps = _contiguous_timestamps(10, "1m", datetime(2024, 1, 1, tzinfo=UTC))
+    file = _file_with_timestamps(tmp_path, timestamps)
+    _record(db_path, file)
+
+    result = rebuild_catalog_state(db_path, config, file_source=lambda: [file], gate_factory=_gate)
+
+    assert result.recovered_files == 1
+    bar = TimeBar.parse("1m")
+    with Catalog.open(db_path) as catalog:
+        coverage = catalog.get_coverage_segments(file.dataset_key)
+    assert coverage == (
+        CoverageSegment(timestamps[0], bar.next_boundary(timestamps[-1]), CoverageStatus.AVAILABLE),
+    )

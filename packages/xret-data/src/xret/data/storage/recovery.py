@@ -75,13 +75,6 @@ def default_gate_factory(state_dir: Path) -> AbstractContextManager[object]:
     return catalog_gate(state_dir)
 
 
-def _coverage_end(timeframe: str, maximum: datetime) -> datetime:
-    try:
-        return TimeBar.parse(timeframe).next_boundary(maximum)
-    except Exception as exc:
-        raise CatalogError(f"cannot derive candle boundary from timeframe: {timeframe!r}") from exc
-
-
 def _files(data_dir: Path, source: FileSource) -> list[CommittedFileLike]:
     try:
         supplied = list(source())
@@ -236,8 +229,15 @@ def _available_segments(data_dir: Path, file: CommittedFileLike) -> tuple[Covera
         raise CatalogError(
             f"canonical file row count changed while deriving coverage: {file.relative_path}"
         )
+    try:
+        time_bar = TimeBar.parse(file.dataset_key.timeframe)
+    except Exception as exc:
+        raise CatalogError(
+            f"cannot derive candle boundary from timeframe: {file.dataset_key.timeframe!r}"
+        ) from exc
     segments: list[CoverageSegment] = []
     previous: datetime | None = None
+    run_start: datetime | None = None
     for timestamp in timestamps:
         if not isinstance(timestamp, datetime):
             raise CatalogError(f"canonical file has invalid timestamp: {file.relative_path}")
@@ -245,14 +245,19 @@ def _available_segments(data_dir: Path, file: CommittedFileLike) -> tuple[Covera
             raise CatalogError(
                 f"canonical file timestamps are not strictly increasing: {file.relative_path}"
             )
-        segments.append(
-            CoverageSegment(
-                timestamp,
-                _coverage_end(file.dataset_key.timeframe, timestamp),
-                CoverageStatus.AVAILABLE,
-            )
-        )
+        if previous is None:
+            run_start = timestamp
+        else:
+            expected_end = time_bar.next_boundary(previous)
+            if timestamp != expected_end:
+                assert run_start is not None
+                segments.append(CoverageSegment(run_start, expected_end, CoverageStatus.AVAILABLE))
+                run_start = timestamp
         previous = timestamp
+    if run_start is not None and previous is not None:
+        segments.append(
+            CoverageSegment(run_start, time_bar.next_boundary(previous), CoverageStatus.AVAILABLE)
+        )
     return tuple(segments)
 
 
