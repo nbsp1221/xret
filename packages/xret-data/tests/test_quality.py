@@ -8,8 +8,14 @@ import polars as pl
 import pytest
 from xret.data.errors import ProviderError, SyncError
 from xret.data.models import BarRequest, MarketIdentity
-from xret.data.quality import enforce_ohlcv_batch, evaluate_ohlcv_batch
+from xret.data.quality import (
+    _count_timeframe_gaps_python,
+    count_timeframe_gaps,
+    enforce_ohlcv_batch,
+    evaluate_ohlcv_batch,
+)
 from xret.data.schema import OHLCV_SCHEMA
+from xret.data.timeframe import TimeBar
 
 IDENTITY = MarketIdentity(exchange="fakeex", symbol="BTC/USDT", market="spot")
 TIMEFRAME = "1m"
@@ -375,3 +381,203 @@ def test_enforce_does_not_raise_for_warnings_only() -> None:
     result = enforce_ohlcv_batch(data, request)
     assert result.is_valid
     assert result.warnings
+
+
+# --------------------------------------------------------------------------
+# count_timeframe_gaps vectorization (M-B)
+# --------------------------------------------------------------------------
+
+
+def _gap_ts(*minutes: int) -> pl.Series:
+    """Timestamps as a Polars Series for gap testing."""
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    return pl.Series(
+        "timestamp",
+        [base + timedelta(minutes=m) for m in minutes],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+
+
+def test_count_timeframe_gaps_contiguous() -> None:
+    ts = _gap_ts(0, 1, 2, 3, 4)
+    assert count_timeframe_gaps(ts, TimeBar.parse("1m")) == (0, 0)
+
+
+def test_count_timeframe_gaps_single_gap() -> None:
+    # 0,1 then jump to 5: missing 2,3,4 → 3 candles
+    ts = _gap_ts(0, 1, 5)
+    assert count_timeframe_gaps(ts, TimeBar.parse("1m")) == (1, 3)
+
+
+def test_count_timeframe_gaps_multiple_gaps() -> None:
+    # 0,1 gap 3,4 gap 8 → missing 2 (1 candle) + 5,6,7 (3 candles)
+    ts = _gap_ts(0, 1, 3, 4, 8)
+    assert count_timeframe_gaps(ts, TimeBar.parse("1m")) == (2, 4)
+
+
+def test_count_timeframe_gaps_fixed_units() -> None:
+    bar_1h = TimeBar.parse("1h")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    # 3 contiguous hours then 1 gap (2 missing)
+    ts = pl.Series(
+        "timestamp",
+        [base + timedelta(hours=h) for h in (0, 1, 2, 5)],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts, bar_1h) == (1, 2)
+
+    bar_4h = TimeBar.parse("4h")
+    ts4 = pl.Series(
+        "timestamp",
+        [base + timedelta(hours=h) for h in (0, 4, 12)],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts4, bar_4h) == (1, 1)  # missing hour-8
+
+
+def test_count_timeframe_gaps_weekly() -> None:
+    bar = TimeBar.parse("1w")
+    # Monday 2024-01-01, Monday 2024-01-08, Monday 2024-01-22 (skip 15th)
+    ts = pl.Series(
+        "timestamp",
+        [
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 8, tzinfo=UTC),
+            datetime(2024, 1, 22, tzinfo=UTC),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts, bar) == (1, 1)
+
+
+def test_count_timeframe_gaps_monthly() -> None:
+    bar = TimeBar.parse("1M")
+    # Jan, Feb, Mar contiguous → no gap
+    ts_ok = pl.Series(
+        "timestamp",
+        [
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 2, 1, tzinfo=UTC),
+            datetime(2024, 3, 1, tzinfo=UTC),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_ok, bar) == (0, 0)
+
+    # Jan, Mar → Feb missing
+    ts_gap = pl.Series(
+        "timestamp",
+        [
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 3, 1, tzinfo=UTC),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_gap, bar) == (1, 1)
+
+    # Dec → Jan year rollover
+    ts_rollover = pl.Series(
+        "timestamp",
+        [
+            datetime(2024, 12, 1, tzinfo=UTC),
+            datetime(2025, 1, 1, tzinfo=UTC),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_rollover, bar) == (0, 0)
+
+    # Leap year Feb
+    ts_leap = pl.Series(
+        "timestamp",
+        [
+            datetime(2024, 2, 1, tzinfo=UTC),
+            datetime(2024, 3, 1, tzinfo=UTC),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_leap, bar) == (0, 0)
+
+
+def test_count_timeframe_gaps_empty_and_single() -> None:
+    bar = TimeBar.parse("1m")
+    empty = pl.Series("timestamp", [], dtype=pl.Datetime("ms", "UTC"))
+    assert count_timeframe_gaps(empty, bar) == (0, 0)
+
+    single = pl.Series(
+        "timestamp", [datetime(2024, 1, 1, tzinfo=UTC)], dtype=pl.Datetime("ms", "UTC")
+    )
+    assert count_timeframe_gaps(single, bar) == (0, 0)
+
+
+def test_count_timeframe_gaps_boundary_values() -> None:
+    bar = TimeBar.parse("1m")
+    step_ms = 60_000
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    base_ms = int(base.timestamp() * 1000)
+
+    # diff == step → no gap
+    ts_exact = pl.Series(
+        "timestamp", [base, base + timedelta(minutes=1)], dtype=pl.Datetime("ms", "UTC")
+    )
+    assert count_timeframe_gaps(ts_exact, bar) == (0, 0)
+
+    # diff == step + 1ms → 1 gap, 1 missing
+    ts_plus1 = pl.Series(
+        "timestamp",
+        [base, datetime.fromtimestamp((base_ms + step_ms + 1) / 1000, tz=UTC)],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_plus1, bar) == (1, 1)
+
+    # diff == 2 * step → 1 gap, 1 missing
+    ts_2x = pl.Series(
+        "timestamp", [base, base + timedelta(minutes=2)], dtype=pl.Datetime("ms", "UTC")
+    )
+    assert count_timeframe_gaps(ts_2x, bar) == (1, 1)
+
+    # diff == 2 * step + 1ms → 1 gap, 2 missing
+    ts_2x_plus1 = pl.Series(
+        "timestamp",
+        [base, datetime.fromtimestamp((base_ms + 2 * step_ms + 1) / 1000, tz=UTC)],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    assert count_timeframe_gaps(ts_2x_plus1, bar) == (1, 2)
+
+
+def test_count_timeframe_gaps_matches_python_off_boundary() -> None:
+    """Off-boundary timestamps fall back to Python loop and match."""
+
+    bar = TimeBar.parse("1m")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    # Off-boundary: 30 seconds offset
+    ts = pl.Series(
+        "timestamp",
+        [
+            base + timedelta(seconds=30),
+            base + timedelta(seconds=90),
+            base + timedelta(seconds=210),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    result = count_timeframe_gaps(ts, bar)
+    expected = _count_timeframe_gaps_python(ts, bar)
+    assert result == expected
+
+
+def test_count_timeframe_gaps_matches_python_unordered() -> None:
+    """Unordered timestamps fall back to Python loop and match."""
+
+    bar = TimeBar.parse("1m")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    ts = pl.Series(
+        "timestamp",
+        [
+            base + timedelta(minutes=2),
+            base + timedelta(minutes=0),
+            base + timedelta(minutes=5),
+        ],
+        dtype=pl.Datetime("ms", "UTC"),
+    )
+    result = count_timeframe_gaps(ts, bar)
+    expected = _count_timeframe_gaps_python(ts, bar)
+    assert result == expected

@@ -321,19 +321,15 @@ _FATAL_CHECKS = (
 # --------------------------------------------------------------------------
 
 
-def _check_timeframe_gaps(data: pl.DataFrame, time_bar: TimeBar) -> list[QualityFinding]:
-    """Warn on candles missing between the calendar-aware expected boundaries.
+_WEEK_MS = 7 * 24 * 60 * 60 * 1000
 
-    Uses `TimeBar.next_boundary` rather than a fixed `timedelta` diff, so
-    calendar units (`w`/`M`) are counted correctly across variable-length
-    weeks/months and year rollovers.
-    """
-    if data.height < 2:
-        return []
-    timestamps = data["timestamp"].to_list()
+
+def _count_timeframe_gaps_python(timestamps: pl.Series, time_bar: TimeBar) -> tuple[int, int]:
+    """Count gaps using the original Python loop.  Correct for arbitrary input."""
+    ts_list = timestamps.to_list()
     gap_count = 0
     missing_candles = 0
-    for previous, current in zip(timestamps, timestamps[1:], strict=False):
+    for previous, current in zip(ts_list, ts_list[1:], strict=False):
         expected = time_bar.next_boundary(previous)
         if current <= expected:
             continue
@@ -342,6 +338,53 @@ def _check_timeframe_gaps(data: pl.DataFrame, time_bar: TimeBar) -> list[Quality
         while cursor < current:
             missing_candles += 1
             cursor = time_bar.next_boundary(cursor)
+    return gap_count, missing_candles
+
+
+def _count_timeframe_gaps_vectorized(timestamps: pl.Series, time_bar: TimeBar) -> tuple[int, int]:
+    """Vectorized gap count.  Only correct for aligned, strictly ordered input."""
+    step_ms = time_bar.fixed_step_ms
+    if step_ms is None:
+        if time_bar.unit == "w":
+            step_ms = _WEEK_MS
+        else:
+            # 1M: month-index arithmetic (aligned + ordered precondition)
+            month_index = timestamps.dt.year() * 12 + timestamps.dt.month()
+            diffs = month_index.diff().drop_nulls()
+            gap_mask = diffs > 1
+            gap_count = int(gap_mask.sum())
+            if gap_count == 0:
+                return 0, 0
+            return gap_count, int((diffs - 1).filter(gap_mask).sum())
+
+    epoch_ms = timestamps.cast(pl.Int64)
+    diffs = epoch_ms.diff().drop_nulls()
+    gap_mask = diffs > step_ms
+    gap_count = int(gap_mask.sum())
+    if gap_count == 0:
+        return 0, 0
+    return gap_count, int(((diffs - 1) // step_ms).filter(gap_mask).sum())
+
+
+def count_timeframe_gaps(timestamps: pl.Series, time_bar: TimeBar) -> tuple[int, int]:
+    """Return ``(gap_count, missing_candles)`` for a timestamp series.
+
+    Aligned, strictly ordered input uses a vectorized Polars path.
+    Off-boundary or unordered input falls back to the Python loop so
+    that finding semantics are identical to the original implementation.
+    """
+    if timestamps.len() < 2:
+        return 0, 0
+    if count_misaligned_timestamps(timestamps, time_bar) or not timestamps.is_sorted():
+        return _count_timeframe_gaps_python(timestamps, time_bar)
+    return _count_timeframe_gaps_vectorized(timestamps, time_bar)
+
+
+def _check_timeframe_gaps(data: pl.DataFrame, time_bar: TimeBar) -> list[QualityFinding]:
+    """Warn on candles missing between the calendar-aware expected boundaries."""
+    if data.height < 2:
+        return []
+    gap_count, missing_candles = count_timeframe_gaps(data.get_column("timestamp"), time_bar)
     if gap_count:
         return [
             _warning(
