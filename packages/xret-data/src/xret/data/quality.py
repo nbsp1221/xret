@@ -168,26 +168,37 @@ def _check_ohlc_invariants(data: pl.DataFrame) -> list[QualityFinding]:
 
 
 def _check_finite_positive_prices(data: pl.DataFrame) -> list[QualityFinding]:
-    findings: list[QualityFinding] = []
+    expressions: list[pl.Expr] = []
+    checks: list[tuple[str, str, str]] = []
     for column in OHLC_COLUMNS:
-        non_finite = data.filter(~pl.col(column).is_finite())
-        if non_finite.height:
-            findings.append(
-                _fatal(
-                    "price.non_finite",
-                    f"column {column!r} has {non_finite.height} non-finite value(s)",
-                    row_count=non_finite.height,
-                )
+        non_finite_alias = f"{column}_non_finite"
+        non_positive_alias = f"{column}_non_positive"
+        expressions.extend(
+            [
+                (~pl.col(column).is_finite()).sum().alias(non_finite_alias),
+                (pl.col(column) <= 0).sum().alias(non_positive_alias),
+            ]
+        )
+        checks.extend(
+            [
+                ("price.non_finite", column, non_finite_alias),
+                ("price.non_positive", column, non_positive_alias),
+            ]
+        )
+    counts = data.select(expressions).row(0, named=True)
+    findings: list[QualityFinding] = []
+    for code, column, alias in checks:
+        count = int(counts[alias])
+        if not count:
+            continue
+        description = "non-finite" if code == "price.non_finite" else "non-positive"
+        findings.append(
+            _fatal(
+                code,
+                f"column {column!r} has {count} {description} value(s)",
+                row_count=count,
             )
-        non_positive = data.filter(pl.col(column) <= 0)
-        if non_positive.height:
-            findings.append(
-                _fatal(
-                    "price.non_positive",
-                    f"column {column!r} has {non_positive.height} non-positive value(s)",
-                    row_count=non_positive.height,
-                )
-            )
+        )
     return findings
 
 

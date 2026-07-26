@@ -581,3 +581,66 @@ def test_count_timeframe_gaps_matches_python_unordered() -> None:
     result = count_timeframe_gaps(ts, bar)
     expected = _count_timeframe_gaps_python(ts, bar)
     assert result == expected
+
+
+# --------------------------------------------------------------------------
+# _check_finite_positive_prices vectorization (M-5)
+# --------------------------------------------------------------------------
+
+
+def test_finite_positive_all_clean() -> None:
+    timestamps = _ts(0, 1, 2)
+    data = _frame(timestamps)
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    assert not any(f.code.startswith("price.") for f in result.fatal)
+
+
+def test_finite_positive_empty_frame() -> None:
+    data = _frame([])
+    request = _request(_ts(0)[0], _ts(1)[0])
+    result = evaluate_ohlcv_batch(data, request)
+    assert not any(f.code.startswith("price.") for f in result.fatal)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_codes"),
+    [
+        (float("nan"), ["price.non_finite"]),
+        (float("inf"), ["price.non_finite"]),
+        (float("-inf"), ["price.non_finite", "price.non_positive"]),
+        (-1.0, ["price.non_positive"]),
+        (0.0, ["price.non_positive"]),
+    ],
+)
+def test_finite_positive_price_classification(value: float, expected_codes: list[str]) -> None:
+    timestamps = _ts(0)
+    data = _frame(timestamps, opens=[value])
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    open_findings = [f for f in result.fatal if "'open'" in f.message]
+    assert [f.code for f in open_findings] == expected_codes
+
+
+def test_finite_positive_multiple_columns_order() -> None:
+    timestamps = _ts(0)
+    data = _frame(
+        timestamps,
+        opens=[float("nan")],
+        highs=[float("-inf")],
+        lows=[-1.0],
+        closes=[0.0],
+    )
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    price_findings = [f for f in result.fatal if f.code.startswith("price.")]
+    codes_and_columns = [(f.code, f.message.split("'")[1]) for f in price_findings]
+    assert codes_and_columns == [
+        ("price.non_finite", "open"),
+        ("price.non_finite", "high"),
+        ("price.non_positive", "high"),
+        ("price.non_positive", "low"),
+        ("price.non_positive", "close"),
+    ]
+    for f in price_findings:
+        assert f.row_count == 1
