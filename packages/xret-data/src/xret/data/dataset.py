@@ -178,6 +178,32 @@ def _validate_aligned_range(time_bar: TimeBar, start: datetime, end: datetime) -
         )
 
 
+def _validate_observation_evidence(
+    observation: provider._Observation,
+    requested: CoverageInterval,
+    time_bar: TimeBar,
+) -> None:
+    """Require exact contiguous evidence before any canonical publication."""
+    expected_start = requested.start
+    for window in observation.observed:
+        if window.start != expected_start or window.end > requested.end:
+            raise SyncError(
+                "incomplete provider observation: observed windows do not "
+                f"contiguously cover [{requested.start.isoformat()}, "
+                f"{requested.end.isoformat()})"
+            )
+        if time_bar.floor(window.start) != window.start or time_bar.floor(window.end) != window.end:
+            raise SyncError(
+                f"invalid provider observation: window boundaries are not aligned to {time_bar}"
+            )
+        expected_start = window.end
+    if expected_start != requested.end:
+        raise SyncError(
+            "incomplete provider observation: observed windows end at "
+            f"{expected_start.isoformat()}, expected {requested.end.isoformat()}"
+        )
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BarDataset:
     """One bound `MarketIdentity` and timeframe.
@@ -256,9 +282,10 @@ class BarDataset:
         local coverage or `DatasetKey` is derived, so an omitted perpetual
         `settle` never leaks a storage-layer sentinel error.
 
-        Reads local coverage, fetches only missing/gap intervals, validates
-        each fetched batch, publishes monthly Parquet partitions, and records
-        their catalog state under the per-dataset lock.
+        Reads local coverage, fetches only missing/gap intervals through
+        qualified exhaustive provider windows, validates each fetched batch
+        and its observation evidence, publishes monthly Parquet partitions,
+        and records their catalog state under the per-dataset lock.
         A fully covered request is an observable no-op: `changed=False`,
         `fetched_rows=0`, `written_partitions=0`. After Parquet publication,
         a catalog failure raises `SyncError` rather than returning a partial
@@ -267,8 +294,8 @@ class BarDataset:
 
         Raises:
             UnsupportedMarketError: an unlisted symbol, an unsupported
-                timeframe, or ambiguous/absent perpetual settlement
-                inference.
+                timeframe, an unqualified exhaustive pagination contract,
+                or ambiguous/absent perpetual settlement inference.
             ProviderError: the provider call failed.
             SyncError: a fetched batch failed fatal data-quality
                 validation (P-1), the dataset lock timed out, or catalog
@@ -323,6 +350,7 @@ class BarDataset:
                     observation = provider._observe_bars(
                         resolved_identity, self.timeframe, gap.start, gap.end
                     )
+                    _validate_observation_evidence(observation, gap, time_bar)
                     if observation.frame.height:
                         result = quality.enforce_ohlcv_batch(
                             observation.frame,
@@ -390,23 +418,24 @@ class BarDataset:
 
                     with catalog.transaction():
                         new_segments: list[CoverageSegment] = []
-                        for gap, observation in observations:
-                            finalizable_end = _finalizable_end(
-                                time_bar, gap.end, observation.completed_at
-                            )
-                            if finalizable_end <= gap.start:
-                                continue
+                        for _gap, observation in observations:
                             present = set(observation.frame.get_column("timestamp").to_list())
-                            for _month, month_start, month_end in paths.iter_month_slices(
-                                gap.start, finalizable_end
-                            ):
-                                clipped_start = max(gap.start, month_start)
-                                clipped_end = min(finalizable_end, month_end)
-                                new_segments.extend(
-                                    _bar_segments_for_range(
-                                        present, time_bar, clipped_start, clipped_end
-                                    )
+                            for window in observation.observed:
+                                finalizable_end = _finalizable_end(
+                                    time_bar, window.end, observation.completed_at
                                 )
+                                if finalizable_end <= window.start:
+                                    continue
+                                for _month, month_start, month_end in paths.iter_month_slices(
+                                    window.start, finalizable_end
+                                ):
+                                    clipped_start = max(window.start, month_start)
+                                    clipped_end = min(finalizable_end, month_end)
+                                    new_segments.extend(
+                                        _bar_segments_for_range(
+                                            present, time_bar, clipped_start, clipped_end
+                                        )
+                                    )
                         if new_segments:
                             catalog.apply_coverage_batch(dataset_key, new_segments)
                             coverage_changed = True

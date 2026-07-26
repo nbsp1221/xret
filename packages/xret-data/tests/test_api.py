@@ -33,6 +33,8 @@ from xret.data.errors import (
 )
 from xret.data.market_data import MarketData
 from xret.data.models import CoverageStatus, DatasetKey
+from xret.data.provider_pagination import ObservedWindow
+from xret.data.schema import OHLCV_SCHEMA
 from xret.data.storage import catalog as catalog_storage
 from xret.data.storage.catalog import (
     CATALOG_FILE_NAME,
@@ -71,10 +73,20 @@ class FakeExchange:
         return self.markets
 
     def fetch_ohlcv(
-        self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+        self,
+        symbol: str,
+        timeframe: str,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict | None = None,
     ) -> list[list[float]]:
         self.fetch_calls.append((symbol, timeframe, since, limit))
-        rows = [row for row in self._candles if row[0] >= (since or 0)]
+        until = params.get("until") if params is not None else None
+        rows = [
+            row
+            for row in self._candles
+            if row[0] >= (since or 0) and (until is None or row[0] < until)
+        ]
         return rows[: (limit or len(rows))]
 
 
@@ -228,6 +240,140 @@ def test_successful_empty_sync_records_unavailable_and_terminalizes_run(
     assert result.written_partitions == 0
 
 
+def test_sync_traverses_an_empty_bounded_window_before_later_data(tmp_path: Path) -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = start + timedelta(hours=201)
+    exchange = FakeExchange(
+        client_id="okx",
+        candles=[_row(0), _row(200)],
+    )
+    provider._register_exchange_factory("okx", lambda: exchange)
+    provider._set_clock_override(lambda: end + timedelta(hours=10))
+    dataset._set_clock_override(lambda: end + timedelta(hours=10))
+    config = _configure(tmp_path)
+    bars = MarketData(config=config).bars(
+        exchange="okx", symbol="BTC/USDT", market="spot", timeframe="1h"
+    )
+
+    first = bars.sync(start, end)
+    partial = bars.scan_partial(start, end)
+    calls_after_first = len(exchange.fetch_calls)
+    second = bars.sync(start, end)
+
+    assert first.fetched_rows == 2
+    assert partial.data.collect()["timestamp"].to_list() == [
+        start,
+        start + timedelta(hours=200),
+    ]
+    assert {gap.status for gap in partial.gaps} == {CoverageStatus.UNAVAILABLE}
+    assert calls_after_first == 3
+    assert not second.changed
+    assert second.fetched_rows == 0
+    assert len(exchange.fetch_calls) == calls_after_first
+
+
+def test_sync_rejects_incomplete_provider_observation_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _configure(tmp_path)
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+    frame = pl.DataFrame(
+        {
+            "exchange": ["binance"],
+            "symbol": ["BTC/USDT"],
+            "market": ["spot"],
+            "settle": [None],
+            "timeframe": ["1h"],
+            "timestamp": [_now(0)],
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.5],
+            "volume": [10.0],
+        },
+        schema=OHLCV_SCHEMA,
+    )
+    observation = provider._Observation(
+        frame=frame,
+        observed=(ObservedWindow(_now(0), _now(1)),),
+        provider=provider.ProviderIdentity(
+            name="binance",
+            ccxt_version="4.5.0",
+            market_id="BTCUSDT",
+            native_symbol="BTC/USDT",
+        ),
+        derivative=None,
+        completed_at=_now(10),
+    )
+    monkeypatch.setattr(provider, "_observe_bars", lambda *_args: observation)
+
+    with pytest.raises(SyncError, match="incomplete provider observation"):
+        bars.sync(_now(0), _now(3))
+
+    partial = bars.scan_partial(_now(0), _now(3))
+    assert partial.data.collect().height == 0
+    assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
+        (_now(0), _now(3), CoverageStatus.MISSING)
+    }
+    assert not list(config.data_dir.rglob("*.parquet"))
+
+
+def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> None:
+    config = _configure(tmp_path)
+    exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
+    provider._register_exchange_factory("kraken", lambda: exchange)
+    bars = MarketData(config=config).bars(
+        exchange="kraken", symbol="BTC/USDT", market="spot", timeframe="1h"
+    )
+
+    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
+        bars.sync(_now(0), _now(3))
+
+    partial = bars.scan_partial(_now(0), _now(3))
+    assert partial.data.collect().height == 0
+    assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
+        (_now(0), _now(3), CoverageStatus.MISSING)
+    }
+    assert not list(config.data_dir.rglob("*.parquet"))
+
+
+def test_middle_page_failure_publishes_no_partial_observation(tmp_path: Path) -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+    end = start + timedelta(hours=201)
+
+    class FailingMiddleWindowExchange(FakeExchange):
+        def fetch_ohlcv(
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
+        ) -> list[list[float]]:
+            if since == int((start + timedelta(hours=100)).timestamp() * 1000):
+                raise RuntimeError("middle page failed")
+            return super().fetch_ohlcv(symbol, timeframe, since, limit, params)
+
+    config = _configure(tmp_path)
+    exchange = FailingMiddleWindowExchange(client_id="okx", candles=[_row(0), _row(200)])
+    provider._register_exchange_factory("okx", lambda: exchange)
+    bars = MarketData(config=config).bars(
+        exchange="okx", symbol="BTC/USDT", market="spot", timeframe="1h"
+    )
+
+    with pytest.raises(ProviderError, match="middle page failed"):
+        bars.sync(start, end)
+
+    partial = bars.scan_partial(start, end)
+    assert partial.data.collect().height == 0
+    assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
+        (start, end, CoverageStatus.MISSING)
+    }
+    assert not list(config.data_dir.rglob("*.parquet"))
+
+
 def test_nonfatal_quality_warning_is_run_linked_and_rebuild_resets_it(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3), skip=frozenset({1})))
@@ -317,7 +463,12 @@ def test_distinct_dataset_syncs_overlap_provider_work_and_preserve_catalog_coher
             self.release_fetches = threading.Event()
 
         def fetch_ohlcv(
-            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
         ) -> list[list[float]]:
             with self._started_lock:
                 self._started_symbols.add(symbol)
@@ -325,7 +476,7 @@ def test_distinct_dataset_syncs_overlap_provider_work_and_preserve_catalog_coher
                     self.distinct_fetches_started.set()
             if not self.release_fetches.wait(timeout=5):
                 raise RuntimeError("test did not release blocked provider work")
-            return super().fetch_ohlcv(symbol, timeframe, since, limit)
+            return super().fetch_ohlcv(symbol, timeframe, since, limit, params)
 
     config = _configure(tmp_path)
     exchange = BlockingExchange()
@@ -372,7 +523,12 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
             self.second_fetch_started_before_release = threading.Event()
 
         def fetch_ohlcv(
-            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
         ) -> list[list[float]]:
             with self._fetch_lock:
                 self._fetch_count += 1
@@ -383,7 +539,7 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
                     self.second_fetch_started_before_release.set()
             if fetch_count == 1 and not self.release_first_fetch.wait(timeout=5):
                 raise RuntimeError("test did not release the first provider fetch")
-            return super().fetch_ohlcv(symbol, timeframe, since, limit)
+            return super().fetch_ohlcv(symbol, timeframe, since, limit, params)
 
     config = _configure(tmp_path)
     exchange = BlockingExchange()
@@ -508,7 +664,12 @@ def test_malformed_provider_observation_leaves_coverage_missing_and_unpublished(
 def test_provider_exception_leaves_coverage_missing_and_unpublished(tmp_path: Path) -> None:
     class FailingExchange(FakeExchange):
         def fetch_ohlcv(
-            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
         ) -> list[list[float]]:
             raise RuntimeError("injected provider failure")
 
@@ -547,7 +708,12 @@ def _run_status(config: MarketDataConfig, run_id: str) -> tuple[str, str | None]
 def test_sync_records_failed_run_on_provider_error(tmp_path: Path) -> None:
     class FailingExchange(FakeExchange):
         def fetch_ohlcv(
-            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
         ) -> list[list[float]]:
             raise RuntimeError("provider down")
 
@@ -626,7 +792,12 @@ def test_sync_failed_run_note_when_catalog_unavailable(
 ) -> None:
     class FailingExchange(FakeExchange):
         def fetch_ohlcv(
-            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
         ) -> list[list[float]]:
             raise RuntimeError("provider down")
 

@@ -13,9 +13,9 @@ Responsibilities:
 - lazily create (or accept a test-only injected) CCXT exchange instance;
 - verify `fetchOHLCV`, market listing and timeframe capability before ever
   attempting a fetch;
-- paginate monotonically over the requested half-open `[start, end)` range
-  using `TimeBar` boundaries (calendar-correct for `w`/`M`), refusing to
-  loop forever when the exchange stops making progress;
+- paginate through qualified, bounded half-open provider windows using
+  `TimeBar` boundaries (calendar-correct for `w`/`M`), retaining the exact
+  windows proved by successful calls independently from returned rows;
 - retry only transient network/rate-limit failures, with a bounded number
   of attempts and exponential backoff;
 - drop candles that are not yet final (`bar_end + grace <= now`);
@@ -37,6 +37,7 @@ from typing import Any, Final, Protocol
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import Market, MarketIdentity
+from xret.data.provider_pagination import ObservedWindow, paginate_ohlcv
 from xret.data.schema import OHLCV_SCHEMA
 from xret.data.storage.parquet import DerivativeInterpretation, ProviderIdentity
 from xret.data.timeframe import TimeBar
@@ -78,6 +79,7 @@ class CCXTExchange(Protocol):
         timeframe: str,
         since: int | None = None,
         limit: int | None = None,
+        params: dict[str, int] | None = None,
     ) -> list[list[float]]: ...
 
 
@@ -331,12 +333,13 @@ def _fetch_page(
     timeframe: str,
     since_ms: int,
     page_limit: int,
+    params: dict[str, int],
     retry: _RetryConfig,
 ) -> list[list[float]]:
     attempt = 0
     while True:
         try:
-            return exchange.fetch_ohlcv(native_symbol, timeframe, since_ms, page_limit)
+            return exchange.fetch_ohlcv(native_symbol, timeframe, since_ms, page_limit, params)
         except Exception as exc:  # noqa: BLE001 - reclassified below
             if not _is_transient_error(exc) or attempt >= retry.max_retries:
                 raise ProviderError(
@@ -346,27 +349,8 @@ def _fetch_page(
             retry.sleep(retry.backoff(attempt))
 
 
-def _assert_ascending(batch: list[list[float]], *, native_symbol: str, exchange_id: str) -> None:
-    previous: float | None = None
-    for row in batch:
-        try:
-            if len(row) < 6:
-                raise ValueError(f"expected at least 6 OHLCV fields, got {len(row)}")
-            ts = float(row[0])
-            for value in row[1:6]:
-                float(value)
-        except (TypeError, ValueError) as exc:
-            raise ProviderError(
-                f"fetchOHLCV returned a malformed candle for {native_symbol} on {exchange_id}"
-            ) from exc
-        if previous is not None and ts < previous:
-            raise ProviderError(
-                f"fetchOHLCV returned non-ascending candles for {native_symbol} on {exchange_id}"
-            )
-        previous = ts
-
-
 def _paginate(
+    client_id: str,
     exchange: CCXTExchange,
     native_symbol: str,
     timeframe: str,
@@ -375,26 +359,26 @@ def _paginate(
     end: datetime,
     page_limit: int,
     retry: _RetryConfig,
-) -> list[list[float]]:
-    since_ms = _to_epoch_ms(start)
-    end_ms = _to_epoch_ms(end)
-    rows: list[list[float]] = []
-    while since_ms < end_ms:
-        batch = _fetch_page(exchange, native_symbol, timeframe, since_ms, page_limit, retry)
-        if not batch:
-            break
-        _assert_ascending(batch, native_symbol=native_symbol, exchange_id=exchange.id)
-        rows.extend(batch)
-        newest_ts_ms = int(batch[-1][0])
-        newest_open = datetime.fromtimestamp(newest_ts_ms / 1000, tz=UTC)
-        next_since_ms = _to_epoch_ms(time_bar.next_boundary(newest_open))
-        if next_since_ms <= since_ms:
-            raise ProviderError(
-                f"pagination made no progress for {native_symbol} on {exchange.id}: "
-                f"since={since_ms} newest={newest_ts_ms}"
-            )
-        since_ms = next_since_ms
-    return rows
+) -> tuple[list[list[float]], tuple[ObservedWindow, ...]]:
+    result = paginate_ohlcv(
+        client_id=client_id,
+        exchange_id=exchange.id,
+        native_symbol=native_symbol,
+        time_bar=time_bar,
+        start=start,
+        end=end,
+        requested_limit=page_limit,
+        fetch_page=lambda since_ms, limit, params: _fetch_page(
+            exchange,
+            native_symbol,
+            timeframe,
+            since_ms,
+            limit,
+            params,
+            retry,
+        ),
+    )
+    return [list(row) for row in result.rows], result.observed
 
 
 # --------------------------------------------------------------------------
@@ -484,6 +468,7 @@ class _Observation:
     """Immutable evidence for one completed provider observation."""
 
     frame: pl.DataFrame
+    observed: tuple[ObservedWindow, ...]
     provider: ProviderIdentity
     derivative: DerivativeInterpretation | None
     completed_at: datetime
@@ -528,6 +513,15 @@ def _derivative_interpretation(resolved: ResolvedMarket) -> DerivativeInterpreta
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FetchedBars:
+    frame: pl.DataFrame
+    exchange: CCXTExchange
+    resolved: ResolvedMarket
+    observed_at: datetime
+    observed: tuple[ObservedWindow, ...]
+
+
 def _fetch_bars(
     identity: MarketIdentity,
     timeframe: str,
@@ -539,7 +533,7 @@ def _fetch_bars(
     max_retries: int,
     retry_backoff_base: float,
     sleep: Callable[[float], None] | None,
-) -> tuple[pl.DataFrame, CCXTExchange, ResolvedMarket, datetime]:
+) -> _FetchedBars:
     time_bar = TimeBar.parse(timeframe)
     client_id = _ccxt_client_id(identity)
     clock = _current_clock()
@@ -552,8 +546,16 @@ def _fetch_bars(
             backoff=lambda attempt: _default_backoff(attempt, base=retry_backoff_base),
             sleep=sleep if sleep is not None else time.sleep,
         )
-        raw_rows = _paginate(
-            exchange, resolved.native_symbol, timeframe, time_bar, start, end, page_limit, retry
+        raw_rows, observed = _paginate(
+            client_id,
+            exchange,
+            resolved.native_symbol,
+            timeframe,
+            time_bar,
+            start,
+            end,
+            page_limit,
+            retry,
         )
     except (UnsupportedMarketError, ProviderError):
         raise
@@ -573,7 +575,7 @@ def _fetch_bars(
         raise ProviderError(
             f"invalid OHLCV data for {resolved.native_symbol} on {exchange.id}: {exc}"
         ) from exc
-    return frame, exchange, resolved, observed_at
+    return _FetchedBars(frame, exchange, resolved, observed_at, observed)
 
 
 def _observe_bars(
@@ -582,8 +584,8 @@ def _observe_bars(
     start: datetime,
     end: datetime,
 ) -> _Observation:
-    """Observe exactly one requested range without retaining page/cursor detail."""
-    frame, exchange, resolved, observed_at = _fetch_bars(
+    """Observe one requested range and retain its exhaustive time evidence."""
+    fetched = _fetch_bars(
         identity,
         timeframe,
         start,
@@ -595,12 +597,15 @@ def _observe_bars(
         sleep=None,
     )
     return _Observation(
-        frame=frame,
-        provider=_provider_identity(exchange, resolved),
+        frame=fetched.frame,
+        observed=fetched.observed,
+        provider=_provider_identity(fetched.exchange, fetched.resolved),
         derivative=(
-            _derivative_interpretation(resolved) if identity.market is Market.PERPETUAL else None
+            _derivative_interpretation(fetched.resolved)
+            if identity.market is Market.PERPETUAL
+            else None
         ),
-        completed_at=observed_at,
+        completed_at=fetched.observed_at,
     )
 
 
@@ -620,10 +625,10 @@ def fetch_bars(
 
     Network-only: never reads or writes canonical files or catalog state.
     `start`/`end` must already be a validated, UTC-aware half-open range.
-    An unlisted symbol, an unsupported timeframe, or ambiguous/absent
-    settlement inference raises `UnsupportedMarketError`; a transport,
-    pagination or fetch-path quality failure raises `ProviderError`,
-    chained to its cause (P-1).
+    An unlisted symbol, unsupported timeframe, unqualified exhaustive
+    pagination contract, or ambiguous/absent settlement inference raises
+    `UnsupportedMarketError`; a transport, pagination or fetch-path quality
+    failure raises `ProviderError`, chained to its cause (P-1).
     """
     return _fetch_bars(
         identity,
@@ -635,7 +640,7 @@ def fetch_bars(
         max_retries=max_retries,
         retry_backoff_base=retry_backoff_base,
         sleep=sleep,
-    )[0]
+    ).frame
 
 
 def resolve_identity(identity: MarketIdentity) -> MarketIdentity:

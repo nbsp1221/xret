@@ -10,11 +10,13 @@ A dataset is identified by exchange, `BASE/QUOTE` symbol, market family, settlem
 
 `fetch` gets completed bars from the provider and returns an eager Polars `DataFrame`. It does not read or change canonical local state.
 
+Returned rows and observation evidence are separate facts. Xret traverses qualified, bounded provider windows across the requested range. A successful empty window proves only that window contains no returned candles; it does not terminate traversal or imply that later history is empty. If exhaustive window semantics are not qualified for an endpoint family, the remote operation fails closed.
+
 ## Canonical reconciliation: `sync`
 
 `sync` reads local coverage, fetches only implicit `missing` intervals, validates received bars, and publishes each canonical monthly Parquet file by atomic replacement. A fully covered sync still records ingestion-run provenance, while its data result is a visible no-op.
 
-Coverage records facts: persisted `available` intervals have canonical bars. An `unavailable` interval is recorded only when a successful provider observation omits its completed bar boundary. `missing` is implicit when neither fact exists. Provider, validation, or storage failures never turn an interval into `unavailable`.
+Coverage records facts: persisted `available` intervals have canonical bars. An `unavailable` interval is recorded only when a successfully and exhaustively observed bounded window omits its completed bar boundary. `missing` is implicit when neither fact exists. Provider, validation, incomplete traversal, or storage failures never turn an interval into `unavailable`.
 
 ## Local analysis: `scan` and `scan_partial`
 

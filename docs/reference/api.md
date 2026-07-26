@@ -51,13 +51,15 @@ fetch(start, end=None) -> polars.DataFrame
 
 Always calls the provider and returns completed bars in an eager frame. It never reads or writes canonical local state. With omitted `end`, provider finalization grace determines the latest completed bar boundary.
 
+Remote reads traverse explicit, bounded, half-open provider windows. An empty successful window is an observed empty interval, not the end of market history, so later windows are still queried. Xret returns a frame only after the requested range has been traversed exhaustively. If the CCXT endpoint family has no qualified exhaustive OHLCV pagination contract, `fetch` raises `UnsupportedMarketError` instead of returning a potentially truncated frame.
+
 ## `BarDataset.sync`
 
 ```python
 sync(start, end=None) -> SyncResult
 ```
 
-Reads local coverage, fetches only implicit `missing` intervals, validates fetched bars, and publishes canonical monthly Parquet files with catalog updates. `available` is persisted coverage backed by canonical bars. A successful provider observation records each absent completed bar boundary as `unavailable`; failures never create it. A fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
+Reads local coverage, fetches only implicit `missing` intervals, validates fetched bars and exhaustive observation evidence, and publishes canonical monthly Parquet files with catalog updates. `available` is persisted coverage backed by canonical bars. A successful bounded provider window records each absent completed bar boundary inside that window as `unavailable`; unobserved ranges remain `missing`, and failures never create negative coverage. A fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
 
 `SyncResult` exposes `dataset_key`, `run_id`, `changed`, `fetched_rows`, `written_partitions`, `covered`, `gaps`, `warnings`, `is_complete`, and `require_complete()`.
 

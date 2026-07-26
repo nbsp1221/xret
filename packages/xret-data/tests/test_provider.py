@@ -60,12 +60,22 @@ class FakeExchange:
         return self.markets
 
     def fetch_ohlcv(
-        self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+        self,
+        symbol: str,
+        timeframe: str,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict | None = None,
     ) -> list[list[float]]:
         self.fetch_calls.append((symbol, timeframe, since, limit))
         if self._fetch_override is not None:
-            return self._fetch_override(symbol, timeframe, since, limit)
-        rows = [row for row in self._candles if row[0] >= (since or 0)]
+            return self._fetch_override(symbol, timeframe, since, limit, params)
+        until = params.get("until") if params is not None else None
+        rows = [
+            row
+            for row in self._candles
+            if row[0] >= (since or 0) and (until is None or row[0] < until)
+        ]
         page_size = self._page_size if self._page_size is not None else (limit or len(rows))
         return rows[:page_size]
 
@@ -485,7 +495,7 @@ def test_monotonic_pagination_collects_all_pages() -> None:
     assert timestamps == sorted(timestamps)
 
 
-def test_pagination_continues_when_provider_caps_pages_below_requested_limit() -> None:
+def test_pagination_honors_the_requested_limit_when_it_is_below_the_provider_cap() -> None:
     minute = 60_000
     candles = [_row(i * minute) for i in range(5)]
     exchange = FakeExchange(candles=candles, page_size=2)
@@ -497,11 +507,213 @@ def test_pagination_continues_when_provider_caps_pages_below_requested_limit() -
         "1m",
         datetime(2024, 1, 1, tzinfo=UTC),
         datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
-        page_limit=100,
+        page_limit=2,
     )
 
     assert frame.height == 5
     assert len(exchange.fetch_calls) == 3
+
+
+def test_fetch_traverses_an_empty_bounded_page_and_returns_later_data() -> None:
+    minute = 60_000
+
+    class SparseWindowExchange(FakeExchange):
+        def fetch_ohlcv(
+            self,
+            symbol: str,
+            timeframe: str,
+            since: int | None = None,
+            limit: int | None = None,
+            params: dict | None = None,
+        ) -> list[list[float]]:
+            self.fetch_calls.append((symbol, timeframe, since, limit, params))
+            if since == _BASE_MS:
+                return [_row(0)]
+            if since == _BASE_MS + minute:
+                return []
+            if since == _BASE_MS + 2 * minute:
+                return [_row(2 * minute)]
+            return []
+
+    exchange = SparseWindowExchange(client_id="binance")
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+        page_limit=1,
+    )
+
+    assert frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+    ]
+
+
+def test_fetch_traverses_an_empty_first_page_before_later_listing_data() -> None:
+    minute = 60_000
+    exchange = FakeExchange(candles=[_row(minute)])
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+        page_limit=1,
+    )
+
+    assert frame["timestamp"].to_list() == [datetime(2024, 1, 1, 0, 1, tzinfo=UTC)]
+    assert len(exchange.fetch_calls) == 2
+
+
+def test_fetch_traverses_every_page_of_a_fully_empty_range() -> None:
+    exchange = FakeExchange(candles=[])
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+        page_limit=1,
+    )
+
+    assert frame.is_empty()
+    assert len(exchange.fetch_calls) == 3
+
+
+def test_fetch_clips_provider_boundary_extras_without_duplicates() -> None:
+    minute = 60_000
+
+    def boundary_extras(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        _limit: int,
+        params: dict,
+    ) -> list[list[float]]:
+        return [
+            _row(since - _BASE_MS - minute),
+            _row(since - _BASE_MS),
+            _row(params["until"] - _BASE_MS + 1),
+        ]
+
+    exchange = FakeExchange(fetch_override=boundary_extras)
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+        page_limit=1,
+    )
+
+    assert frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    ]
+
+
+def test_half_open_pages_do_not_overfill_an_inclusive_endpoint_limit() -> None:
+    minute = 60_000
+    candles = [_row(index * minute) for index in range(4)]
+
+    def newest_rows_from_inclusive_window(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        limit: int,
+        params: dict,
+    ) -> list[list[float]]:
+        candidates = [row for row in candles if since <= int(row[0]) <= params["until"]]
+        return candidates[-limit:]
+
+    exchange = FakeExchange(client_id="bybit", fetch_override=newest_rows_from_inclusive_window)
+    provider._register_exchange_factory("bybit", lambda: exchange)
+    _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        MarketIdentity(exchange="bybit", symbol="BTC/USDT", market="spot"),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 4, tzinfo=UTC),
+        page_limit=2,
+    )
+
+    assert frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, 0, minute, tzinfo=UTC) for minute in range(4)
+    ]
+
+
+def test_coinbase_effective_limit_does_not_skip_a_later_window() -> None:
+    minute = 60_000
+    identity = MarketIdentity(exchange="coinbase", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="coinbase",
+        candles=[_row(0), _row(300 * minute)],
+    )
+    provider._register_exchange_factory("coinbase", lambda: exchange)
+    _set_now(datetime(2024, 1, 2, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 5, 1, tzinfo=UTC),
+        page_limit=1000,
+    )
+
+    assert frame.height == 2
+    assert [call[3] for call in exchange.fetch_calls] == [300, 300]
+
+
+def test_unqualified_exchange_pagination_fails_closed() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(client_id="kraken")
+    provider._register_exchange_factory("kraken", lambda: exchange)
+
+    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
+        provider.fetch_bars(
+            identity,
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        )
+
+    assert exchange.fetch_calls == []
+
+
+def test_calendar_month_pages_advance_without_fixed_duration_approximation() -> None:
+    january = datetime(2024, 1, 1, tzinfo=UTC)
+    march = datetime(2024, 3, 1, tzinfo=UTC)
+    rows = [
+        [int(value.timestamp() * 1000), 100.0, 101.0, 99.0, 100.0, 1.0]
+        for value in (january, march)
+    ]
+    exchange = FakeExchange(timeframes={"1M": "1M"}, candles=rows)
+    _register_spot(exchange)
+    _set_now(datetime(2024, 5, 1, tzinfo=UTC))
+
+    frame = provider.fetch_bars(
+        _spot_identity(),
+        "1M",
+        january,
+        datetime(2024, 4, 1, tzinfo=UTC),
+        page_limit=1,
+    )
+
+    assert frame["timestamp"].to_list() == [january, march]
+    assert [call[2] for call in exchange.fetch_calls] == [
+        int(datetime(2024, month, 1, tzinfo=UTC).timestamp() * 1000) for month in (1, 2, 3)
+    ]
 
 
 def test_request_range_filter_is_half_open() -> None:
@@ -520,20 +732,18 @@ def test_request_range_filter_is_half_open() -> None:
     assert frame.height == 3
 
 
-def test_non_progress_pagination_raises_provider_error() -> None:
-    # A misbehaving exchange that ignores `since` and always returns the
-    # same stale candle must not spin forever.
-    exchange = FakeExchange(fetch_override=lambda *_args: [_row(1_000)])
+def test_nonpositive_page_limit_raises_provider_error() -> None:
+    exchange = FakeExchange()
     _register_spot(exchange)
     _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
 
-    with pytest.raises(ProviderError, match="no progress"):
+    with pytest.raises(ProviderError, match="page limit must be positive"):
         provider.fetch_bars(
             _spot_identity(),
             "1m",
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
-            page_limit=1,
+            page_limit=0,
         )
 
 

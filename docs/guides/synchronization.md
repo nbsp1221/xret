@@ -24,7 +24,7 @@ bars = MarketData().bars(
 remote = bars.fetch(start="2025-01-01", end="2025-01-02")
 ```
 
-`fetch` always uses the provider, returns an eager Polars `DataFrame` of completed bars, and never reads or changes canonical local state.
+`fetch` always uses the provider, returns an eager Polars `DataFrame` of completed bars, and never reads or changes canonical local state. It traverses bounded provider windows across the complete request; an empty intermediate window does not hide data in later windows.
 
 ## Synchronize canonical data
 
@@ -37,7 +37,9 @@ print(result.fetched_rows)
 print(result.written_partitions)
 ```
 
-`sync` fetches only implicit `missing` intervals and commits validated monthly canonical Parquet files. Persisted `available` means canonical bars exist. A successful provider observation records each absent completed bar boundary as `unavailable`; failures never create it. Repeating a fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
+`sync` fetches only implicit `missing` intervals and commits validated monthly canonical Parquet files. Persisted `available` means canonical bars exist. A successful exhaustive provider window records each absent completed bar boundary inside that window as `unavailable`; unobserved ranges remain `missing`, and failures never create negative coverage. Repeating a fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
+
+Remote `fetch` and `sync` fail with `UnsupportedMarketError` when the selected CCXT endpoint family has no qualified exhaustive OHLCV pagination contract. Xret does not guess a page horizon or silently return a partial range.
 
 Syncs serialize per dataset. Different datasets may overlap provider and temporary-file work.
 

@@ -7,7 +7,7 @@ Every public domain or operational error inherits from `xret.data.errors.XretDat
 | `XretDataError` | Base class for public Xret data errors. |
 | `ConfigurationError` | Configuration paths or TOML values are invalid. |
 | `InvalidRequestError` | A caller value violates the documented request contract. |
-| `UnsupportedMarketError` | The market, symbol, timeframe, or settlement cannot be operated safely. |
+| `UnsupportedMarketError` | The market, symbol, timeframe, settlement, or exhaustive provider pagination contract cannot be operated safely. |
 | `ProviderError` | A provider call failed or `fetch` fetched-data quality validation failed. |
 | `CoverageError` | A strict local scan found missing or observed-unavailable coverage. |
 | `SyncError` | Synchronization could not complete safely, including fetched-batch validation failure. |
