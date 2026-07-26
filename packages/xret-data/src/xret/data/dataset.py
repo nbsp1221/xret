@@ -25,8 +25,9 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
@@ -107,6 +108,22 @@ def _resolve_dataset_config() -> MarketDataConfig:
 
 def _current_clock() -> datetime:
     return _clock_override() if _clock_override is not None else datetime.now(UTC)
+
+
+def _record_failed_run_best_effort(
+    original: Exception,
+    *,
+    db_path: Path,
+    state_dir: Path,
+    running_run: IngestionRunMetadata,
+) -> None:
+    """Best-effort: mark the ingestion run as failed without masking *original*."""
+    failed_run = replace(running_run, status="failed", completed_at=_current_clock())
+    try:
+        with locking.catalog_gate(state_dir), Catalog.open(db_path) as catalog:
+            catalog.record_ingestion_run(failed_run)
+    except Exception as terminal_error:
+        original.add_note(f"also failed to record ingestion run as failed: {terminal_error}")
 
 
 # --------------------------------------------------------------------------
@@ -287,42 +304,39 @@ class BarDataset:
                     fetch_ranges = [
                         gap for gap in known_gaps if gap.status is CoverageStatus.MISSING
                     ]
-                    catalog.record_ingestion_run(
-                        IngestionRunMetadata(
-                            run_id=run_id,
-                            dataset_key=dataset_key,
-                            requested_start=start_dt,
-                            requested_end=end_dt,
-                            started_at=started_at,
-                            schema_version=SCHEMA_VERSION,
-                            status="running",
-                        )
+                    running_run = IngestionRunMetadata(
+                        run_id=run_id,
+                        dataset_key=dataset_key,
+                        requested_start=start_dt,
+                        requested_end=end_dt,
+                        started_at=started_at,
+                        schema_version=SCHEMA_VERSION,
+                        status="running",
                     )
+                    catalog.record_ingestion_run(running_run)
 
             observations = []
             quality_warnings: list[tuple[CoverageInterval, quality.QualityFinding]] = []
-            for gap in fetch_ranges:
-                observation = provider._observe_bars(
-                    resolved_identity, self.timeframe, gap.start, gap.end
-                )
-                if observation.frame.height:
-                    result = quality.enforce_ohlcv_batch(
-                        observation.frame,
-                        BarRequest(
-                            identity=resolved_identity,
-                            timeframe=self.timeframe,
-                            start=gap.start,
-                            end=gap.end,
-                        ),
-                        error_cls=SyncError,
-                    )
-                    quality_warnings.extend((gap, finding) for finding in result.warnings)
-                observations.append((gap, observation))
-
             prepared = []
-            coverage_changed = False
-            terminal_run: IngestionRunMetadata | None = None
             try:
+                for gap in fetch_ranges:
+                    observation = provider._observe_bars(
+                        resolved_identity, self.timeframe, gap.start, gap.end
+                    )
+                    if observation.frame.height:
+                        result = quality.enforce_ohlcv_batch(
+                            observation.frame,
+                            BarRequest(
+                                identity=resolved_identity,
+                                timeframe=self.timeframe,
+                                start=gap.start,
+                                end=gap.end,
+                            ),
+                            error_cls=SyncError,
+                        )
+                        quality_warnings.extend((gap, finding) for finding in result.warnings)
+                    observations.append((gap, observation))
+
                 monthly_batches: dict[YearMonth, list[pl.DataFrame]] = {}
                 monthly_observations: dict[YearMonth, provider._Observation] = {}
                 for _gap, observation in observations:
@@ -341,21 +355,25 @@ class BarDataset:
                             derivative=observation.derivative,
                         )
                     )
+            except Exception as exc:
+                for artifact in prepared:
+                    discard_prepared_file(artifact)
+                _record_failed_run_best_effort(
+                    exc,
+                    db_path=db_path,
+                    state_dir=config.state_dir,
+                    running_run=running_run,
+                )
+                raise
+
+            coverage_changed = False
+            terminal_run: IngestionRunMetadata | None = None
+            try:
                 with (
                     locking.catalog_gate(config.state_dir),
                     Catalog.open(db_path) as catalog,
                 ):
-                    catalog.record_ingestion_run(
-                        IngestionRunMetadata(
-                            run_id=run_id,
-                            dataset_key=dataset_key,
-                            requested_start=start_dt,
-                            requested_end=end_dt,
-                            started_at=started_at,
-                            schema_version=SCHEMA_VERSION,
-                            status="running",
-                        )
-                    )
+                    catalog.record_ingestion_run(running_run)
                     for artifact in prepared:
                         publish_prepared_file(artifact)
                     terminal_run = IngestionRunMetadata(
@@ -448,6 +466,13 @@ class BarDataset:
                         "run maintenance.validate() before retrying"
                     ) from exc
                 else:
+                    if not isinstance(exc, _CommitUncertainCatalogError):
+                        _record_failed_run_best_effort(
+                            exc,
+                            db_path=db_path,
+                            state_dir=config.state_dir,
+                            running_run=running_run,
+                        )
                     raise
             except Exception as exc:
                 for artifact in prepared:
@@ -457,6 +482,12 @@ class BarDataset:
                         "unexpected failure after publishing canonical Parquet data; "
                         "run maintenance.validate() before retrying"
                     ) from exc
+                _record_failed_run_best_effort(
+                    exc,
+                    db_path=db_path,
+                    state_dir=config.state_dir,
+                    running_run=running_run,
+                )
                 raise
 
         return SyncResult(

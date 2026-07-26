@@ -533,6 +533,162 @@ def test_provider_exception_leaves_coverage_missing_and_unpublished(tmp_path: Pa
     assert not list(config.data_dir.rglob("*.parquet"))
 
 
+def _run_status(config: MarketDataConfig, run_id: str) -> tuple[str, str | None]:
+    """Return (status, completed_at) for a run_id from the catalog."""
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        row = catalog.connection.execute(
+            "SELECT status, completed_at FROM ingestion_runs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    assert row is not None, f"run_id {run_id!r} not found in ingestion_runs"
+    return row["status"], row["completed_at"]
+
+
+def test_sync_records_failed_run_on_provider_error(tmp_path: Path) -> None:
+    class FailingExchange(FakeExchange):
+        def fetch_ohlcv(
+            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+        ) -> list[list[float]]:
+            raise RuntimeError("provider down")
+
+    config = _configure(tmp_path)
+    _register(FailingExchange())
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+
+    with pytest.raises(ProviderError, match="provider down"):
+        bars.sync(_now(0), _now(3))
+
+    # Find the run_id: exactly one run should exist
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        runs = catalog.list_ingestion_run_ids(
+            DatasetKey.from_identity(bars.identity, timeframe="1h")
+        )
+    assert len(runs) == 1
+    status, completed_at = _run_status(config, runs[0])
+    assert status == "failed"
+    assert completed_at is not None
+
+
+def test_sync_records_failed_run_on_quality_error(tmp_path: Path) -> None:
+    # Malformed candle (only 1 element) triggers ProviderError during observation
+    config = _configure(tmp_path)
+    exchange = FakeExchange(candles=[[_BASE_MS]])
+    _register(exchange)
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+
+    with pytest.raises(ProviderError, match="malformed candle"):
+        bars.sync(_now(0), _now(3))
+
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        runs = catalog.list_ingestion_run_ids(
+            DatasetKey.from_identity(bars.identity, timeframe="1h")
+        )
+    assert len(runs) == 1
+    status, completed_at = _run_status(config, runs[0])
+    assert status == "failed"
+    assert completed_at is not None
+
+
+def test_sync_records_failed_run_on_prepare_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _configure(tmp_path)
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
+    _register(exchange)
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+
+    def failing_prepare(*args, **kwargs):
+        raise SyncError("injected prepare failure")
+
+    monkeypatch.setattr(dataset, "prepare_month", failing_prepare)
+
+    with pytest.raises(SyncError, match="injected prepare failure"):
+        bars.sync(_now(0), _now(3))
+
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        runs = catalog.list_ingestion_run_ids(
+            DatasetKey.from_identity(bars.identity, timeframe="1h")
+        )
+    assert len(runs) == 1
+    status, completed_at = _run_status(config, runs[0])
+    assert status == "failed"
+    assert completed_at is not None
+
+
+def test_sync_failed_run_note_when_catalog_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FailingExchange(FakeExchange):
+        def fetch_ohlcv(
+            self, symbol: str, timeframe: str, since: int | None = None, limit: int | None = None
+        ) -> list[list[float]]:
+            raise RuntimeError("provider down")
+
+    config = _configure(tmp_path)
+    _register(FailingExchange())
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+
+    # Make the failed-run recording itself fail by breaking Catalog.open
+    original_open = Catalog.open
+
+    call_count = 0
+
+    @classmethod
+    def failing_open(cls, *args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 2:  # Let Phase 1 succeed, break the failed-run recording
+            raise OSError("disk full")
+        return original_open(*args, **kwargs)
+
+    monkeypatch.setattr(Catalog, "open", failing_open)
+
+    with pytest.raises(ProviderError, match="provider down") as exc_info:
+        bars.sync(_now(0), _now(3))
+
+    # Original exception preserved, secondary failure noted
+    assert exc_info.value.__notes__ is not None
+    assert any("failed to record ingestion run" in note for note in exc_info.value.__notes__)
+
+
+def test_sync_records_failed_run_on_pre_publication_phase3_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 3 failure before any publish still records failed."""
+    config = _configure(tmp_path)
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
+    _register(exchange)
+    provider._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(MarketData(config=config))
+
+    def failing_publish(*args, **kwargs):
+        raise OSError("filesystem error before replace")
+
+    monkeypatch.setattr(dataset, "publish_prepared_file", failing_publish)
+
+    with pytest.raises(OSError, match="filesystem error"):
+        bars.sync(_now(0), _now(3))
+
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        runs = catalog.list_ingestion_run_ids(
+            DatasetKey.from_identity(bars.identity, timeframe="1h")
+        )
+    assert len(runs) == 1
+    status, completed_at = _run_status(config, runs[0])
+    assert status == "failed"
+    assert completed_at is not None
+    assert not list(config.data_dir.rglob("*.parquet"))
+
+
 def test_uncertain_terminal_commit_uses_one_read_only_visibility_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
