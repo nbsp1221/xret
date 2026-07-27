@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Final, cast
 import polars as pl
 from xret.data.errors import CatalogError, InvalidRequestError, SyncError, XretDataError
 from xret.data.models import NONE_SETTLE_SENTINEL, DatasetKey, Market, YearMonth
+from xret.data.providers.contracts import DerivativeInterpretation
 from xret.data.quality import enforce_canonical_ohlcv
 from xret.data.schema import IDENTITY_COLUMNS, OHLCV_COLUMNS, OHLCV_SCHEMA
 from xret.data.storage import paths
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "SCHEMA_VERSION",
-    "ProviderIdentity",
+    "ProviderProvenance",
     "DerivativeInterpretation",
     "CommittedFile",
     "PreparedFile",
@@ -41,7 +42,7 @@ __all__ = [
     "split_by_year_month",
 ]
 
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 5
 _HASH_CHUNK_SIZE: Final[int] = 1024 * 1024
 _META_SCHEMA_VERSION: Final[str] = "schema_version"
 _META_EXCHANGE: Final[str] = "exchange"
@@ -55,7 +56,8 @@ _META_ROW_COUNT: Final[str] = "row_count"
 _META_MIN_TIMESTAMP: Final[str] = "min_timestamp"
 _META_MAX_TIMESTAMP: Final[str] = "max_timestamp"
 _META_PROVIDER_NAME: Final[str] = "provider_name"
-_META_CCXT_VERSION: Final[str] = "ccxt_version"
+_META_PROVIDER_VERSION: Final[str] = "provider_version"
+_META_PROVIDER_API_VERSION: Final[str] = "provider_api_version"
 _META_PROVIDER_MARKET_ID: Final[str] = "provider_market_id"
 _META_NATIVE_SYMBOL: Final[str] = "native_symbol"
 _META_LINEAR: Final[str] = "linear"
@@ -74,7 +76,8 @@ _BASE_METADATA: Final[frozenset[str]] = frozenset(
         _META_MIN_TIMESTAMP,
         _META_MAX_TIMESTAMP,
         _META_PROVIDER_NAME,
-        _META_CCXT_VERSION,
+        _META_PROVIDER_VERSION,
+        _META_PROVIDER_API_VERSION,
         _META_PROVIDER_MARKET_ID,
         _META_NATIVE_SYMBOL,
     }
@@ -89,39 +92,21 @@ _DERIVATIVE_METADATA: Final[frozenset[str]] = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderIdentity:
-    """Small provider snapshot needed to interpret a canonical file."""
+class ProviderProvenance:
+    """Provider snapshot for the latest publication of a canonical file."""
 
     name: str
-    ccxt_version: str
+    version: str
+    api_version: int
     market_id: str
     native_symbol: str
 
     def __post_init__(self) -> None:
-        for field in ("name", "ccxt_version", "market_id", "native_symbol"):
+        for field in ("name", "version", "market_id", "native_symbol"):
             if not getattr(self, field):
                 raise InvalidRequestError(f"provider {field} must not be empty")
-
-
-@dataclass(frozen=True, slots=True)
-class DerivativeInterpretation:
-    """Explicit CCXT derivative interpretation; never inferred by storage."""
-
-    linear: bool | None = None
-    inverse: bool | None = None
-    contract_size: str | None = None
-
-    def as_metadata(self) -> dict[str, str]:
-        metadata: dict[str, str] = {}
-        if self.linear is not None:
-            metadata[_META_LINEAR] = str(self.linear).lower()
-        if self.inverse is not None:
-            metadata[_META_INVERSE] = str(self.inverse).lower()
-        if self.contract_size is not None:
-            if not self.contract_size:
-                raise InvalidRequestError("derivative contract_size must not be empty")
-            metadata[_META_CONTRACT_SIZE] = self.contract_size
-        return metadata
+        if not isinstance(self.api_version, int) or isinstance(self.api_version, bool):
+            raise InvalidRequestError("provider api_version must be an integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +120,18 @@ class CommittedFile:
     max_timestamp: datetime
     physical_hash: str
     schema_version: int
+    provider: ProviderProvenance
+
+
+def _derivative_metadata(derivative: DerivativeInterpretation) -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    if derivative.linear is not None:
+        metadata[_META_LINEAR] = str(derivative.linear).lower()
+    if derivative.inverse is not None:
+        metadata[_META_INVERSE] = str(derivative.inverse).lower()
+    if derivative.contract_size is not None:
+        metadata[_META_CONTRACT_SIZE] = derivative.contract_size
+    return metadata
 
 
 @dataclass(slots=True)
@@ -232,6 +229,22 @@ def _identity_from_metadata(
     except (KeyError, TypeError, ValueError, XretDataError) as exc:
         raise CatalogError(f"{path}: invalid identity metadata") from exc
     return dataset_key, year_month, schema_version
+
+
+def _provider_from_metadata(
+    path: Path,
+    metadata: dict[str, str],
+) -> ProviderProvenance:
+    try:
+        return ProviderProvenance(
+            metadata[_META_PROVIDER_NAME],
+            metadata[_META_PROVIDER_VERSION],
+            int(metadata[_META_PROVIDER_API_VERSION]),
+            metadata[_META_PROVIDER_MARKET_ID],
+            metadata[_META_NATIVE_SYMBOL],
+        )
+    except (KeyError, TypeError, ValueError, XretDataError) as exc:
+        raise CatalogError(f"{path}: invalid provider metadata") from exc
 
 
 def _validate_frame_identity(
@@ -370,7 +383,7 @@ def _build_metadata(
     row_count: int,
     min_timestamp: datetime,
     max_timestamp: datetime,
-    provider: ProviderIdentity,
+    provider: ProviderProvenance,
     derivative: DerivativeInterpretation | None,
 ) -> dict[str, str]:
     metadata = {
@@ -385,14 +398,15 @@ def _build_metadata(
         _META_MIN_TIMESTAMP: min_timestamp.isoformat(),
         _META_MAX_TIMESTAMP: max_timestamp.isoformat(),
         _META_PROVIDER_NAME: provider.name,
-        _META_CCXT_VERSION: provider.ccxt_version,
+        _META_PROVIDER_VERSION: provider.version,
+        _META_PROVIDER_API_VERSION: str(provider.api_version),
         _META_PROVIDER_MARKET_ID: provider.market_id,
         _META_NATIVE_SYMBOL: provider.native_symbol,
     }
     if dataset_key.market is Market.PERPETUAL:
         metadata[_META_SETTLE] = dataset_key.settle
         if derivative is not None:
-            metadata.update(derivative.as_metadata())
+            metadata.update(_derivative_metadata(derivative))
     elif derivative is not None:
         raise InvalidRequestError("derivative interpretation is only valid for perpetual markets")
     return metadata
@@ -408,7 +422,7 @@ def _derivative_metadata_for_rewrite(
             for key, value in _read_metadata(path, error_cls=SyncError).items()
             if key in _DERIVATIVE_METADATA and value
         }
-    proposed = derivative.as_metadata() if derivative is not None else {}
+    proposed = _derivative_metadata(derivative) if derivative is not None else {}
     for key, value in proposed.items():
         if key in existing and existing[key] != value:
             raise SyncError(f"{path}: conflicting derivative interpretation for {key!r}")
@@ -448,7 +462,7 @@ def prepare_month(
     year_month: YearMonth,
     batch: pl.DataFrame,
     *,
-    provider: ProviderIdentity,
+    provider: ProviderProvenance,
     derivative: DerivativeInterpretation | None = None,
     crash_hook: Callable[[str], None] | None = None,
 ) -> PreparedFile:
@@ -462,7 +476,12 @@ def prepare_month(
     _require_safe_managed_path(data_dir, final_path, error_cls=SyncError)
     existing = None
     if final_path.is_file():
-        read_committed_file(data_dir, final_path)
+        committed = read_committed_file(data_dir, final_path)
+        if committed.provider.name != provider.name:
+            raise SyncError(
+                f"{final_path}: source lineage is {committed.provider.name!r}, "
+                f"not {provider.name!r}"
+            )
         existing = read_month_file(final_path)
     if dataset_key.market is Market.SPOT and derivative is not None:
         raise InvalidRequestError("derivative interpretation is only valid for perpetual markets")
@@ -519,6 +538,7 @@ def prepare_month(
             max_timestamp,
             physical_hash,
             SCHEMA_VERSION,
+            provider,
         ),
         temp_path,
         data_dir,
@@ -565,6 +585,7 @@ def read_committed_file(data_dir: Path, path: Path) -> CommittedFile:
     _validate_schema(frame, source=str(path), error_cls=CatalogError)
     metadata = _read_metadata(path, error_cls=CatalogError)
     dataset_key, year_month, schema_version = _identity_from_metadata(path, metadata)
+    provider = _provider_from_metadata(path, metadata)
     expected_path = paths.month_file_path(data_dir, dataset_key, year_month)
     _require_safe_managed_path(data_dir, expected_path, error_cls=CatalogError)
     if path.resolve() != expected_path.resolve():
@@ -581,12 +602,7 @@ def read_committed_file(data_dir: Path, path: Path) -> CommittedFile:
         row_count=row_count,
         min_timestamp=min_timestamp,
         max_timestamp=max_timestamp,
-        provider=ProviderIdentity(
-            metadata[_META_PROVIDER_NAME],
-            metadata[_META_CCXT_VERSION],
-            metadata[_META_PROVIDER_MARKET_ID],
-            metadata[_META_NATIVE_SYMBOL],
-        ),
+        provider=provider,
         derivative=DerivativeInterpretation(
             metadata.get(_META_LINEAR) == "true" if _META_LINEAR in metadata else None,
             metadata.get(_META_INVERSE) == "true" if _META_INVERSE in metadata else None,
@@ -608,4 +624,5 @@ def read_committed_file(data_dir: Path, path: Path) -> CommittedFile:
         max_timestamp,
         compute_content_hash(path),
         schema_version,
+        provider,
     )

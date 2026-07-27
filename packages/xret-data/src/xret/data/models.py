@@ -26,6 +26,7 @@ __all__ = [
     "Market",
     "QualitySeverity",
     "MarketIdentity",
+    "BarRequest",
     "DataWarning",
     "DatasetKey",
     "NONE_SETTLE_SENTINEL",
@@ -310,13 +311,12 @@ class DatasetKey:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BarRequest:
-    """Internal UTC-aware, half-open `[start, end)` request for one dataset.
+    """UTC-aware, half-open `[start, end)` request for one bar dataset.
 
-    Not part of the public surface (P-1 taxonomy/S5 sweep): `fetch` and
-    `sync` build one to run fatal quality validation
-    (`quality.evaluate_ohlcv_batch`/`enforce_ohlcv_batch`) against a
-    fetched batch. Construction enforces the full contract: both bounds
-    are UTC-aware and `start < end`.
+    Exported through `xret.data.providers` as part of the experimental
+    historical-bar provider SPI. `fetch` and `sync` also build this value
+    internally. Construction enforces a recognized timeframe, UTC-aware
+    bounds, and `start < end`.
     """
 
     identity: MarketIdentity
@@ -325,7 +325,7 @@ class BarRequest:
     end: datetime
 
     def __post_init__(self) -> None:
-        _ensure_path_safe(self.timeframe, field_name="timeframe")
+        TimeBar.parse(_ensure_path_safe(self.timeframe, field_name="timeframe"))
         _ensure_utc_aware(self.start, field_name="start")
         _ensure_utc_aware(self.end, field_name="end")
         if self.start >= self.end:

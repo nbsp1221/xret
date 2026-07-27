@@ -31,13 +31,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import polars as pl
-from xret.data import provider, quality
+from xret.data import quality
 from xret.data.config import resolve_config
 from xret.data.errors import (
     CatalogError,
     CoverageError,
     InvalidRequestError,
-    ProviderError,
     SyncError,
 )
 from xret.data.models import (
@@ -50,6 +49,13 @@ from xret.data.models import (
     PartialScanResult,
     SyncResult,
     YearMonth,
+)
+from xret.data.providers import DerivativeInterpretation, HistoricalBarProvider
+from xret.data.providers import runtime as provider_runtime
+from xret.data.providers.discovery import ProviderHandle
+from xret.data.providers.runtime import (
+    ProviderRuntime,
+    ValidatedBarObservation,
 )
 from xret.data.storage import catalog as catalog_storage
 from xret.data.storage import local_read, locking, paths
@@ -64,6 +70,7 @@ from xret.data.storage.catalog import (
     _CommitUncertainCatalogError,
 )
 from xret.data.storage.parquet import (
+    ProviderProvenance,
     discard_prepared_file,
     prepare_month,
     publish_prepared_file,
@@ -166,7 +173,7 @@ def _finalizable_end(time_bar: TimeBar, request_end: datetime, observed_at: date
     """Return the request boundary whose bars were final at observation time."""
     return min(
         request_end,
-        time_bar.floor(observed_at - provider.DEFAULT_FINALITY_GRACE),
+        time_bar.floor(observed_at - provider_runtime.DEFAULT_FINALITY_GRACE),
     )
 
 
@@ -175,32 +182,6 @@ def _validate_aligned_range(time_bar: TimeBar, start: datetime, end: datetime) -
         raise InvalidRequestError(
             f"bar ranges must align to {time_bar.amount}{time_bar.unit!s} boundaries: "
             f"[{start.isoformat()}, {end.isoformat()})"
-        )
-
-
-def _validate_observation_evidence(
-    observation: provider._Observation,
-    requested: CoverageInterval,
-    time_bar: TimeBar,
-) -> None:
-    """Require exact contiguous evidence before any canonical publication."""
-    expected_start = requested.start
-    for window in observation.observed:
-        if window.start != expected_start or window.end > requested.end:
-            raise SyncError(
-                "incomplete provider observation: observed windows do not "
-                f"contiguously cover [{requested.start.isoformat()}, "
-                f"{requested.end.isoformat()})"
-            )
-        if time_bar.floor(window.start) != window.start or time_bar.floor(window.end) != window.end:
-            raise SyncError(
-                f"invalid provider observation: window boundaries are not aligned to {time_bar}"
-            )
-        expected_start = window.end
-    if expected_start != requested.end:
-        raise SyncError(
-            "incomplete provider observation: observed windows end at "
-            f"{expected_start.isoformat()}, expected {requested.end.isoformat()}"
         )
 
 
@@ -223,9 +204,14 @@ class BarDataset:
     #: fall back to `_resolve_dataset_config()` (module override or
     #: `resolve_config()`).
     _config: MarketDataConfig | None = field(default=None, init=False, repr=False, compare=False)
+    _provider: ProviderHandle | None = field(default=None, init=False, repr=False, compare=False)
 
     def _effective_config(self) -> MarketDataConfig:
         return self._config if self._config is not None else _resolve_dataset_config()
+
+    def _effective_provider(self) -> HistoricalBarProvider:
+        handle = self._provider if self._provider is not None else ProviderHandle(None)
+        return handle.get()
 
     def __post_init__(self) -> None:
         # Eager syntax validation only (Decision 11); still no I/O.
@@ -258,15 +244,13 @@ class BarDataset:
         """
         time_bar = TimeBar.parse(self.timeframe)
         start_dt = parse_time_input(start)
-        end_dt = provider.default_end(time_bar) if end is None else parse_time_input(end)
+        end_dt = provider_runtime.default_end(time_bar) if end is None else parse_time_input(end)
         validate_range(start_dt, end_dt)
         _validate_aligned_range(time_bar, start_dt, end_dt)
-        frame = provider.fetch_bars(self.identity, self.timeframe, start_dt, end_dt)
         request = BarRequest(
             identity=self.identity, timeframe=self.timeframe, start=start_dt, end=end_dt
         )
-        quality.enforce_ohlcv_batch(frame, request, error_cls=ProviderError)
-        return frame
+        return ProviderRuntime(self._effective_provider()).observe(request).frame
 
     # -- sync --------------------------------------------------------------
 
@@ -303,13 +287,17 @@ class BarDataset:
         """
         time_bar = TimeBar.parse(self.timeframe)
         start_dt = parse_time_input(start)
-        end_dt = provider.default_end(time_bar) if end is None else parse_time_input(end)
+        end_dt = provider_runtime.default_end(time_bar) if end is None else parse_time_input(end)
         validate_range(start_dt, end_dt)
         _validate_aligned_range(time_bar, start_dt, end_dt)
 
+        provider_instance: HistoricalBarProvider | None = None
+        runtime_context: ProviderRuntime | None = None
         resolved_identity = self.identity
         if self.identity.market is Market.PERPETUAL and self.identity.settle is None:
-            resolved_identity = provider.resolve_identity(self.identity)
+            provider_instance = self._effective_provider()
+            runtime_context = ProviderRuntime(provider_instance)
+            resolved_identity = runtime_context.resolve_market(self.identity).identity
         dataset_key = DatasetKey.from_identity(resolved_identity, timeframe=self.timeframe)
         config = self._effective_config()
         run_id = uuid.uuid4().hex
@@ -331,6 +319,7 @@ class BarDataset:
                     fetch_ranges = [
                         gap for gap in known_gaps if gap.status is CoverageStatus.MISSING
                     ]
+                    source_lineage = catalog.get_source_lineage(dataset_key)
                     running_run = IngestionRunMetadata(
                         run_id=run_id,
                         dataset_key=dataset_key,
@@ -346,28 +335,47 @@ class BarDataset:
             quality_warnings: list[tuple[CoverageInterval, quality.QualityFinding]] = []
             prepared = []
             try:
+                if fetch_ranges:
+                    if provider_instance is None:
+                        provider_instance = self._effective_provider()
+                    if runtime_context is None:
+                        runtime_context = ProviderRuntime(provider_instance)
+                    descriptor = runtime_context.descriptor
+                    if source_lineage is not None and source_lineage != descriptor.name:
+                        raise CatalogError(
+                            f"dataset source lineage is {source_lineage!r}, not {descriptor.name!r}"
+                        )
+                resolved_market = None
                 for gap in fetch_ranges:
-                    observation = provider._observe_bars(
-                        resolved_identity, self.timeframe, gap.start, gap.end
+                    assert provider_instance is not None
+                    assert runtime_context is not None
+                    request = BarRequest(
+                        identity=resolved_identity,
+                        timeframe=self.timeframe,
+                        start=gap.start,
+                        end=gap.end,
                     )
-                    _validate_observation_evidence(observation, gap, time_bar)
+                    if resolved_market is None:
+                        resolved_market = runtime_context.resolve_market(resolved_identity)
+                    observation = runtime_context.observe(
+                        request,
+                        market=resolved_market,
+                    )
                     if observation.frame.height:
                         result = quality.enforce_ohlcv_batch(
                             observation.frame,
-                            BarRequest(
-                                identity=resolved_identity,
-                                timeframe=self.timeframe,
-                                start=gap.start,
-                                end=gap.end,
-                            ),
+                            request,
                             error_cls=SyncError,
                         )
                         quality_warnings.extend((gap, finding) for finding in result.warnings)
                     observations.append((gap, observation))
 
                 monthly_batches: dict[YearMonth, list[pl.DataFrame]] = {}
-                monthly_observations: dict[YearMonth, provider._Observation] = {}
+                monthly_observations: dict[YearMonth, ValidatedBarObservation] = {}
+                source_name = observations[0][1].source.descriptor.name if observations else None
                 for _gap, observation in observations:
+                    if observation.source.descriptor.name != source_name:
+                        raise SyncError("one sync run produced multiple source lineages")
                     for year_month, batch in split_by_year_month(observation.frame):
                         monthly_batches.setdefault(year_month, []).append(batch)
                         monthly_observations.setdefault(year_month, observation)
@@ -379,8 +387,22 @@ class BarDataset:
                             dataset_key,
                             year_month,
                             pl.concat(batches, how="vertical").sort("timestamp"),
-                            provider=observation.provider,
-                            derivative=observation.derivative,
+                            provider=ProviderProvenance(
+                                name=observation.source.descriptor.name,
+                                version=observation.source.descriptor.version,
+                                api_version=observation.source.descriptor.api_version,
+                                market_id=observation.source.native_market_id,
+                                native_symbol=observation.source.native_symbol,
+                            ),
+                            derivative=(
+                                DerivativeInterpretation(
+                                    linear=observation.market.derivative.linear,
+                                    inverse=observation.market.derivative.inverse,
+                                    contract_size=observation.market.derivative.contract_size,
+                                )
+                                if observation.market.derivative is not None
+                                else None
+                            ),
                         )
                     )
             except Exception as exc:
@@ -412,6 +434,23 @@ class BarDataset:
                         started_at=started_at,
                         schema_version=SCHEMA_VERSION,
                         status="completed",
+                        provider_name=(
+                            observations[0][1].source.descriptor.name if observations else None
+                        ),
+                        provider_version=(
+                            observations[0][1].source.descriptor.version if observations else None
+                        ),
+                        provider_api_version=(
+                            observations[0][1].source.descriptor.api_version
+                            if observations
+                            else None
+                        ),
+                        provider_market_id=(
+                            observations[0][1].source.native_market_id if observations else None
+                        ),
+                        native_symbol=(
+                            observations[0][1].source.native_symbol if observations else None
+                        ),
                         completed_at=_current_clock(),
                         row_count=sum(item.frame.height for _, item in observations),
                     )
@@ -422,7 +461,7 @@ class BarDataset:
                             present = set(observation.frame.get_column("timestamp").to_list())
                             for window in observation.observed:
                                 finalizable_end = _finalizable_end(
-                                    time_bar, window.end, observation.completed_at
+                                    time_bar, window.end, observation.evidence_at
                                 )
                                 if finalizable_end <= window.start:
                                     continue
@@ -436,6 +475,12 @@ class BarDataset:
                                             present, time_bar, clipped_start, clipped_end
                                         )
                                     )
+                        has_canonical_provider_facts = bool(prepared) or bool(new_segments)
+                        if has_canonical_provider_facts:
+                            catalog.bind_source_lineage(
+                                dataset_key,
+                                observations[0][1].source.descriptor.name,
+                            )
                         if new_segments:
                             catalog.apply_coverage_batch(dataset_key, new_segments)
                             coverage_changed = True

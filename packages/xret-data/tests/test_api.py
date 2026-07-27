@@ -1,13 +1,7 @@
-"""Deterministic regression tests for the `MarketData`/`BarDataset` public
-API surface: fetch/sync/scan/scan_partial through the module-private
-CCXT-exchange test seam (P-3) and an isolated tmp-path `MarketDataConfig`.
+"""Deterministic regression tests for the public market-data API.
 
-No test here needs `ccxt` installed or the network: the exchange is a
-small fake registered through `provider._register_exchange_factory`, and
-`state_dir`/`data_dir` are always pointed at `tmp_path` via
-`dataset._set_config_override` (and `MarketData(config=...)`, which
-bypasses config resolution entirely) -- nothing here ever touches the
-real `~/.xret` tree.
+Each test injects a `CcxtProvider` with a local exchange factory. No test
+needs CCXT installed, uses the network, or touches the real Xret data tree.
 """
 
 from __future__ import annotations
@@ -21,7 +15,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
-from xret.data import dataset, provider
+from xret.data import dataset
 from xret.data.config import MarketDataConfig
 from xret.data.errors import (
     CatalogError,
@@ -33,8 +27,16 @@ from xret.data.errors import (
 )
 from xret.data.market_data import MarketData
 from xret.data.models import CoverageStatus, DatasetKey
-from xret.data.provider_pagination import ObservedWindow
-from xret.data.schema import OHLCV_SCHEMA
+from xret.data.providers import (
+    PROVIDER_API_VERSION,
+    PROVIDER_BAR_SCHEMA,
+    BarObservation,
+    ObservedWindow,
+    ProviderDescriptor,
+    ResolvedBarMarket,
+)
+from xret.data.providers import runtime as provider_runtime
+from xret.data.providers.ccxt import CcxtProvider
 from xret.data.storage import catalog as catalog_storage
 from xret.data.storage.catalog import (
     CATALOG_FILE_NAME,
@@ -46,6 +48,7 @@ from xret.data.storage.catalog import (
 )
 
 CLIENT_ID = "binance"
+_exchanges: dict[str, FakeExchange] = {}
 
 _BASE_MS = int(datetime(2024, 1, 1, tzinfo=UTC).timestamp() * 1000)
 
@@ -105,10 +108,12 @@ def _now(hour: int) -> datetime:
 
 @pytest.fixture(autouse=True)
 def _reset_seams():
-    provider._reset_test_seams()
+    _exchanges.clear()
+    provider_runtime._set_clock_override(None)
     dataset._reset_test_seams()
     yield
-    provider._reset_test_seams()
+    _exchanges.clear()
+    provider_runtime._set_clock_override(None)
     dataset._reset_test_seams()
 
 
@@ -119,11 +124,30 @@ def _configure(tmp_path: Path) -> MarketDataConfig:
 
 
 def _register(exchange: FakeExchange) -> None:
-    provider._register_exchange_factory(CLIENT_ID, lambda: exchange)
+    _exchanges[CLIENT_ID] = exchange
 
 
 def _register_perp(exchange: FakeExchange) -> None:
-    provider._register_exchange_factory("binanceusdm", lambda: exchange)
+    _exchanges["binanceusdm"] = exchange
+
+
+def _register_as(client_id: str, exchange: FakeExchange) -> None:
+    _exchanges[client_id] = exchange
+
+
+def _exchange_factory(client_id: str) -> FakeExchange:
+    return _exchanges[client_id]
+
+
+def _ccxt_provider() -> CcxtProvider:
+    return CcxtProvider(
+        exchange_factory=_exchange_factory,
+        version_provider=lambda: "test",
+    )
+
+
+def _market_data(config: MarketDataConfig) -> MarketData:
+    return MarketData(config=config, provider=_ccxt_provider())
 
 
 def _bars(market_data: MarketData) -> dataset.BarDataset:
@@ -170,9 +194,9 @@ def test_fetch_has_no_storage_side_effect(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(5))
+    provider_runtime._set_clock_override(lambda: _now(5))
 
-    frame = _bars(MarketData(config=config)).fetch(_now(0), _now(3))
+    frame = _bars(_market_data(config)).fetch(_now(0), _now(3))
 
     assert frame.height == 3
     assert len(exchange.fetch_calls) == 1
@@ -189,10 +213,10 @@ def test_sync_is_idempotent_and_scan_is_lazy(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     first = bars.sync(_now(0), _now(3))
     assert first.is_complete
@@ -219,10 +243,10 @@ def test_successful_empty_sync_records_unavailable_and_terminalizes_run(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     result = bars.sync(_now(0), _now(3))
 
     assert not result.is_complete
@@ -247,11 +271,11 @@ def test_sync_traverses_an_empty_bounded_window_before_later_data(tmp_path: Path
         client_id="okx",
         candles=[_row(0), _row(200)],
     )
-    provider._register_exchange_factory("okx", lambda: exchange)
-    provider._set_clock_override(lambda: end + timedelta(hours=10))
+    _register_as("okx", exchange)
+    provider_runtime._set_clock_override(lambda: end + timedelta(hours=10))
     dataset._set_clock_override(lambda: end + timedelta(hours=10))
     config = _configure(tmp_path)
-    bars = MarketData(config=config).bars(
+    bars = _market_data(config).bars(
         exchange="okx", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
@@ -273,19 +297,14 @@ def test_sync_traverses_an_empty_bounded_window_before_later_data(tmp_path: Path
 
 
 def test_sync_rejects_incomplete_provider_observation_before_publication(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     config = _configure(tmp_path)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+
     frame = pl.DataFrame(
         {
-            "exchange": ["binance"],
-            "symbol": ["BTC/USDT"],
-            "market": ["spot"],
-            "settle": [None],
-            "timeframe": ["1h"],
             "timestamp": [_now(0)],
             "open": [100.0],
             "high": [101.0],
@@ -293,23 +312,29 @@ def test_sync_rejects_incomplete_provider_observation_before_publication(
             "close": [100.5],
             "volume": [10.0],
         },
-        schema=OHLCV_SCHEMA,
+        schema=PROVIDER_BAR_SCHEMA,
     )
-    observation = provider._Observation(
-        frame=frame,
-        observed=(ObservedWindow(_now(0), _now(1)),),
-        provider=provider.ProviderIdentity(
-            name="binance",
-            ccxt_version="4.5.0",
-            market_id="BTCUSDT",
-            native_symbol="BTC/USDT",
-        ),
-        derivative=None,
-        completed_at=_now(10),
-    )
-    monkeypatch.setattr(provider, "_observe_bars", lambda *_args: observation)
 
-    with pytest.raises(SyncError, match="incomplete provider observation"):
+    class IncompleteProvider:
+        descriptor = ProviderDescriptor("incomplete", "test", PROVIDER_API_VERSION)
+
+        def resolve_market(self, identity):
+            return ResolvedBarMarket(
+                identity=identity,
+                native_market_id="BTCUSDT",
+                native_symbol="BTC/USDT",
+                timeframes=frozenset({"1h"}),
+            )
+
+        def observe_bars(self, request, market):
+            return BarObservation(
+                frame=frame,
+                observed=(ObservedWindow(_now(0), _now(1)),),
+            )
+
+    bars = _bars(MarketData(config=config, provider=IncompleteProvider()))
+
+    with pytest.raises(ProviderError, match="incomplete provider observation"):
         bars.sync(_now(0), _now(3))
 
     partial = bars.scan_partial(_now(0), _now(3))
@@ -323,8 +348,8 @@ def test_sync_rejects_incomplete_provider_observation_before_publication(
 def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
-    provider._register_exchange_factory("kraken", lambda: exchange)
-    bars = MarketData(config=config).bars(
+    _register_as("kraken", exchange)
+    bars = _market_data(config).bars(
         exchange="kraken", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
@@ -358,8 +383,8 @@ def test_middle_page_failure_publishes_no_partial_observation(tmp_path: Path) ->
 
     config = _configure(tmp_path)
     exchange = FailingMiddleWindowExchange(client_id="okx", candles=[_row(0), _row(200)])
-    provider._register_exchange_factory("okx", lambda: exchange)
-    bars = MarketData(config=config).bars(
+    _register_as("okx", exchange)
+    bars = _market_data(config).bars(
         exchange="okx", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
@@ -378,10 +403,10 @@ def test_nonfatal_quality_warning_is_run_linked_and_rebuild_resets_it(tmp_path: 
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3), skip=frozenset({1})))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    result = _bars(MarketData(config=config)).sync(_now(0), _now(3))
+    result = _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert [(warning.code, warning.start, warning.end) for warning in result.warnings] == [
         ("coverage.timeframe_gap", _now(0), _now(3))
@@ -392,7 +417,7 @@ def test_nonfatal_quality_warning_is_run_linked_and_rebuild_resets_it(tmp_path: 
         ("coverage.timeframe_gap", result.run_id)
     ]
 
-    MarketData(config=config).maintenance.rebuild_catalog()
+    _market_data(config).maintenance.rebuild_catalog()
 
     with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
         assert catalog.list_quality_events(result.dataset_key) == ()
@@ -402,9 +427,9 @@ def test_sync_aggregates_same_month_missing_gaps_before_publication(tmp_path: Pa
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 4)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     key = DatasetKey.from_identity(bars.identity, timeframe=bars.timeframe)
 
     with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
@@ -426,10 +451,10 @@ def test_sync_leaves_explicit_unfinalized_tail_missing(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(4))
+    provider_runtime._set_clock_override(lambda: _now(4))
     dataset._set_clock_override(lambda: _now(4))
 
-    result = _bars(MarketData(config=config)).sync(_now(0), _now(6))
+    result = _bars(_market_data(config)).sync(_now(0), _now(6))
 
     assert result.changed
     assert result.written_partitions == 0
@@ -481,9 +506,9 @@ def test_distinct_dataset_syncs_overlap_provider_work_and_preserve_catalog_coher
     config = _configure(tmp_path)
     exchange = BlockingExchange()
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    market_data = MarketData(config=config)
+    market_data = _market_data(config)
     btc_bars = _bars(market_data)
     eth_bars = market_data.bars(
         exchange="binance", symbol="ETH/USDT", market="spot", timeframe="1h"
@@ -544,9 +569,9 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
     config = _configure(tmp_path)
     exchange = BlockingExchange()
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     second_sync_started = threading.Event()
 
     def sync_second() -> dataset.SyncResult:
@@ -591,9 +616,9 @@ def test_strict_and_partial_scan_contracts(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     bars.sync(_now(0), _now(3))
 
     with pytest.raises(CoverageError):
@@ -611,9 +636,9 @@ def test_provider_internal_gap_is_not_marked_available(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3), skip=frozenset({1})))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     bars.sync(_now(0), _now(3))
 
     with pytest.raises(CoverageError):
@@ -629,7 +654,7 @@ def test_sync_surfaces_unsupported_capability(tmp_path: Path) -> None:
     exchange = FakeExchange(has_fetch_ohlcv=False)
     _register(exchange)
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(UnsupportedMarketError):
         bars.sync(_now(0), _now(3))
@@ -641,8 +666,8 @@ def test_malformed_provider_observation_leaves_coverage_missing_and_unpublished(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[[_BASE_MS]])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    provider_runtime._set_clock_override(lambda: _now(10))
+    bars = _bars(_market_data(config))
     key = DatasetKey.from_identity(bars.identity, timeframe=bars.timeframe)
 
     with pytest.raises(ProviderError, match="malformed candle"):
@@ -675,7 +700,7 @@ def test_provider_exception_leaves_coverage_missing_and_unpublished(tmp_path: Pa
 
     config = _configure(tmp_path)
     _register(FailingExchange())
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     key = DatasetKey.from_identity(bars.identity, timeframe=bars.timeframe)
 
     with pytest.raises(ProviderError, match="injected provider failure"):
@@ -719,9 +744,9 @@ def test_sync_records_failed_run_on_provider_error(tmp_path: Path) -> None:
 
     config = _configure(tmp_path)
     _register(FailingExchange())
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(ProviderError, match="provider down"):
         bars.sync(_now(0), _now(3))
@@ -742,9 +767,9 @@ def test_sync_records_failed_run_on_quality_error(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[[_BASE_MS]])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(ProviderError, match="malformed candle"):
         bars.sync(_now(0), _now(3))
@@ -765,9 +790,9 @@ def test_sync_records_failed_run_on_prepare_error(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     def failing_prepare(*args, **kwargs):
         raise SyncError("injected prepare failure")
@@ -803,9 +828,9 @@ def test_sync_failed_run_note_when_catalog_unavailable(
 
     config = _configure(tmp_path)
     _register(FailingExchange())
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     # Make the failed-run recording itself fail by breaking Catalog.open
     original_open = Catalog.open
@@ -837,9 +862,9 @@ def test_sync_records_failed_run_on_pre_publication_phase3_error(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     def failing_publish(*args, **kwargs):
         raise OSError("filesystem error before replace")
@@ -866,7 +891,7 @@ def test_uncertain_terminal_commit_uses_one_read_only_visibility_proof(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
     original_transaction = Catalog.transaction
     original_record_ingestion_run = Catalog.record_ingestion_run
@@ -899,7 +924,7 @@ def test_uncertain_terminal_commit_uses_one_read_only_visibility_proof(
     monkeypatch.setattr(Catalog, "transaction", commit_then_report_uncertain)
     monkeypatch.setattr(catalog_storage, "terminal_commit_is_visible", count_visibility_checks)
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     result = bars.sync(_now(0), _now(3))
 
     assert visibility_checks == 1
@@ -918,7 +943,7 @@ def test_uncertain_terminal_commit_fails_when_terminal_facts_are_not_visible(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
     original_transaction = Catalog.transaction
     original_record_ingestion_run = Catalog.record_ingestion_run
@@ -954,7 +979,7 @@ def test_uncertain_terminal_commit_fails_when_terminal_facts_are_not_visible(
     with pytest.raises(
         SyncError, match=r"catalog update failed after publishing canonical Parquet data"
     ):
-        _bars(MarketData(config=config)).sync(_now(0), _now(3))
+        _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert visibility_checks == 1
 
@@ -965,7 +990,7 @@ def test_uncertain_terminal_commit_without_publication_uses_one_visibility_proof
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
     original_transaction = Catalog.transaction
     original_record_ingestion_run = Catalog.record_ingestion_run
@@ -999,7 +1024,7 @@ def test_uncertain_terminal_commit_without_publication_uses_one_visibility_proof
     monkeypatch.setattr(Catalog, "transaction", commit_then_report_uncertain)
     monkeypatch.setattr(catalog_storage, "terminal_commit_is_visible", count_visibility_checks)
 
-    result = _bars(MarketData(config=config)).sync(_now(0), _now(3))
+    result = _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert visibility_checks == 1
     assert result.changed
@@ -1015,7 +1040,7 @@ def test_later_month_publication_failure_leaves_only_prior_month_canonical(
     end = datetime(2024, 2, 1, 1, tzinfo=UTC)
     exchange = FakeExchange(candles=[_row(743), _row(744)])
     _register(exchange)
-    provider._set_clock_override(lambda: datetime(2024, 3, 1, tzinfo=UTC))
+    provider_runtime._set_clock_override(lambda: datetime(2024, 3, 1, tzinfo=UTC))
     original_publish = dataset.publish_prepared_file
     publish_calls = 0
 
@@ -1027,7 +1052,7 @@ def test_later_month_publication_failure_leaves_only_prior_month_canonical(
         return original_publish(prepared)
 
     monkeypatch.setattr(dataset, "publish_prepared_file", fail_second_publication)
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     key = DatasetKey.from_identity(bars.identity, timeframe=bars.timeframe)
 
     with pytest.raises(
@@ -1055,14 +1080,14 @@ def test_catalog_failure_after_publication_fails_closed_and_requires_validation(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
 
     def fail_record_file(self: Catalog, metadata: object, *, run_id: str | None = None) -> None:
         raise CatalogError("injected catalog failure")
 
     monkeypatch.setattr(Catalog, "record_file", fail_record_file)
 
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     with pytest.raises(
         SyncError, match=r"publishing canonical Parquet data; run maintenance\.validate\(\)"
     ) as error:
@@ -1071,7 +1096,7 @@ def test_catalog_failure_after_publication_fails_closed_and_requires_validation(
     assert isinstance(error.value.__cause__, CatalogError)
     assert any(config.data_dir.rglob("data.parquet"))
 
-    validation = MarketData(config=config).maintenance.validate()
+    validation = _market_data(config).maintenance.validate()
     assert not validation.is_valid
     assert any("orphan canonical file not indexed" in issue for issue in validation.issues)
 
@@ -1092,10 +1117,10 @@ def test_explicit_config_is_honored_without_the_module_override_seam(tmp_path: P
     config = MarketDataConfig(state_dir=tmp_path / "state", data_dir=tmp_path / "data")
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    result = _bars(MarketData(config=config)).sync(_now(0), _now(3))
+    result = _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert result.changed
     assert result.fetched_rows == 3
@@ -1114,10 +1139,10 @@ def test_perpetual_sync_infers_omitted_settle_before_dataset_key(tmp_path: Path)
         client_id="binanceusdm", markets=_PERP_MARKETS, candles=_hourly_candles(range(0, 3))
     )
     _register_perp(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    result = _perp_bars(MarketData(config=config)).sync(_now(0), _now(3))
+    result = _perp_bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert result.is_complete
     assert result.changed
@@ -1148,7 +1173,7 @@ def test_perpetual_sync_with_ambiguous_settle_raises_unsupported_market_error(
     _register_perp(exchange)
 
     with pytest.raises(UnsupportedMarketError):
-        _perp_bars(MarketData(config=config)).sync(_now(0), _now(3))
+        _perp_bars(_market_data(config)).sync(_now(0), _now(3))
 
 
 # --------------------------------------------------------------------------
@@ -1161,7 +1186,7 @@ def test_local_perpetual_read_without_settle_or_local_coverage_raises_invalid_re
     tmp_path: Path,
 ) -> None:
     config = _configure(tmp_path)
-    bars = _perp_bars(MarketData(config=config))
+    bars = _perp_bars(_market_data(config))
 
     with pytest.raises(InvalidRequestError):
         bars.scan(_now(0), _now(3))
@@ -1175,12 +1200,12 @@ def test_local_perpetual_read_resolves_settle_from_local_catalog(tmp_path: Path)
         client_id="binanceusdm", markets=_PERP_MARKETS, candles=_hourly_candles(range(0, 3))
     )
     _register_perp(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
 
-    _perp_bars(MarketData(config=config)).sync(_now(0), _now(3))
+    _perp_bars(_market_data(config)).sync(_now(0), _now(3))
 
-    read_bars = _perp_bars(MarketData(config=config))
+    read_bars = _perp_bars(_market_data(config))
     collected = read_bars.scan(_now(0), _now(3)).collect()
     assert collected.height == 3
     assert (collected["settle"] == "USDT").all()
@@ -1198,14 +1223,14 @@ def test_local_perpetual_scans_infer_settle_without_mutating_catalog(
         client_id="binanceusdm", markets=_PERP_MARKETS, candles=_hourly_candles(range(0, 3))
     )
     _register_perp(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    _perp_bars(MarketData(config=config)).sync(_now(0), _now(3))
+    _perp_bars(_market_data(config)).sync(_now(0), _now(3))
 
     db_path = config.state_dir / CATALOG_FILE_NAME
     before = db_path.read_bytes()
 
-    bars = _perp_bars(MarketData(config=config))
+    bars = _perp_bars(_market_data(config))
     assert bars.scan(_now(0), _now(3)).collect().height == 3
     assert bars.scan_partial(_now(0), _now(3)).data.collect().height == 3
 
@@ -1216,9 +1241,9 @@ def test_read_only_catalog_snapshot_uses_coherent_active_wal_state(tmp_path: Pat
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    _bars(MarketData(config=config)).sync(_now(0), _now(3))
+    _bars(_market_data(config)).sync(_now(0), _now(3))
 
     db_path = config.state_dir / CATALOG_FILE_NAME
     writer = sqlite3.connect(db_path, isolation_level=None)
@@ -1278,17 +1303,17 @@ def test_unlisted_symbol_raises_unsupported_market_error(tmp_path: Path) -> None
     _register(exchange)
 
     with pytest.raises(UnsupportedMarketError):
-        _bars(MarketData(config=config)).fetch(_now(0), _now(1))
+        _bars(_market_data(config)).fetch(_now(0), _now(1))
 
 
 def test_unsupported_timeframe_raises_unsupported_market_error(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 1)), timeframes={"5m": "5m"})
     _register(exchange)
-    provider._set_clock_override(lambda: _now(5))
+    provider_runtime._set_clock_override(lambda: _now(5))
 
     with pytest.raises(UnsupportedMarketError):
-        _bars(MarketData(config=config)).fetch(_now(0), _now(1))
+        _bars(_market_data(config)).fetch(_now(0), _now(1))
 
 
 # --------------------------------------------------------------------------
@@ -1299,7 +1324,7 @@ def test_unsupported_timeframe_raises_unsupported_market_error(tmp_path: Path) -
 def test_maintenance_validate_on_empty_store_creates_nothing(tmp_path: Path) -> None:
     config = MarketDataConfig(state_dir=tmp_path / "state", data_dir=tmp_path / "data")
 
-    result = MarketData(config=config).maintenance.validate()
+    result = _market_data(config).maintenance.validate()
 
     assert result.is_valid
     assert not config.state_dir.exists()
@@ -1310,7 +1335,7 @@ def test_unaligned_sync_fails_before_provider_or_storage(tmp_path: Path) -> None
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(InvalidRequestError, match="must align"):
         bars.sync(_now(0) + timedelta(minutes=30), _now(2))
@@ -1326,7 +1351,7 @@ def test_zero_publication_catalog_fault_rolls_back_coverage(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=[])
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
     original = Catalog.record_ingestion_run
 
@@ -1336,7 +1361,7 @@ def test_zero_publication_catalog_fault_rolls_back_coverage(
         original(self, run)
 
     monkeypatch.setattr(Catalog, "record_ingestion_run", fail_terminal)
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(CatalogError, match="terminal transaction"):
         bars.sync(_now(0), _now(3))
@@ -1351,9 +1376,9 @@ def test_sync_reinserts_run_deleted_by_rebuild_before_publication(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    market_data = MarketData(config=config)
+    market_data = _market_data(config)
     original_gate = dataset.locking.catalog_gate
     gate_calls = 0
 
@@ -1378,9 +1403,9 @@ def test_sync_fails_before_publication_when_rebuilt_run_identity_conflicts(
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    market_data = MarketData(config=config)
+    market_data = _market_data(config)
     bars = _bars(market_data)
     key = DatasetKey.from_identity(bars.identity, timeframe="1h")
     original_gate = dataset.locking.catalog_gate
@@ -1425,7 +1450,7 @@ def test_sync_refuses_managed_data_when_catalog_is_absent(tmp_path: Path) -> Non
     _register(exchange)
 
     with pytest.raises(CatalogError, match="managed storage evidence"):
-        _bars(MarketData(config=config)).sync(_now(0), _now(3))
+        _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert exchange.fetch_calls == []
     assert not (config.state_dir / CATALOG_FILE_NAME).exists()
@@ -1435,9 +1460,9 @@ def test_scans_fail_closed_when_available_catalog_file_is_missing(tmp_path: Path
     config = _configure(tmp_path)
     exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
     _register(exchange)
-    provider._set_clock_override(lambda: _now(10))
+    provider_runtime._set_clock_override(lambda: _now(10))
     dataset._set_clock_override(lambda: _now(10))
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
     bars.sync(_now(0), _now(3))
     next(config.data_dir.rglob("*.parquet")).unlink()
 
@@ -1452,7 +1477,7 @@ def test_scans_refuse_ambiguous_managed_storage_when_catalog_is_absent(tmp_path:
     ambiguous = config.data_dir / ".data.parquet.tmp-interrupted"
     ambiguous.parent.mkdir(parents=True)
     ambiguous.write_bytes(b"incomplete managed publication")
-    bars = _bars(MarketData(config=config))
+    bars = _bars(_market_data(config))
 
     with pytest.raises(
         CatalogError, match="catalog is absent while managed storage evidence exists"

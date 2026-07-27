@@ -9,6 +9,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - [Getting started](getting-started/index.md) — install `xret-data`, synchronize a market, and read it locally.
 - [Synchronize and read bars](guides/synchronization.md) — choose between `fetch`, `sync`, `scan`, and `scan_partial`.
 - [Market data API](reference/api.md) — exact public contracts.
+- [Historical-bar providers](reference/providers.md) — implement or install a custom acquisition provider.
 - [Verified support](quality/verified-support.md) — combinations exercised against real providers.
 
 ## Browse by intent

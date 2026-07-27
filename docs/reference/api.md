@@ -13,10 +13,19 @@
 ## `MarketData`
 
 ```python
-MarketData(config: MarketDataConfig | None = None)
+MarketData(
+    config: MarketDataConfig | None = None,
+    *,
+    provider: HistoricalBarProvider | str | None = None,
+)
 ```
 
-Construction resolves configuration but performs no provider or storage I/O. An explicit config bypasses discovery.
+Construction resolves configuration but performs no provider or storage I/O. An
+explicit config bypasses configuration discovery. Omitting `provider` selects the
+built-in CCXT provider. A provider object uses direct dependency injection; a
+string selects an installed provider entry point. Both forms remain unresolved
+until `fetch` or `sync` needs the provider. See
+[Historical-bar providers](providers.md).
 
 ### `bars`
 
@@ -61,6 +70,11 @@ sync(start, end=None) -> SyncResult
 
 Reads local coverage, fetches only implicit `missing` intervals, validates fetched bars and exhaustive observation evidence, and publishes canonical monthly Parquet files with catalog updates. `available` is persisted coverage backed by canonical bars. A successful bounded provider window records each absent completed bar boundary inside that window as `unavailable`; unobserved ranges remain `missing`, and failures never create negative coverage. A fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
 
+The first successful synchronization binds a dataset's source lineage to the
+provider descriptor name. Later provider versions with the same name may extend
+that history; a different provider name is rejected before publication. Source
+lineage is an acquisition-history constraint, not part of public market identity.
+
 `SyncResult` exposes `dataset_key`, `run_id`, `changed`, `fetched_rows`, `written_partitions`, `covered`, `gaps`, `warnings`, `is_complete`, and `require_complete()`.
 
 ## `BarDataset.scan`
@@ -97,7 +111,17 @@ market_data.maintenance.rebuild_catalog()
 
 `validate()` compares the rebuildable SQLite operational index with canonical Parquet metadata and does not mutate state. `rebuild_catalog()` is the exclusive maintenance operation: it rebuilds SQLite only from sufficient canonical Parquet evidence, never mutates Parquet, and fails closed when evidence is insufficient. Xret has no automatic repair, cause taxonomy, synthetic bars, or forensic recovery.
 
-Canonical Parquet holds OHLCV rows and domain/self-description metadata. SQLite uses WAL and short transactions for operational coverage, physical SHA values, file locations, and ingestion runs.
+Canonical Parquet holds OHLCV rows and provider-neutral domain, source, and
+self-description metadata. SQLite uses WAL and short transactions for operational
+coverage, source-lineage binding, physical SHA values, file locations, and
+ingestion runs. Negative evidence for an unavailable-only dataset has no Parquet
+artifact: if its catalog is lost and rebuilt, that evidence and its lineage return
+to unknown rather than being invented.
+
+Xret 0.x does not migrate incompatible canonical or catalog schemas. Normal open
+paths reject them without mutation. Catalog rebuild accepts only canonical Parquet
+written in the current schema; handling an older store is an explicit
+application/operator decision, not an automatic compatibility path.
 
 ## Canonical bar schema
 

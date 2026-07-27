@@ -13,7 +13,8 @@ Every public domain or operational error inherits from `xret.data.errors.XretDat
 | `SyncError` | Synchronization could not complete safely, including fetched-batch validation failure. |
 | `CatalogError` | Catalog validation, rebuilding, locking, or persistence failed. |
 
-Underlying CCXT, SQLite, and filesystem failures are chained as causes where applicable. A provider or validation failure does not mark coverage unavailable.
+Underlying provider, SQLite, and filesystem failures are chained as causes where
+applicable. A provider or validation failure does not mark coverage unavailable.
 
 ```python
 from xret.data.errors import CoverageError

@@ -1,8 +1,8 @@
 """`MarketData`: the public top-level facade (Decision 1).
 
-Construction never performs I/O and takes no public provider/clock
-injection (P-3, Decision 22): `config` is the only constructor
-parameter. When `config` is omitted, `MarketData` resolves it via
+Construction never performs I/O. A historical-bar provider may be bound
+directly; omitting it selects the built-in CCXT implementation. When
+`config` is omitted, `MarketData` resolves it via
 `xret.data.config.resolve_config()` (`XRET_CONFIG` -> `~/.xret/config.toml`
 -> built-in defaults); an explicit `config` bypasses that resolution
 entirely (S5).
@@ -22,6 +22,8 @@ from xret.data.config import MarketDataConfig, resolve_config
 from xret.data.dataset import BarDataset
 from xret.data.errors import CatalogError
 from xret.data.models import CatalogRebuildResult, CatalogValidationResult, Market, MarketIdentity
+from xret.data.providers import HistoricalBarProvider
+from xret.data.providers.discovery import ProviderHandle
 from xret.data.storage.catalog import CATALOG_FILE_NAME
 from xret.data.storage.recovery import RecoveryService
 
@@ -91,8 +93,14 @@ class MarketData:
     ```
     """
 
-    def __init__(self, config: MarketDataConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: MarketDataConfig | None = None,
+        *,
+        provider: HistoricalBarProvider | str | None = None,
+    ) -> None:
         self._config = config if config is not None else resolve_config()
+        self._provider = ProviderHandle(provider)
 
     @property
     def config(self) -> MarketDataConfig:
@@ -129,4 +137,5 @@ class MarketData:
         )
         dataset = BarDataset(identity=identity, timeframe=timeframe)
         object.__setattr__(dataset, "_config", self._config)
+        object.__setattr__(dataset, "_provider", self._provider)
         return dataset

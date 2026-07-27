@@ -28,6 +28,7 @@ from xret.data.storage.catalog import (
     QualityEventMetadata,
     apply_update,
     connect,
+    detect_incompatible_state,
     terminal_commit_is_visible,
 )
 
@@ -238,6 +239,38 @@ def test_precurrent_schema_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(CatalogError):
         connect(db_path)
+
+
+def test_previous_v3_catalog_is_rejected_without_mutation(tmp_path: Path) -> None:
+    db_path = tmp_path / CATALOG_FILE_NAME
+    with sqlite3.connect(db_path) as connection:
+        connection.execute("CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY)")
+        connection.execute("INSERT INTO schema_migrations VALUES (3)")
+        connection.execute(
+            """
+            CREATE TABLE datasets (
+                id INTEGER PRIMARY KEY,
+                exchange TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                market TEXT NOT NULL,
+                settle TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE (exchange, symbol, market, settle, timeframe)
+            )
+            """
+        )
+    before = db_path.read_bytes()
+
+    assert detect_incompatible_state(db_path)
+    with pytest.raises(CatalogError, match="incompatible"):
+        Catalog.open(db_path)
+
+    assert db_path.read_bytes() == before
+    with sqlite3.connect(db_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(datasets)")}
+    assert "provider_name" not in columns
 
 
 def test_run_identity_is_immutable_and_transaction_rolls_back(catalog: Catalog) -> None:

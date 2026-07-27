@@ -48,7 +48,10 @@ class _File:
     min_timestamp: datetime
     max_timestamp: datetime
     physical_hash: str
-    schema_version: int = 4
+    schema_version: int = 5
+    provider: parquet.ProviderProvenance = parquet.ProviderProvenance(
+        "ccxt", "4.5.66", 1, "BTCUSDT", "BTC/USDT"
+    )
 
 
 @contextmanager
@@ -70,6 +73,7 @@ def _file(
     tmp_path: Path,
     year_month: YearMonth | None = None,
     instant: datetime | None = None,
+    provider: parquet.ProviderProvenance | None = None,
 ) -> _File:
     year_month = year_month or YearMonth(2024, 1)
     instant = instant or datetime(2024, 1, 1, tzinfo=UTC)
@@ -95,7 +99,8 @@ def _file(
             _key(),
             year_month,
             frame,
-            provider=parquet.ProviderIdentity("binance", "4.5.66", "BTCUSDT", "BTC/USDT"),
+            provider=provider
+            or parquet.ProviderProvenance("ccxt", "4.5.66", 1, "BTCUSDT", "BTC/USDT"),
         )
     )
     return _File(
@@ -107,6 +112,7 @@ def _file(
         committed.min_timestamp,
         committed.max_timestamp,
         committed.physical_hash,
+        provider=committed.provider,
     )
 
 
@@ -116,6 +122,7 @@ def _config(tmp_path: Path) -> MarketDataConfig:
 
 def _record(db_path: Path, file: _File) -> None:
     with Catalog.open(db_path) as catalog:
+        catalog.bind_source_lineage(file.dataset_key, file.provider.name)
         catalog.record_file(
             FileMetadata(
                 file.dataset_key,
@@ -148,7 +155,30 @@ def test_rebuild_recovers_after_sqlite_catalog_deletion_from_current_parquet(
     with Catalog.open(db_path) as catalog:
         recovered = catalog.list_files()
     assert recovered[0].relative_path == file.relative_path
-    assert recovered[0].schema_version == 4
+    assert recovered[0].schema_version == 5
+
+
+def test_rebuild_rejects_conflicting_canonical_source_lineages(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    _file(
+        tmp_path,
+        YearMonth(2024, 1),
+        datetime(2024, 1, 1, tzinfo=UTC),
+        parquet.ProviderProvenance("source-a", "1", 1, "BTCUSDT", "BTC/USDT"),
+    )
+    _file(
+        tmp_path,
+        YearMonth(2024, 2),
+        datetime(2024, 2, 1, tzinfo=UTC),
+        parquet.ProviderProvenance("source-b", "1", 1, "BTCUSDT", "BTC/USDT"),
+    )
+
+    with pytest.raises(CatalogError, match="conflicting source lineages"):
+        rebuild_catalog_state(
+            config.state_dir / "catalog.sqlite3",
+            config,
+            gate_factory=_gate,
+        )
 
 
 def test_rebuild_recovers_perpetual_metadata_first_identity_and_canonical_key(
@@ -185,7 +215,7 @@ def test_rebuild_recovers_perpetual_metadata_first_identity_and_canonical_key(
             key,
             YearMonth(2024, 1),
             frame,
-            provider=parquet.ProviderIdentity("ccxt", "4.5.66", "BTCUSDT", "BTC/USDT:USDT"),
+            provider=parquet.ProviderProvenance("ccxt", "4.5.66", 1, "BTCUSDT", "BTC/USDT:USDT"),
             derivative=parquet.DerivativeInterpretation(
                 linear=True, inverse=False, contract_size="1"
             ),
@@ -573,7 +603,7 @@ def _file_with_timestamps(
             key,
             year_month,
             frame,
-            provider=parquet.ProviderIdentity("binance", "4.5.66", "BTCUSDT", "BTC/USDT"),
+            provider=parquet.ProviderProvenance("ccxt", "4.5.66", 1, "BTCUSDT", "BTC/USDT"),
         )
     )
     return _File(
@@ -585,6 +615,7 @@ def _file_with_timestamps(
         committed.min_timestamp,
         committed.max_timestamp,
         committed.physical_hash,
+        provider=committed.provider,
     )
 
 

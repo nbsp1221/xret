@@ -146,6 +146,6 @@ def test_unreadable_catalog_without_sidecars_is_replaced_and_revalidated(
 
     assert result.recovered_files == 0
     with sqlite3.connect(db_path) as connection:
-        assert connection.execute("SELECT version FROM schema_migrations").fetchone() is not None
+        assert connection.execute("SELECT version FROM schema_info").fetchone() is not None
     assert foreign.read_text() == "user-owned"
     assert validate_catalog_state(db_path, config, file_source=lambda: []).is_valid

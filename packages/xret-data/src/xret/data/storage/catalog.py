@@ -48,7 +48,7 @@ __all__ = [
 #: Current, incompatible catalog schema.  Older layouts are rejected rather
 #: than migrated because their retry, generation, and provenance semantics
 #: are retired.
-SCHEMA_VERSION: Final[int] = 3
+SCHEMA_VERSION: Final[int] = 4
 #: Name of the SQLite coverage/provenance index file under `state_dir`.
 CATALOG_FILE_NAME: Final[str] = "catalog.sqlite3"
 
@@ -207,8 +207,11 @@ class IngestionRunMetadata:
     started_at: datetime
     schema_version: int
     status: str = "running"
-    ccxt_version: str | None = None
-    raw_market_id: str | None = None
+    provider_name: str | None = None
+    provider_version: str | None = None
+    provider_api_version: int | None = None
+    provider_market_id: str | None = None
+    native_symbol: str | None = None
     actual_start: datetime | None = None
     actual_end: datetime | None = None
     retrieved_at: datetime | None = None
@@ -243,10 +246,10 @@ class FileRow:
 
 
 # --------------------------------------------------------------------------
-# Connection lifecycle and migrations
+# Connection lifecycle and current-schema installation
 # --------------------------------------------------------------------------
 
-_DDL_V3: Final[tuple[str, ...]] = (
+_CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS datasets (
         id INTEGER PRIMARY KEY,
@@ -255,6 +258,7 @@ _DDL_V3: Final[tuple[str, ...]] = (
         market TEXT NOT NULL,
         settle TEXT NOT NULL,
         timeframe TEXT NOT NULL,
+        provider_name TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         UNIQUE (exchange, symbol, market, settle, timeframe)
@@ -287,8 +291,11 @@ _DDL_V3: Final[tuple[str, ...]] = (
         started_at TEXT NOT NULL,
         schema_version INTEGER NOT NULL,
         status TEXT NOT NULL,
-        ccxt_version TEXT,
-        raw_market_id TEXT,
+        provider_name TEXT,
+        provider_version TEXT,
+        provider_api_version INTEGER,
+        provider_market_id TEXT,
+        native_symbol TEXT,
         actual_start TEXT,
         actual_end TEXT,
         retrieved_at TEXT,
@@ -329,7 +336,6 @@ _DDL_V3: Final[tuple[str, ...]] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_quality_dataset ON quality_events(dataset_id)",
 )
-_MIGRATIONS: Final[tuple[tuple[int, tuple[str, ...]], ...]] = ((SCHEMA_VERSION, _DDL_V3),)
 
 
 def _open_read_only_connection(db_path: Path) -> sqlite3.Connection:
@@ -425,23 +431,20 @@ def terminal_commit_is_visible(
 
 
 def detect_incompatible_state(db_path: Path) -> bool:
-    """Whether `db_path` is a pre-v2 (or otherwise incompatible) catalog.
+    """Whether `db_path` is not exactly the current catalog schema.
 
     Read-only and side-effect-free: briefly opens `db_path` (if it
-    exists) to inspect `sqlite_master`/`schema_migrations`, then closes
-    it -- never runs `connect()`'s migration path. Returns `False` when
+    exists) to inspect `sqlite_master`/`schema_info`, then closes it.
+    Returns `False` when
     `db_path` does not exist (nothing to detect yet) or the current
-    `SCHEMA_VERSION` is already recorded as applied; returns `True` for
+    `SCHEMA_VERSION` is recorded; returns `True` for
     every other case, including a corrupt/unopenable file, a database
-    with `datasets`-like content but no `schema_migrations` table, or a
-    ledger whose most recent applied version predates `SCHEMA_VERSION`.
+    with content but no `schema_info` table, or a different version.
 
-    This function only detects; it never deletes or migrates anything.
+    This function only detects; it never deletes, repairs, or migrates anything.
     `rebuild_catalog_state` uses it to select the validated replacement path
     for a missing, incompatible, or unreadable catalog. `connect()` and
-    `Catalog.open()` refuse internally (via `_migrate`) rather than silently
-    stamping the current version onto legacy tables, so callers still get a
-    typed `CatalogError` before mutation.
+    `Catalog.open()` refuse existing incompatible state before mutation.
     """
     if not db_path.is_file():
         return False
@@ -465,12 +468,10 @@ def detect_incompatible_state(db_path: Path) -> bool:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        if "schema_migrations" not in tables:
+        if "schema_info" not in tables:
             return True
-        applied = {
-            row[0] for row in probe.execute("SELECT version FROM schema_migrations").fetchall()
-        }
-        return SCHEMA_VERSION not in applied
+        rows = probe.execute("SELECT version FROM schema_info WHERE singleton = 1").fetchall()
+        return len(rows) != 1 or rows[0][0] != SCHEMA_VERSION
     except sqlite3.DatabaseError:
         return True
     finally:
@@ -482,7 +483,7 @@ def detect_incompatible_state(db_path: Path) -> bool:
 def connect(
     db_path: Path, *, busy_timeout_ms: int = _BUSY_TIMEOUT_MS_DEFAULT
 ) -> sqlite3.Connection:
-    """Open `db_path`, configure WAL/foreign-keys/busy-timeout, and migrate.
+    """Open `db_path` and require or install exactly the current schema.
 
     `db_path` may be `:memory:`-like or a real file; the parent directory
     is created if missing. The returned connection has `row_factory` set
@@ -490,11 +491,8 @@ def connect(
     `transaction()` helper).
 
     Raises:
-        CatalogError: `db_path` names an incompatible (pre-v2, or
-            otherwise unrecognized) database -- see `_migrate`. This is
-            the typed failure IR-4 requires: a normal `connect()` never
-            silently mutates or misclassifies a legacy database, even if
-            a caller forgot to check `detect_incompatible_state` first.
+        CatalogError: `db_path` names an incompatible or unrecognized database.
+            Existing state is never migrated or repaired.
     """
     if str(db_path) != ":memory:":
         if db_path.exists() and detect_incompatible_state(db_path):
@@ -506,7 +504,7 @@ def connect(
     connection = sqlite3.connect(str(db_path), isolation_level=None, timeout=busy_timeout_ms / 1000)
     connection.row_factory = sqlite3.Row
     try:
-        _migrate(connection)
+        _initialize_current_schema(connection)
         connection.execute(f"PRAGMA busy_timeout = {int(busy_timeout_ms)}")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -520,61 +518,51 @@ def connect(
     return connection
 
 
-def _migrate(connection: sqlite3.Connection) -> None:
-    """Apply every not-yet-applied migration in `_MIGRATIONS`, in order.
-
-    Refuses -- typed, before any DDL or ledger write -- rather than
-    stamping `SCHEMA_VERSION` onto a database whose tables it did not create.
-    An incompatible database is handled only by the exclusive catalog rebuild
-    path, never by normal catalog opening.
-    """
+def _initialize_current_schema(connection: sqlite3.Connection) -> None:
+    """Install a fresh schema or reject any existing non-current catalog."""
     existing_tables = {
         row[0]
         for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     }
-    if existing_tables and "schema_migrations" not in existing_tables:
-        raise CatalogError(
-            "database has pre-existing tables but no schema_migrations ledger; "
-            "refusing to stamp a schema version onto an incompatible catalog; "
-            "run maintenance.rebuild_catalog()"
-        )
-
-    connection.execute(
-        """
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            applied_at TEXT NOT NULL
-        )
-        """
-    )
-    applied = {
-        row[0] for row in connection.execute("SELECT version FROM schema_migrations").fetchall()
-    }
-    if applied and SCHEMA_VERSION not in applied:
-        raise CatalogError(
-            f"database's schema_migrations ledger records only {sorted(applied)!r}, "
-            f"never the current version {SCHEMA_VERSION}; refusing to mutate an "
-            "incompatible catalog; run maintenance.rebuild_catalog()"
-        )
-
-    for version, statements in _MIGRATIONS:
-        if version in applied:
-            continue
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            for statement in statements:
-                connection.execute(statement)
-            connection.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-                (version, datetime.now().astimezone().isoformat()),
+    if existing_tables:
+        if "schema_info" not in existing_tables:
+            raise CatalogError(
+                "database has pre-existing tables but no current schema_info; "
+                "refusing to mutate an incompatible catalog; "
+                "run maintenance.rebuild_catalog()"
             )
-        except sqlite3.DatabaseError:
-            connection.execute("ROLLBACK")
-            raise
-        else:
-            connection.execute("COMMIT")
+        rows = connection.execute("SELECT version FROM schema_info WHERE singleton = 1").fetchall()
+        if len(rows) == 1 and rows[0][0] == SCHEMA_VERSION:
+            return
+        raise CatalogError(
+            f"catalog schema is not exactly current version {SCHEMA_VERSION}; "
+            "refusing to migrate or mutate it; run maintenance.rebuild_catalog()"
+        )
+
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            CREATE TABLE schema_info (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                version INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        for statement in _CURRENT_SCHEMA_DDL:
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO schema_info (singleton, version, created_at) VALUES (1, ?, ?)",
+            (SCHEMA_VERSION, datetime.now().astimezone().isoformat()),
+        )
+    except sqlite3.DatabaseError:
+        connection.execute("ROLLBACK")
+        raise
+    else:
+        connection.execute("COMMIT")
 
 
 def _iso(value: datetime) -> str:
@@ -720,6 +708,34 @@ class Catalog:
             )
             for row in rows
         )
+
+    def get_source_lineage(self, key: DatasetKey) -> str | None:
+        row = self._connection.execute(
+            """
+            SELECT provider_name FROM datasets
+            WHERE exchange = ? AND symbol = ? AND market = ? AND settle = ? AND timeframe = ?
+            """,
+            (key.exchange, key.symbol, key.market.value, key.settle, key.timeframe),
+        ).fetchone()
+        return row["provider_name"] if row is not None else None
+
+    def bind_source_lineage(self, key: DatasetKey, provider_name: str) -> None:
+        if not provider_name:
+            raise CatalogError("source lineage provider name must not be empty")
+        with self.transaction():
+            dataset_id = self.ensure_dataset(key)
+            row = self._connection.execute(
+                "SELECT provider_name FROM datasets WHERE id = ?", (dataset_id,)
+            ).fetchone()
+            assert row is not None
+            existing = row["provider_name"]
+            if existing is not None and existing != provider_name:
+                raise CatalogError(f"dataset source lineage is {existing!r}, not {provider_name!r}")
+            if existing is None:
+                self._connection.execute(
+                    "UPDATE datasets SET provider_name = ?, updated_at = ? WHERE id = ?",
+                    (provider_name, _iso(datetime.now().astimezone()), dataset_id),
+                )
 
     def delete_dataset(self, key: DatasetKey) -> None:
         """Remove a dataset and every row that references it (cascade)."""
@@ -973,14 +989,19 @@ class Catalog:
                     raise CatalogError(f"run_id {run.run_id!r} has a different immutable identity")
                 self._connection.execute(
                     """
-                    UPDATE ingestion_runs SET status = ?, ccxt_version = ?, raw_market_id = ?,
-                        actual_start = ?, actual_end = ?, retrieved_at = ?, completed_at = ?,
-                        row_count = ? WHERE run_id = ?
+                    UPDATE ingestion_runs SET status = ?, provider_name = ?,
+                        provider_version = ?, provider_api_version = ?,
+                        provider_market_id = ?, native_symbol = ?, actual_start = ?,
+                        actual_end = ?, retrieved_at = ?, completed_at = ?, row_count = ?
+                    WHERE run_id = ?
                     """,
                     (
                         run.status,
-                        run.ccxt_version,
-                        run.raw_market_id,
+                        run.provider_name,
+                        run.provider_version,
+                        run.provider_api_version,
+                        run.provider_market_id,
+                        run.native_symbol,
                         _iso(run.actual_start) if run.actual_start is not None else None,
                         _iso(run.actual_end) if run.actual_end is not None else None,
                         _iso(run.retrieved_at) if run.retrieved_at is not None else None,
@@ -994,16 +1015,20 @@ class Catalog:
                 """
                 INSERT INTO ingestion_runs (
                     run_id, dataset_id, requested_start, requested_end, started_at,
-                    schema_version, status, ccxt_version, raw_market_id, actual_start,
+                    schema_version, status, provider_name, provider_version,
+                    provider_api_version, provider_market_id, native_symbol, actual_start,
                     actual_end, retrieved_at, completed_at, row_count, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     run.run_id,
                     *identity,
                     run.status,
-                    run.ccxt_version,
-                    run.raw_market_id,
+                    run.provider_name,
+                    run.provider_version,
+                    run.provider_api_version,
+                    run.provider_market_id,
+                    run.native_symbol,
                     _iso(run.actual_start) if run.actual_start is not None else None,
                     _iso(run.actual_end) if run.actual_end is not None else None,
                     _iso(run.retrieved_at) if run.retrieved_at is not None else None,

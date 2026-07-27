@@ -28,7 +28,7 @@ from xret.data.storage.catalog import (
 )
 from xret.data.storage.locking import catalog_gate
 from xret.data.storage.parquet import SCHEMA_VERSION as PARQUET_SCHEMA_VERSION
-from xret.data.storage.parquet import read_committed_file, read_month_file
+from xret.data.storage.parquet import ProviderProvenance, read_committed_file, read_month_file
 from xret.data.timeframe import TimeBar
 
 if TYPE_CHECKING:
@@ -59,6 +59,7 @@ class CommittedFileLike(Protocol):
     max_timestamp: datetime
     physical_hash: str
     schema_version: int
+    provider: ProviderProvenance
 
 
 FileSource = Callable[[], Iterable[CommittedFileLike]]
@@ -148,6 +149,12 @@ def _validate(catalog: Catalog, files: list[CommittedFileLike]) -> CatalogValida
             issues.append(f"row bounds mismatch for {relative_path}")
         if file.year_month.year != row.year or file.year_month.month != row.month:
             issues.append(f"year/month mismatch for {relative_path}")
+        lineage = catalog.get_source_lineage(file.dataset_key)
+        if lineage != file.provider.name:
+            issues.append(
+                f"source lineage mismatch for {relative_path}: "
+                f"catalog={lineage!r} disk={file.provider.name!r}"
+            )
     for relative_path, file in discovered.items():
         keys.add(file.dataset_key)
         if relative_path not in indexed:
@@ -266,6 +273,12 @@ def _replace_derived_state(catalog: Catalog, data_dir: Path, files: list[Committ
     with catalog.transaction():
         catalog.connection.execute("DELETE FROM datasets")
         for key, dataset_files in grouped.items():
+            provider_names = {file.provider.name for file in dataset_files}
+            if len(provider_names) != 1:
+                raise CatalogError(
+                    f"conflicting source lineages for {key!r}: {sorted(provider_names)!r}"
+                )
+            catalog.bind_source_lineage(key, next(iter(provider_names)))
             segments: list[CoverageSegment] = []
             for file in sorted(dataset_files, key=lambda item: item.relative_path):
                 catalog.record_file(

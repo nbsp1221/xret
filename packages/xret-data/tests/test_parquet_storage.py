@@ -22,7 +22,7 @@ DATASET_KEY = DatasetKey(
     timeframe="1m",
 )
 YEAR_MONTH = YearMonth(year=2024, month=1)
-PROVIDER = parquet.ProviderIdentity("ccxt", "4.4.0", "BTCUSDT", "BTC/USDT")
+PROVIDER = parquet.ProviderProvenance("ccxt", "4.4.0", 1, "BTCUSDT", "BTC/USDT")
 
 
 def test_readable_paths_project_spot_and_perpetual_identity_exactly(tmp_path: Path) -> None:
@@ -202,7 +202,8 @@ def test_prepared_file_has_only_domain_self_description(tmp_path: Path) -> None:
         "min_timestamp",
         "max_timestamp",
         "provider_name",
-        "ccxt_version",
+        "provider_version",
+        "provider_api_version",
         "provider_market_id",
         "native_symbol",
     }
@@ -235,7 +236,7 @@ def test_perpetual_metadata_includes_explicit_derivative_interpretation(tmp_path
         settle="USDT",
         timeframe="1m",
     )
-    provider = parquet.ProviderIdentity("ccxt", "4.4.0", "BTCUSDT", "BTC/USDT:USDT")
+    provider = parquet.ProviderProvenance("ccxt", "4.4.0", 1, "BTCUSDT", "BTC/USDT:USDT")
     prepared = parquet.prepare_month(
         tmp_path,
         key,
@@ -266,7 +267,7 @@ def test_committed_perpetual_file_reconstructs_metadata_first_identity_and_path(
             key,
             YEAR_MONTH,
             make_batch(2, dataset_key=key),
-            provider=parquet.ProviderIdentity("ccxt", "4.4.0", "BTCUSDT", "BTC/USDT:USDT"),
+            provider=parquet.ProviderProvenance("ccxt", "4.4.0", 1, "BTCUSDT", "BTC/USDT:USDT"),
             derivative=parquet.DerivativeInterpretation(
                 linear=True, inverse=False, contract_size="1"
             ),
@@ -294,7 +295,7 @@ def test_conflicting_nonempty_derivative_interpretation_fails_closed(tmp_path: P
         settle="USDT",
         timeframe="1m",
     )
-    provider = parquet.ProviderIdentity("ccxt", "4.4.0", "BTCUSDT", "BTC/USDT:USDT")
+    provider = parquet.ProviderProvenance("ccxt", "4.4.0", 1, "BTCUSDT", "BTC/USDT:USDT")
     first = parquet.prepare_month(
         tmp_path,
         key,
@@ -561,6 +562,26 @@ def test_read_committed_file_rejects_tampered_metadata(
         parquet.read_committed_file(tmp_path, committed.absolute_path)
 
 
+def test_read_committed_file_classifies_malformed_provider_api_version(
+    tmp_path: Path,
+) -> None:
+    committed = parquet.publish_prepared_file(
+        parquet.prepare_month(
+            tmp_path,
+            DATASET_KEY,
+            YEAR_MONTH,
+            make_batch(3),
+            provider=PROVIDER,
+        )
+    )
+    rewrite_metadata(committed.absolute_path, provider_api_version="not-an-integer")
+
+    with pytest.raises(CatalogError, match="invalid provider metadata") as captured:
+        parquet.read_committed_file(tmp_path, committed.absolute_path)
+
+    assert isinstance(captured.value.__cause__, ValueError)
+
+
 @pytest.mark.parametrize(
     ("metadata_key", "metadata_value"),
     [("market", "spot"), ("settle", "BUSD")],
@@ -582,7 +603,7 @@ def test_read_committed_file_rejects_tampered_perpetual_identity_metadata(
             key,
             YEAR_MONTH,
             make_batch(2, dataset_key=key),
-            provider=parquet.ProviderIdentity("ccxt", "4.4.0", "BTCUSDT", "BTC/USDT:USDT"),
+            provider=parquet.ProviderProvenance("ccxt", "4.4.0", 1, "BTCUSDT", "BTC/USDT:USDT"),
             derivative=parquet.DerivativeInterpretation(linear=True, contract_size="1"),
         )
     )

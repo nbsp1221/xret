@@ -13,33 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Final
 
 from xret.data.errors import ProviderError, UnsupportedMarketError
+from xret.data.providers.contracts import ObservedWindow
 from xret.data.timeframe import TimeBar
 
 RawOHLCVRow = Sequence[float]
 PageFetcher = Callable[[int, int, dict[str, int]], list[list[float]]]
-
-
-@dataclass(frozen=True, slots=True)
-class ObservedWindow:
-    """One exhaustively observed, UTC, half-open provider time window."""
-
-    start: datetime
-    end: datetime
-
-    def __post_init__(self) -> None:
-        if (
-            self.start.tzinfo is None
-            or self.start.utcoffset() != timedelta(0)
-            or self.end.tzinfo is None
-            or self.end.utcoffset() != timedelta(0)
-        ):
-            raise ProviderError("observed window boundaries must be UTC-aware")
-        if self.start >= self.end:
-            raise ProviderError(f"observed window must be nonempty: [{self.start!r}, {self.end!r})")
 
 
 @dataclass(frozen=True, slots=True)

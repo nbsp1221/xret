@@ -8,6 +8,8 @@ its `MarketDataConfig`, `BarDataset`, and the two result types
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import pytest
 
 
@@ -100,3 +102,37 @@ def test_exceptions_are_importable_from_errors_submodule() -> None:
         CatalogError,
     ):
         assert issubclass(exc_type, XretDataError)
+
+
+def test_provider_author_surface_is_explicit_and_importable() -> None:
+    import xret.data.providers
+
+    assert set(xret.data.providers.__all__) == {
+        "PROVIDER_API_VERSION",
+        "PROVIDER_BAR_SCHEMA",
+        "BarObservation",
+        "BarRequest",
+        "DerivativeInterpretation",
+        "HistoricalBarProvider",
+        "ObservedWindow",
+        "ProviderDescriptor",
+        "ResolvedBarMarket",
+    }
+    for name in xret.data.providers.__all__:
+        assert hasattr(xret.data.providers, name)
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "xret.data.provider",
+        "xret.data.provider_pagination",
+        "xret.data.providers.registry",
+        "xret.data.providers._ccxt",
+        "xret.data.providers._ccxt_pagination",
+    ],
+)
+def test_retired_provider_module_paths_have_no_compatibility_shim(
+    module_name: str,
+) -> None:
+    assert find_spec(module_name) is None
