@@ -17,6 +17,7 @@ import polars as pl
 import pytest
 from xret.data import dataset
 from xret.data.config import MarketDataConfig
+from xret.data.dataset import _coalesce_fetch_ranges
 from xret.data.errors import (
     CatalogError,
     CoverageError,
@@ -26,7 +27,7 @@ from xret.data.errors import (
     UnsupportedMarketError,
 )
 from xret.data.market_data import MarketData
-from xret.data.models import CoverageStatus, DatasetKey
+from xret.data.models import CoverageInterval, CoverageStatus, DatasetKey, MarketIdentity, YearMonth
 from xret.data.providers import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -38,6 +39,7 @@ from xret.data.providers import (
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.ccxt import CcxtProvider
 from xret.data.storage import catalog as catalog_storage
+from xret.data.storage import paths as storage_paths
 from xret.data.storage.catalog import (
     CATALOG_FILE_NAME,
     SCHEMA_VERSION,
@@ -46,6 +48,8 @@ from xret.data.storage.catalog import (
     IngestionRunMetadata,
     _CommitUncertainCatalogError,
 )
+from xret.data.storage.parquet import read_month_file
+from xret.data.timeframe import TimeBar
 
 CLIENT_ID = "binance"
 _exchanges: dict[str, FakeExchange] = {}
@@ -439,7 +443,8 @@ def test_sync_aggregates_same_month_missing_gaps_before_publication(tmp_path: Pa
     result = bars.sync(_now(0), _now(4))
 
     assert result.changed
-    assert result.fetched_rows == 2
+    # Coalesced window [1,4) returns hours 1,2,3; hour 2 is bridging
+    assert result.fetched_rows == 3
     assert result.written_partitions == 1
     assert bars.scan_partial(_now(0), _now(4)).data.collect().get_column("timestamp").to_list() == [
         _now(1),
@@ -1488,3 +1493,219 @@ def test_scans_refuse_ambiguous_managed_storage_when_catalog_is_absent(tmp_path:
     ):
         bars.scan_partial(_now(0), _now(3))
     assert not config.state_dir.exists()
+
+
+# --------------------------------------------------------------------------
+# Gap coalescing (sparse rebuild revalidation)
+# --------------------------------------------------------------------------
+
+
+def _gap(start_hour: int, end_hour: int) -> CoverageInterval:
+    return CoverageInterval(_now(start_hour), _now(end_hour), CoverageStatus.MISSING)
+
+
+def test_coalesce_empty() -> None:
+    bar = TimeBar.parse("1h")
+    assert _coalesce_fetch_ranges([], bar) == ()
+
+
+def test_coalesce_single_gap() -> None:
+    bar = TimeBar.parse("1h")
+    gaps = [_gap(2, 3)]
+    result = _coalesce_fetch_ranges(gaps, bar)
+    assert len(result) == 1
+    assert result[0].start == _now(2)
+    assert result[0].end == _now(3)
+    assert len(result[0].gaps) == 1
+
+
+def test_coalesce_adjacent_gaps() -> None:
+    bar = TimeBar.parse("1h")
+    gaps = [_gap(1, 2), _gap(3, 4), _gap(5, 6)]
+    result = _coalesce_fetch_ranges(gaps, bar, max_window_bars=10)
+    assert len(result) == 1
+    assert result[0].start == _now(1)
+    assert result[0].end == _now(6)
+    assert len(result[0].gaps) == 3
+
+
+def test_coalesce_respects_max_window() -> None:
+    bar = TimeBar.parse("1h")
+    gaps = [_gap(0, 1), _gap(5, 6), _gap(10, 11)]
+    result = _coalesce_fetch_ranges(gaps, bar, max_window_bars=6)
+    assert len(result) == 2
+    assert result[0].start == _now(0)
+    assert result[0].end == _now(6)
+    assert result[1].start == _now(10)
+    assert result[1].end == _now(11)
+
+
+def test_coalesce_exact_limit() -> None:
+    bar = TimeBar.parse("1h")
+    gaps = [_gap(0, 1), _gap(5, 6)]
+    result = _coalesce_fetch_ranges(gaps, bar, max_window_bars=6)
+    assert len(result) == 1
+    assert result[0].end == _now(6)
+
+
+def test_coalesce_keeps_oversized_single_gap() -> None:
+    bar = TimeBar.parse("1h")
+    base = datetime(2024, 1, 1, tzinfo=UTC)
+    gap = CoverageInterval(base, base + timedelta(hours=100), CoverageStatus.MISSING)
+    result = _coalesce_fetch_ranges([gap], bar, max_window_bars=10)
+    assert len(result) == 1
+    assert result[0].start == base
+    assert result[0].end == base + timedelta(hours=100)
+
+
+def test_sparse_rebuild_resync_fewer_fetch_calls(tmp_path: Path) -> None:
+    """After rebuild, sparse gaps are coalesced into fewer provider requests."""
+    config = _configure(tmp_path)
+    # Sparse: even hours only (0, 2, 4, 6, 8)
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 10, 2)))
+    _register(exchange)
+    provider_runtime._set_clock_override(lambda: _now(20))
+    bars = _bars(_market_data(config))
+
+    # Initial sync
+    result = bars.sync(_now(0), _now(10))
+    assert result.fetched_rows == 5
+
+    # Rebuild — loses UNAVAILABLE
+    md = _market_data(config)
+    md.maintenance.rebuild_catalog()
+
+    # Re-sync — should coalesce gaps
+    exchange.fetch_calls.clear()
+    result2 = bars.sync(_now(0), _now(10))
+    coalesced_calls = len(exchange.fetch_calls)
+
+    # Without coalescing: 5 gaps → 5 fetch calls
+    # With coalescing: 1 wide request [1, 10) → 1 fetch call
+    assert coalesced_calls == 1, f"expected 1 coalesced call, got {coalesced_calls}"
+    # Provider returns 4 bridging rows (hours 2,4,6,8) in the wide window
+    assert result2.fetched_rows == 4
+
+
+def test_coalesced_resync_preserves_available_rows(tmp_path: Path) -> None:
+    """Coalesced re-sync must NOT overwrite existing AVAILABLE row values."""
+    config = _configure(tmp_path)
+    # Initial: even hours with price=100
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 10, 2)))
+    _register(exchange)
+    provider_runtime._set_clock_override(lambda: _now(20))
+    bars = _bars(_market_data(config))
+    bars.sync(_now(0), _now(10))
+
+    # Read original Parquet values
+
+    key = DatasetKey.from_identity(
+        MarketIdentity(exchange="binance", symbol="BTC/USDT", market="spot"),
+        timeframe="1h",
+    )
+    ym = YearMonth(year=2024, month=1)
+    parquet_path = storage_paths.month_file_path(config.data_dir, key, ym)
+    original = read_month_file(parquet_path)
+    original_closes = dict(
+        zip(
+            original.get_column("timestamp").to_list(),
+            original.get_column("close").to_list(),
+            strict=True,
+        )
+    )
+
+    # Rebuild
+    md = _market_data(config)
+    md.maintenance.rebuild_catalog()
+
+    # Change provider to return DIFFERENT prices for existing bars
+    exchange._candles = sorted(
+        [_row(h, price=999.0) for h in range(0, 10, 2)]
+        + [_row(h, price=50.0) for h in range(1, 10, 2)],
+        key=lambda row: row[0],
+    )
+
+    # Re-sync with coalescing
+    bars.sync(_now(0), _now(10))
+
+    # Verify: original AVAILABLE rows must keep their original values
+    updated = read_month_file(parquet_path)
+    updated_closes = dict(
+        zip(
+            updated.get_column("timestamp").to_list(),
+            updated.get_column("close").to_list(),
+            strict=True,
+        )
+    )
+    for ts, original_close in original_closes.items():
+        assert updated_closes[ts] == original_close, (
+            f"AVAILABLE row at {ts} was overwritten: {original_close} → {updated_closes[ts]}"
+        )
+
+    # New rows from previously MISSING gaps should exist with correct values
+    assert updated.height == 10
+    for hour in range(1, 10, 2):
+        ts = _now(hour)
+        assert updated_closes[ts] == 50.5, f"missing row at {ts} not stored correctly"
+
+
+def test_coalesced_resync_does_not_promote_bridged_unavailable(
+    tmp_path: Path,
+) -> None:
+    """Bridging UNAVAILABLE bars must not be promoted to AVAILABLE without storage."""
+    config = _configure(tmp_path)
+    exchange = FakeExchange(
+        candles=[
+            _row(0),
+            _row(1, price=999.0),
+            _row(2),
+        ]
+    )
+    _register(exchange)
+    provider_runtime._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+
+    bars = _bars(_market_data(config))
+    key = DatasetKey.from_identity(bars.identity, timeframe=bars.timeframe)
+
+    # Seed only the middle interval as UNAVAILABLE.
+    # [0,1) and [2,3) remain implicit MISSING (no coverage record).
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        catalog.apply_coverage(
+            key,
+            CoverageSegment(_now(1), _now(2), CoverageStatus.UNAVAILABLE),
+        )
+
+    result = bars.sync(_now(0), _now(3))
+
+    # Two MISSING gaps coalesced into one wide request [0,3)
+    assert len(exchange.fetch_calls) == 1
+    assert result.fetched_rows == 3
+
+    ym = YearMonth(year=2024, month=1)
+    parquet_path = storage_paths.month_file_path(config.data_dir, key, ym)
+    frame = read_month_file(parquet_path)
+    timestamps = set(frame.get_column("timestamp").to_list())
+
+    # Hours 0, 2 were MISSING → provider returned data → stored
+    assert timestamps == {_now(0), _now(2)}
+
+    # Hour 1 was UNAVAILABLE (bridging) → NOT stored, NOT promoted
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        covered, gaps = catalog.coverage_and_gaps(key, _now(0), _now(3))
+
+    assert {(item.start, item.end) for item in covered} == {
+        (_now(0), _now(1)),
+        (_now(2), _now(3)),
+    }
+    assert {(gap.start, gap.end, gap.status) for gap in gaps} == {
+        (_now(1), _now(2), CoverageStatus.UNAVAILABLE),
+    }
+
+
+def test_coalesce_rejects_nonpositive_window_budget() -> None:
+    bar = TimeBar.parse("1h")
+    with pytest.raises(ValueError, match="positive"):
+        _coalesce_fetch_ranges([_gap(0, 1)], bar, max_window_bars=0)
+    with pytest.raises(ValueError, match="positive"):
+        _coalesce_fetch_ranges([_gap(0, 1)], bar, max_window_bars=-1)

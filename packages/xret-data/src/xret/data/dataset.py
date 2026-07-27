@@ -24,7 +24,7 @@ override below) only when no explicit config was given.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -185,6 +185,89 @@ def _validate_aligned_range(time_bar: TimeBar, start: datetime, end: datetime) -
         )
 
 
+# --------------------------------------------------------------------------
+# Gap coalescing: merge nearby MISSING gaps into wider provider requests
+# --------------------------------------------------------------------------
+
+DEFAULT_COALESCE_WINDOW_BARS = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class _FetchWindow:
+    """One coalesced provider request and its constituent missing gaps."""
+
+    start: datetime
+    end: datetime
+    gaps: tuple[CoverageInterval, ...]
+
+    def __post_init__(self) -> None:
+        if not self.gaps:
+            raise ValueError("fetch window must contain at least one gap")
+        if self.start >= self.end:
+            raise ValueError("fetch window start must be before end")
+
+
+def _advance_bars(time_bar: TimeBar, start: datetime, bars: int) -> datetime:
+    """Advance *start* by *bars* timeframe boundaries."""
+    cursor = start
+    for _ in range(bars):
+        cursor = time_bar.next_boundary(cursor)
+    return cursor
+
+
+def _coalesce_fetch_ranges(
+    gaps: Sequence[CoverageInterval],
+    time_bar: TimeBar,
+    *,
+    max_window_bars: int = DEFAULT_COALESCE_WINDOW_BARS,
+) -> tuple[_FetchWindow, ...]:
+    """Merge consecutive missing gaps while the total candidate request span,
+    including covered bars between them, does not exceed *max_window_bars*.
+
+    A single gap wider than *max_window_bars* is kept as-is (pagination
+    handles the size internally).  Input gaps must be sorted and disjoint.
+    """
+    if max_window_bars <= 0:
+        raise ValueError("max_window_bars must be positive")
+    if not gaps:
+        return ()
+
+    windows: list[_FetchWindow] = []
+    window_start = gaps[0].start
+    window_end = gaps[0].end
+    window_limit = _advance_bars(time_bar, window_start, max_window_bars)
+    member_gaps: list[CoverageInterval] = [gaps[0]]
+
+    for gap in gaps[1:]:
+        if gap.end <= window_limit:
+            window_end = gap.end
+            member_gaps.append(gap)
+        else:
+            windows.append(_FetchWindow(window_start, window_end, tuple(member_gaps)))
+            window_start = gap.start
+            window_end = gap.end
+            window_limit = _advance_bars(time_bar, window_start, max_window_bars)
+            member_gaps = [gap]
+
+    windows.append(_FetchWindow(window_start, window_end, tuple(member_gaps)))
+    return tuple(windows)
+
+
+def _filter_frame_to_ranges(
+    frame: pl.DataFrame, ranges: tuple[CoverageInterval, ...]
+) -> pl.DataFrame:
+    """Keep only rows whose timestamp falls within any of *ranges*."""
+    if frame.height == 0:
+        return frame
+    if not ranges:
+        return frame.head(0)
+    ts = pl.col("timestamp")
+    mask = pl.lit(False)
+    for r in ranges:
+        mask = mask | ((ts >= r.start) & (ts < r.end))
+    return frame.filter(mask)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BarDataset:
     """One bound `MarketIdentity` and timeframe.
@@ -316,9 +399,10 @@ class BarDataset:
                     )
                 with Catalog.open(db_path) as catalog:
                     _covered, known_gaps = catalog.coverage_and_gaps(dataset_key, start_dt, end_dt)
-                    fetch_ranges = [
+                    missing_gaps = [
                         gap for gap in known_gaps if gap.status is CoverageStatus.MISSING
                     ]
+                    fetch_windows = _coalesce_fetch_ranges(missing_gaps, time_bar)
                     source_lineage = catalog.get_source_lineage(dataset_key)
                     running_run = IngestionRunMetadata(
                         run_id=run_id,
@@ -335,7 +419,7 @@ class BarDataset:
             quality_warnings: list[tuple[CoverageInterval, quality.QualityFinding]] = []
             prepared = []
             try:
-                if fetch_ranges:
+                if fetch_windows:
                     if provider_instance is None:
                         provider_instance = self._effective_provider()
                     if runtime_context is None:
@@ -346,14 +430,14 @@ class BarDataset:
                             f"dataset source lineage is {source_lineage!r}, not {descriptor.name!r}"
                         )
                 resolved_market = None
-                for gap in fetch_ranges:
+                for window in fetch_windows:
                     assert provider_instance is not None
                     assert runtime_context is not None
                     request = BarRequest(
                         identity=resolved_identity,
                         timeframe=self.timeframe,
-                        start=gap.start,
-                        end=gap.end,
+                        start=window.start,
+                        end=window.end,
                     )
                     if resolved_market is None:
                         resolved_market = runtime_context.resolve_market(resolved_identity)
@@ -367,18 +451,24 @@ class BarDataset:
                             request,
                             error_cls=SyncError,
                         )
-                        quality_warnings.extend((gap, finding) for finding in result.warnings)
-                    observations.append((gap, observation))
+                        warning_range = CoverageInterval(
+                            window.start, window.end, CoverageStatus.MISSING
+                        )
+                        quality_warnings.extend(
+                            (warning_range, finding) for finding in result.warnings
+                        )
+                    new_rows = _filter_frame_to_ranges(observation.frame, window.gaps)
+                    observations.append((window, observation, new_rows))
 
                 monthly_batches: dict[YearMonth, list[pl.DataFrame]] = {}
                 monthly_observations: dict[YearMonth, ValidatedBarObservation] = {}
                 source_name = observations[0][1].source.descriptor.name if observations else None
-                for _gap, observation in observations:
-                    if observation.source.descriptor.name != source_name:
+                for _window, _observation, new_rows in observations:
+                    if _observation.source.descriptor.name != source_name:
                         raise SyncError("one sync run produced multiple source lineages")
-                    for year_month, batch in split_by_year_month(observation.frame):
+                    for year_month, batch in split_by_year_month(new_rows):
                         monthly_batches.setdefault(year_month, []).append(batch)
-                        monthly_observations.setdefault(year_month, observation)
+                        monthly_observations.setdefault(year_month, _observation)
                 for year_month, batches in monthly_batches.items():
                     observation = monthly_observations[year_month]
                     prepared.append(
@@ -452,23 +542,23 @@ class BarDataset:
                             observations[0][1].source.native_symbol if observations else None
                         ),
                         completed_at=_current_clock(),
-                        row_count=sum(item.frame.height for _, item in observations),
+                        row_count=sum(obs.frame.height for _, obs, _ in observations),
                     )
 
                     with catalog.transaction():
                         new_segments: list[CoverageSegment] = []
-                        for _gap, observation in observations:
+                        for fetch_window, observation, _nr in observations:
                             present = set(observation.frame.get_column("timestamp").to_list())
-                            for window in observation.observed:
+                            for missing_gap in fetch_window.gaps:
                                 finalizable_end = _finalizable_end(
-                                    time_bar, window.end, observation.evidence_at
+                                    time_bar, missing_gap.end, observation.evidence_at
                                 )
-                                if finalizable_end <= window.start:
+                                if finalizable_end <= missing_gap.start:
                                     continue
                                 for _month, month_start, month_end in paths.iter_month_slices(
-                                    window.start, finalizable_end
+                                    missing_gap.start, finalizable_end
                                 ):
-                                    clipped_start = max(window.start, month_start)
+                                    clipped_start = max(missing_gap.start, month_start)
                                     clipped_end = min(finalizable_end, month_end)
                                     new_segments.extend(
                                         _bar_segments_for_range(
@@ -568,7 +658,7 @@ class BarDataset:
             dataset_key=dataset_key,
             run_id=run_id,
             changed=bool(prepared) or coverage_changed,
-            fetched_rows=sum(item.frame.height for _, item in observations),
+            fetched_rows=sum(obs.frame.height for _, obs, _ in observations),
             written_partitions=len(prepared),
             covered=covered,
             gaps=gaps,
