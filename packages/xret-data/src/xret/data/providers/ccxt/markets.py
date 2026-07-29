@@ -6,10 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final
 
-from xret.data.errors import UnsupportedMarketError
+from xret.data.errors import InvalidRequestError, UnsupportedMarketError
 from xret.data.models import Market, MarketIdentity
 from xret.data.providers.ccxt.client import CCXTExchange
 from xret.data.providers.contracts import DerivativeInterpretation
+from xret.data.timeframe import TimeBar
 
 _PERPETUAL_CLIENT_IDS: Final[dict[str, str]] = {
     "binance": "binanceusdm",
@@ -134,10 +135,29 @@ def resolve(identity: MarketIdentity, exchange: CCXTExchange) -> CcxtMarket:
 
 
 def supported_timeframes(exchange: CCXTExchange) -> frozenset[str]:
+    """Timeframes Xret can request from `exchange`, in canonical vocabulary.
+
+    CCXT advertises each venue's own catalog, which legitimately contains
+    entries outside Xret's canonical grammar (`3M`, `1y`, bare `15`). Those
+    are true facts about the venue, not contract violations, so they are
+    excluded here rather than rejected: a venue must not become unusable
+    because it offers a bar type Xret has no vocabulary for. Requesting an
+    excluded timeframe still fails explicitly -- `BarRequest` rejects
+    non-canonical input, and `ProviderRuntime` raises
+    `UnsupportedMarketError` for a canonical timeframe this venue omits.
+    """
     timeframes = getattr(exchange, "timeframes", None)
     if not isinstance(timeframes, Mapping):
         return frozenset()
-    return frozenset(str(value) for value in timeframes)
+    canonical: set[str] = set()
+    for key in timeframes:
+        candidate = str(key)
+        try:
+            TimeBar.parse(candidate)
+        except InvalidRequestError:
+            continue
+        canonical.add(candidate)
+    return frozenset(canonical)
 
 
 def derivative_interpretation(market: CcxtMarket) -> DerivativeInterpretation:

@@ -74,7 +74,13 @@ class DerivativeInterpretation:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedBarMarket:
-    """A canonical market resolved to one provider-native historical-bar target."""
+    """A canonical market resolved to one provider-native historical-bar target.
+
+    `timeframes` declares what Xret may request from this market, so every
+    entry must be a canonical Xret timeframe. Providers exclude native bar
+    types outside that vocabulary rather than passing them through: a venue
+    must stay resolvable even when it offers bar types Xret cannot express.
+    """
 
     identity: MarketIdentity
     native_market_id: str

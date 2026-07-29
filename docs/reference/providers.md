@@ -91,6 +91,16 @@ timeframes supported for that resolved market. A provider may resolve an omitted
 perpetual settlement only when it can do so unambiguously. It must not relabel the
 canonical venue, symbol, or market family.
 
+`timeframes` declares what Xret may request from that market, so every entry must
+be a canonical Xret timeframe. A venue legitimately offers bar types outside that
+vocabulary; exclude them instead of passing them through. A venue must not become
+unresolvable because it offers a bar type Xret cannot express.
+
+Excluding an entry is not a silent fallback. Requesting a non-canonical timeframe
+raises `InvalidRequestError` before any provider call, because the timeframe
+grammar rejects it. Requesting a canonical timeframe this venue does not offer
+raises `UnsupportedMarketError`. Neither case substitutes another bar type.
+
 ## Observation contract
 
 `observe_bars` receives a UTC-aware, aligned, half-open `BarRequest`. It returns:

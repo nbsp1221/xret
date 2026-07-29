@@ -570,6 +570,103 @@ def test_absent_or_non_mapping_timeframes_fail_closed() -> None:
 
 
 # --------------------------------------------------------------------------
+# Native bar types outside Xret's vocabulary
+#
+# A venue legitimately advertises bar types Xret cannot express (OKX `3M`,
+# Upbit `1y`, Backpack bare `15`). Those are true facts about the venue, not
+# contract violations, so they must not make the venue unresolvable.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "native_only",
+    [
+        pytest.param("3M", id="calendar-amount-above-one"),
+        pytest.param("2w", id="calendar-week-amount-above-one"),
+        pytest.param("1y", id="unit-outside-grammar"),
+        pytest.param("1Y", id="unit-outside-grammar-uppercase"),
+        pytest.param("15", id="bare-number-without-unit"),
+        pytest.param("1H", id="non-canonical-casing"),
+    ],
+)
+def test_native_timeframe_outside_vocabulary_is_excluded_not_fatal(native_only: str) -> None:
+    exchange = FakeExchange(timeframes={"1h": "1h", native_only: native_only})
+
+    assert markets.supported_timeframes(exchange) == frozenset({"1h"})
+
+
+def test_canonical_calendar_timeframes_survive_filtering() -> None:
+    """The filter removes only what the grammar rejects, not calendar units."""
+    exchange = FakeExchange(
+        timeframes=dict.fromkeys(["1m", "1h", "1d", "1w", "1M", "3M", "2w", "1y"], "x")
+    )
+
+    assert markets.supported_timeframes(exchange) == frozenset({"1m", "1h", "1d", "1w", "1M"})
+
+
+@pytest.mark.parametrize(
+    "native_only",
+    [
+        pytest.param("3M", id="calendar-amount-above-one"),
+        pytest.param("1y", id="unit-outside-grammar"),
+        pytest.param("15", id="bare-number-without-unit"),
+    ],
+)
+def test_venue_stays_resolvable_despite_inexpressible_bar_type(native_only: str) -> None:
+    exchange = FakeExchange(timeframes={"1h": "1h", native_only: native_only})
+    _register_spot(exchange)
+
+    resolved = _ccxt_provider().resolve_market(_spot_identity())
+
+    assert resolved.timeframes == frozenset({"1h"})
+
+
+def test_canonical_timeframe_is_observable_despite_inexpressible_bar_type() -> None:
+    exchange = FakeExchange(
+        timeframes={"1h": "1h", "3M": "3M"},
+        candles=[_row(0), _row(3_600_000)],
+    )
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 3, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1h",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 2, tzinfo=UTC),
+    )
+
+    assert frame.height == 2
+
+
+@pytest.mark.parametrize("excluded", ["3M", "1y", "15", "1H"])
+def test_excluded_bar_type_is_rejected_before_any_provider_call(excluded: str) -> None:
+    """Exclusion never substitutes another bar type.
+
+    A timeframe the filter drops is by definition non-canonical, so the
+    grammar rejects the request itself; `ProviderRuntime`'s
+    `UnsupportedMarketError` path only covers canonical timeframes a venue
+    omits (see `test_unsupported_timeframe_raises_unsupported_market_error`).
+    """
+    with pytest.raises(InvalidRequestError):
+        BarRequest(
+            identity=_spot_identity(),
+            timeframe=excluded,
+            start=datetime(2024, 1, 1, tzinfo=UTC),
+            end=datetime(2024, 4, 1, tzinfo=UTC),
+        )
+
+
+def test_venue_advertising_only_inexpressible_bar_types_supports_nothing() -> None:
+    exchange = FakeExchange(timeframes={"3M": "3M", "1y": "1y"})
+    _register_spot(exchange)
+
+    resolved = _ccxt_provider().resolve_market(_spot_identity())
+
+    assert resolved.timeframes == frozenset()
+
+
+# --------------------------------------------------------------------------
 # Canonical output schema (IR-2): no `run_id`, provider-independent identity
 # --------------------------------------------------------------------------
 
