@@ -613,6 +613,73 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
 
 
 # --------------------------------------------------------------------------
+# month-crossing bars (see local_read._required_months)
+# --------------------------------------------------------------------------
+
+
+def _weekly_candles(weeks: int) -> list[list[float]]:
+    return [_row(week * 168) for week in range(weeks)]
+
+
+def _weekly_bars(market_data: MarketData) -> dataset.BarDataset:
+    return market_data.bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1w")
+
+
+@pytest.mark.parametrize(
+    ("end", "expected_rows", "expected_partitions"),
+    [
+        pytest.param(datetime(2024, 1, 29, tzinfo=UTC), 4, 1, id="ends-inside-january"),
+        pytest.param(datetime(2024, 2, 5, tzinfo=UTC), 5, 1, id="last-bar-crosses-into-february"),
+        pytest.param(datetime(2024, 2, 12, tzinfo=UTC), 6, 2, id="ends-inside-february"),
+        pytest.param(datetime(2024, 3, 4, tzinfo=UTC), 9, 2, id="last-bar-crosses-into-march"),
+    ],
+)
+def test_month_crossing_bars_stay_readable(
+    tmp_path: Path, end: datetime, expected_rows: int, expected_partitions: int
+) -> None:
+    config = _configure(tmp_path)
+    _register(FakeExchange(timeframes={"1w": "1w"}, candles=_weekly_candles(12)))
+    after_range = datetime(2024, 4, 1, tzinfo=UTC)
+    provider_runtime._set_clock_override(lambda: after_range)
+    dataset._set_clock_override(lambda: after_range)
+    start = datetime(2024, 1, 1, tzinfo=UTC)
+
+    bars = _weekly_bars(_market_data(config))
+    result = bars.sync(start, end).require_complete()
+    assert result.written_partitions == expected_partitions
+
+    strict = bars.scan(start, end).collect()
+    assert strict.height == expected_rows
+
+    partial = bars.scan_partial(start, end)
+    assert partial.is_complete
+    assert partial.data.collect().equals(strict)
+
+
+def test_month_crossing_scan_still_detects_a_deleted_partition(tmp_path: Path) -> None:
+    """The fix narrows which partitions are required, not whether they exist."""
+    config = _configure(tmp_path)
+    _register(FakeExchange(timeframes={"1w": "1w"}, candles=_weekly_candles(12)))
+    after_range = datetime(2024, 4, 1, tzinfo=UTC)
+    provider_runtime._set_clock_override(lambda: after_range)
+    dataset._set_clock_override(lambda: after_range)
+    start, end = datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 3, 4, tzinfo=UTC)
+
+    bars = _weekly_bars(_market_data(config))
+    bars.sync(start, end).require_complete()
+    storage_paths.month_file_path(
+        config.data_dir,
+        DatasetKey.from_identity(
+            MarketIdentity(exchange="binance", symbol="BTC/USDT", market="spot"), timeframe="1w"
+        ),
+        YearMonth(year=2024, month=1),
+    ).unlink()
+
+    with pytest.raises(CatalogError):
+        bars.scan(start, end).collect()
+
+
+# --------------------------------------------------------------------------
 # strict and partial scan
 # --------------------------------------------------------------------------
 

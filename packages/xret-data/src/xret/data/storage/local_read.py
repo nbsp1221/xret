@@ -19,6 +19,7 @@ from xret.data.models import (
     DatasetKey,
     Market,
     MarketIdentity,
+    YearMonth,
 )
 from xret.data.schema import OHLCV_SCHEMA
 from xret.data.storage import paths
@@ -27,6 +28,7 @@ from xret.data.storage.catalog import (
     Catalog,
     detect_incompatible_state,
 )
+from xret.data.timeframe import TimeBar
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,16 +95,75 @@ def read_local_facts_for_key(
     return LocalReadFacts(dataset_key, start, end, covered, gaps)
 
 
+def _first_bar_start_at_or_after(time_bar: TimeBar, moment: datetime) -> datetime:
+    """The earliest bar boundary that is not before `moment`."""
+    floored = time_bar.floor(moment)
+    return floored if floored == moment else time_bar.next_boundary(floored)
+
+
+def _required_months(facts: LocalReadFacts) -> list[YearMonth]:
+    """Month partitions that must hold rows for `facts.covered`.
+
+    A partition is keyed by the month a bar *starts* in, so a month is only
+    required when some bar actually starts inside it. A bar may span a month
+    boundary -- a calendar week ending on 2024-02-05 starts on 2024-01-29 and
+    is stored under January -- and then the covered interval reaches into a
+    month that owns no bar and therefore has no file. Deriving requirements
+    from elapsed time instead of bar starts demands that nonexistent file.
+    """
+    time_bar = TimeBar.parse(facts.dataset_key.timeframe)
+    months: dict[tuple[int, int], YearMonth] = {}
+    for interval in facts.covered:
+        for year_month, slice_start, slice_end in paths.iter_month_slices(
+            interval.start, interval.end
+        ):
+            if _first_bar_start_at_or_after(time_bar, slice_start) < slice_end:
+                months[(year_month.year, year_month.month)] = year_month
+    return [months[key] for key in sorted(months)]
+
+
+#: Temporary join columns used to restrict rows to covered intervals.
+_COVERED_START = "_covered_start"
+_COVERED_END = "_covered_end"
+
+
+def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyFrame:
+    """Keep only rows inside `facts.covered`.
+
+    `Catalog.coverage_and_gaps` returns disjoint intervals in ascending order,
+    clipped to the requested range, so an as-of join answers membership in one
+    pass: the latest interval starting at or before a row decides it. A
+    per-interval boolean union would instead cost one comparison pair per
+    interval per row, which a sparse dataset makes prohibitive.
+
+    Filtering by coverage rather than by the request keeps `data` consistent
+    with the reported `covered` and `gaps`. A month file can hold rows the
+    catalog does not currently cover, for example when a sync published
+    Parquet and then failed before recording coverage.
+    """
+    bounds = pl.LazyFrame(
+        {
+            _COVERED_START: [interval.start for interval in facts.covered],
+            _COVERED_END: [interval.end for interval in facts.covered],
+        },
+        schema={
+            _COVERED_START: OHLCV_SCHEMA["timestamp"],
+            _COVERED_END: OHLCV_SCHEMA["timestamp"],
+        },
+    )
+    return (
+        frame.sort("timestamp")
+        .join_asof(bounds, left_on="timestamp", right_on=_COVERED_START, strategy="backward")
+        .filter(pl.col(_COVERED_END).is_not_null() & (pl.col("timestamp") < pl.col(_COVERED_END)))
+        .drop(_COVERED_START, _COVERED_END)
+    )
+
+
 def lazy_frame_for_facts(data_dir: Path, facts: LocalReadFacts) -> pl.LazyFrame:
     """Build the sorted lazy frame for catalog-covered canonical files."""
-    required_months = {
-        year_month
-        for interval in facts.covered
-        for year_month, _, _ in paths.iter_month_slices(interval.start, interval.end)
-    }
     required_paths = [
         paths.month_file_path(data_dir, facts.dataset_key, year_month)
-        for year_month in sorted(required_months, key=lambda value: (value.year, value.month))
+        for year_month in _required_months(facts)
     ]
     missing = [path for path in required_paths if not path.is_file()]
     if missing:
@@ -110,9 +171,7 @@ def lazy_frame_for_facts(data_dir: Path, facts: LocalReadFacts) -> pl.LazyFrame:
     if not required_paths:
         return pl.DataFrame(schema=OHLCV_SCHEMA).lazy()
     combined = pl.concat([pl.scan_parquet(path) for path in required_paths], how="vertical")
-    return combined.filter(
-        (pl.col("timestamp") >= facts.start) & (pl.col("timestamp") < facts.end)
-    ).sort("timestamp")
+    return _restrict_to_covered(combined, facts)
 
 
 def _resolve_local_perpetual_settle(
