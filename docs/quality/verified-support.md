@@ -36,9 +36,12 @@ provider adapter
 Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
 ## Currently verified
-The currently listed matrix was requalified on 2026-07-26 using the built
-`xret-data` 0.1.0 distribution in a fresh external uv environment after the
-bounded-window pagination and explicit observation-evidence change.
+The currently listed matrix was requalified on 2026-07-31 using the built
+`xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt`
+4.5.70 and `polars` 1.43.1 resolved by that environment, after the bounded-window
+observation-evidence change. Each qualification records the provider dependency
+version it exercised, because a provider release can change endpoint behavior
+without any Xret change.
 
 ### Binance
 
@@ -46,7 +49,7 @@ bounded-window pagination and explicit observation-evidence change.
 |---|---|---|---|---|---|
 | CCXT | Binance USD-M klines | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
 
-Binance USD-M perpetual `1h` qualification covers complete four-year synchronization, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. Binance spot combinations remain unlisted pending re-verification after the storage-contract changes.
+Binance USD-M perpetual `1h` qualification covers complete four-year synchronization across monthly partitions, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. Binance spot combinations remain unlisted pending re-verification after the storage-contract changes.
 
 ### Bybit
 
@@ -55,7 +58,7 @@ Binance USD-M perpetual `1h` qualification covers complete four-year synchroniza
 | CCXT | Bybit spot kline | Spot | Time bars | `1h` | `BTC/USDT` |
 | CCXT | Bybit derivatives kline | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
 
-Bybit spot and perpetual `1h` qualification covers complete four-year synchronization, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. Bybit `1m` remains unlisted pending equivalent re-verification.
+Bybit spot and perpetual `1h` qualification covers complete four-year synchronization across monthly partitions, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. Bybit `1m` remains unlisted pending equivalent re-verification.
 
 ### OKX
 
@@ -63,7 +66,7 @@ Bybit spot and perpetual `1h` qualification covers complete four-year synchroniz
 |---|---|---|---|---|---|
 | CCXT | OKX market candles | Spot | Time bars | `1h` | `BTC/USDT` |
 
-OKX spot `1h` qualification covers complete four-year synchronization, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. OKX perpetual combinations remain unlisted pending equivalent re-verification.
+OKX spot `1h` qualification covers complete four-year synchronization across monthly partitions, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. OKX perpetual combinations remain unlisted pending equivalent re-verification.
 
 A rebuild restores Parquet-provable datasets, files, and available coverage; it intentionally does not restore unavailable observations, ingestion runs, warnings, or quality events.
 

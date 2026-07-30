@@ -613,6 +613,58 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
 
 
 # --------------------------------------------------------------------------
+# unproved observation windows never become negative coverage
+# --------------------------------------------------------------------------
+
+
+class _WindowIgnoringExchange(FakeExchange):
+    """A venue that ignores `until` and always answers with recent candles."""
+
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict | None = None,
+    ) -> list[list[float]]:
+        self.fetch_calls.append((symbol, timeframe, since, limit))
+        unrelated = _BASE_MS + 500 * 3_600_000
+        return [
+            [unrelated + index * 3_600_000, 100.0, 101.0, 99.0, 100.5, 10.0] for index in range(3)
+        ]
+
+
+def test_a_venue_ignoring_the_window_records_no_coverage_and_stays_retryable(
+    tmp_path: Path,
+) -> None:
+    """The defect this replaces minted permanent `unavailable` from a bad page.
+
+    Failing closed keeps the range `missing`, so a later sync against a venue
+    that honors the window still recovers it.
+    """
+    config = _configure(tmp_path)
+    _register(_WindowIgnoringExchange())
+    provider_runtime._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(_market_data(config))
+
+    with pytest.raises(ProviderError, match="outside the requested window"):
+        bars.sync(_now(0), _now(3))
+
+    partial = bars.scan_partial(_now(0), _now(3))
+    assert not partial.covered
+    assert [gap.status for gap in partial.gaps] == [CoverageStatus.MISSING]
+    assert partial.data.collect().height == 0
+
+    _register(FakeExchange(candles=_hourly_candles(range(0, 3))))
+    recovered = _bars(_market_data(config)).sync(_now(0), _now(3)).require_complete()
+
+    assert recovered.fetched_rows == 3
+    assert _bars(_market_data(config)).scan(_now(0), _now(3)).collect().height == 3
+
+
+# --------------------------------------------------------------------------
 # month-crossing bars (see local_read._required_months)
 # --------------------------------------------------------------------------
 

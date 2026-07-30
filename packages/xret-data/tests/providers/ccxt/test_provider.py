@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
@@ -822,7 +823,14 @@ def test_fetch_traverses_every_page_of_a_fully_empty_range() -> None:
     assert len(exchange.fetch_calls) == 3
 
 
-def test_fetch_clips_provider_boundary_extras_without_duplicates() -> None:
+def test_fetch_rejects_provider_boundary_extras_instead_of_clipping_them() -> None:
+    """A venue overshooting the window by one bar is still a contract violation.
+
+    Clipping the extras would leave the same code path silently accepting a
+    response drawn from an entirely unrelated range, which is how a false
+    `unavailable` gets minted. Lane 3 measurement on 2026-07-31 found no
+    qualified venue that overshoots, so rejecting costs nothing real.
+    """
     minute = 60_000
 
     def boundary_extras(
@@ -842,18 +850,14 @@ def test_fetch_clips_provider_boundary_extras_without_duplicates() -> None:
     _register_spot(exchange)
     _set_now(datetime(2024, 1, 1, 0, 10, tzinfo=UTC))
 
-    frame = _fetch_bars(
-        _spot_identity(),
-        "1m",
-        datetime(2024, 1, 1, tzinfo=UTC),
-        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
-        page_limit=1,
-    )
-
-    assert frame["timestamp"].to_list() == [
-        datetime(2024, 1, 1, tzinfo=UTC),
-        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
-    ]
+    with pytest.raises(ProviderError, match="outside the requested window"):
+        _fetch_bars(
+            _spot_identity(),
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+            page_limit=1,
+        )
 
 
 def test_half_open_pages_do_not_overfill_an_inclusive_endpoint_limit() -> None:
@@ -921,6 +925,206 @@ def test_unqualified_exchange_pagination_fails_closed() -> None:
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
         )
+
+
+# --------------------------------------------------------------------------
+# Bounded-window observation evidence
+#
+# A page proves its window only when the response honors the request that
+# produced it. A venue ignoring `until` or `limit` would otherwise let Xret
+# record `unavailable` for a range it never actually observed.
+# --------------------------------------------------------------------------
+
+
+def _window_probe(rows_for: Callable[[int], list[list[float]]]) -> None:
+    """Register a venue whose page response ignores the requested window."""
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        _limit: int,
+        _params: dict,
+    ) -> list[list[float]]:
+        return rows_for(since)
+
+    _register_spot(FakeExchange(client_id="binance", fetch_override=fetch))
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+
+def _probe_observe(page_limit: int = 1000):
+    return _observe(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 4, tzinfo=UTC),
+        page_limit=page_limit,
+    )
+
+
+@pytest.mark.parametrize(
+    "offsets",
+    [
+        pytest.param([-60_000], id="row-before-the-window"),
+        pytest.param([240_000], id="row-exactly-at-the-exclusive-end"),
+        pytest.param([600_000], id="row-far-after-the-window"),
+        pytest.param([0, 240_000], id="only-violation-is-one-bar-past-the-end"),
+        pytest.param([0, 600_000], id="one-row-inside-one-outside"),
+    ],
+)
+def test_a_page_row_outside_its_window_fails_closed(offsets: list[int]) -> None:
+    _window_probe(lambda _since: [_row(offset) for offset in offsets])
+
+    with pytest.raises(ProviderError, match="outside the requested window"):
+        _probe_observe()
+
+
+def test_a_page_ignoring_until_entirely_fails_closed() -> None:
+    """The whole response comes from an unrelated later range."""
+    unrelated = 500 * 60_000
+    _window_probe(lambda _since: [_row(unrelated + index * 60_000) for index in range(3)])
+
+    with pytest.raises(ProviderError, match="outside the requested window"):
+        _probe_observe()
+
+
+def test_an_out_of_window_page_failure_names_the_venue_and_the_row() -> None:
+    _window_probe(lambda _since: [_row(600_000)])
+
+    with pytest.raises(ProviderError) as excinfo:
+        _probe_observe()
+
+    message = str(excinfo.value)
+    assert "BTC/USDT" in message
+    assert "binance" in message
+    assert datetime(2024, 1, 1, 0, 10, tzinfo=UTC).isoformat() in message
+
+
+def test_an_unrepresentable_timestamp_still_names_the_venue() -> None:
+    """A venue emitting microsecond epochs must not degrade into a clock error."""
+    _window_probe(lambda since: [[since * 1000, 100.0, 101.0, 99.0, 100.0, 1.0]])
+
+    with pytest.raises(ProviderError, match="outside the requested window") as excinfo:
+        _probe_observe()
+
+    assert "binance" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        pytest.param(float("nan"), id="nan"),
+        pytest.param(float("inf"), id="inf"),
+        pytest.param(float("-inf"), id="negative-inf"),
+        pytest.param(None, id="none"),
+        pytest.param("not-a-number", id="non-numeric-string"),
+    ],
+)
+def test_an_uncoercible_timestamp_is_reported_as_a_malformed_candle(timestamp: object) -> None:
+    """Conversion failures must not escape as raw ValueError or OverflowError."""
+    _window_probe(lambda _since: [[timestamp, 100.0, 101.0, 99.0, 100.0, 1.0]])
+
+    with pytest.raises(ProviderError, match="malformed candle") as excinfo:
+        _probe_observe()
+
+    assert "binance" in str(excinfo.value)
+
+
+def test_a_decimal_string_timestamp_is_coerced_like_a_collected_row() -> None:
+    """The validator and the collector must agree on what a timestamp is."""
+    _window_probe(lambda since: [[f"{since}.0", 100.0, 101.0, 99.0, 100.0, 1.0]])
+
+    observation = _probe_observe()
+
+    assert observation.frame["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+
+
+def test_a_saturated_in_window_page_proves_its_window() -> None:
+    """A full page is not suspicious: the window is exactly `limit` bars wide.
+
+    That sizing is also why no separate row-count check exists. Aligned,
+    unique, in-window rows cannot exceed the limit, so an over-limit response
+    must carry either out-of-window rows (rejected above) or duplicate and
+    off-boundary rows, which fail fatal quality validation before any coverage
+    is recorded.
+    """
+    minute = 60_000
+    exchange = FakeExchange(candles=[_row(index * minute) for index in range(4)])
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    observation = _observe(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 4, tzinfo=UTC),
+        page_limit=2,
+    )
+
+    assert observation.frame.height == 4
+    assert len(exchange.fetch_calls) == 2
+    assert [(window.start, window.end) for window in observation.observed] == [
+        (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 2, tzinfo=UTC)),
+        (datetime(2024, 1, 1, 0, 2, tzinfo=UTC), datetime(2024, 1, 1, 0, 4, tzinfo=UTC)),
+    ]
+
+
+def test_a_duplicated_in_window_page_fails_fatal_quality_validation() -> None:
+    """One way an over-limit page can stay entirely inside the window.
+
+    The other requires off-timeframe timestamps. Both fail fatal quality
+    validation before any coverage is recorded, which is why the page validator
+    carries no separate row-count check.
+    """
+
+    def duplicated(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        _limit: int,
+        _params: dict,
+    ) -> list[list[float]]:
+        return [[since, 100.0, 101.0, 99.0, 100.0, 1.0]] * 4
+
+    _register_spot(FakeExchange(fetch_override=duplicated))
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    with pytest.raises(ProviderError, match="identity.duplicate"):
+        _observe(
+            _spot_identity(),
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+            page_limit=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "present_offsets",
+    [
+        pytest.param([], id="empty-page"),
+        pytest.param([0], id="one-of-four"),
+        pytest.param([0, 180_000], id="two-of-four-with-a-hole"),
+    ],
+)
+def test_an_under_filled_in_window_page_proves_its_window(present_offsets: list[int]) -> None:
+    """Sparse markets are the reason evidence is separate from returned rows.
+
+    Rejecting a short response would reintroduce the defect fixed in
+    `.internal/bugs/coinbase-empty-page-pagination`.
+    """
+    _register_spot(FakeExchange(candles=[_row(offset) for offset in present_offsets]))
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    observation = _probe_observe()
+
+    assert observation.frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, tzinfo=UTC) + timedelta(milliseconds=offset)
+        for offset in present_offsets
+    ]
+    assert [(window.start, window.end) for window in observation.observed] == [
+        (datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 4, tzinfo=UTC))
+    ]
 
 
 def test_ccxt_observation_does_not_fallback_to_reresolving_an_unowned_market() -> None:
