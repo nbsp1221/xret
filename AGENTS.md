@@ -15,6 +15,8 @@ Repository-specific instructions for AI coding agents. Keep changes focused, pre
 
 `xret` is a PEP 420 namespace. Never add `packages/*/src/xret/__init__.py`. Future distributions follow the same mapping, for example `packages/xret-strategy/src/xret/strategy`.
 
+Each distribution keeps its own `LICENSE` copy beside its `pyproject.toml` and declares `license-files = ["LICENSE"]`. `license-files` patterns must stay inside the distribution directory, so a workspace-root path such as `../../LICENSE` is rejected at build time, and `uv_build` includes only what that key references.
+
 ## Commands
 
 Use uv. Do not add parallel pip, Poetry, Conda, or requirements-file workflows.
