@@ -202,17 +202,43 @@ def _check_finite_positive_prices(data: pl.DataFrame) -> list[QualityFinding]:
     return findings
 
 
-def _check_nonnegative_volume(data: pl.DataFrame) -> list[QualityFinding]:
-    invalid = data.filter(pl.col("volume") < 0)
-    if invalid.height:
-        return [
+def _check_volume_values(data: pl.DataFrame) -> list[QualityFinding]:
+    """Volume must be finite and non-negative. Zero is a valid quiet bar.
+
+    Two separate contracts: representability and range. `-inf` breaks both and
+    reports both, mirroring how `-inf` prices report `price.non_finite` and
+    `price.non_positive`. There is no volume counterpart to
+    `price.non_positive` because a bar with no trades legitimately has zero
+    volume.
+
+    Finiteness needs its own expression: `NaN < 0` and `inf < 0` are both false,
+    and `NaN` is not null, so a range comparison alone cannot see either value.
+    """
+    counts = data.select(
+        (~pl.col("volume").is_finite()).sum().alias("non_finite"),
+        (pl.col("volume") < 0).sum().alias("negative"),
+    ).row(0, named=True)
+
+    findings: list[QualityFinding] = []
+    non_finite = int(counts["non_finite"])
+    if non_finite:
+        findings.append(
+            _fatal(
+                "volume.non_finite",
+                f"volume has {non_finite} non-finite value(s)",
+                row_count=non_finite,
+            )
+        )
+    negative = int(counts["negative"])
+    if negative:
+        findings.append(
             _fatal(
                 "volume.negative",
-                f"volume has {invalid.height} negative value(s)",
-                row_count=invalid.height,
+                f"volume has {negative} negative value(s)",
+                row_count=negative,
             )
-        ]
-    return []
+        )
+    return findings
 
 
 def _check_duplicate_identity(data: pl.DataFrame) -> list[QualityFinding]:
@@ -321,7 +347,7 @@ _FATAL_CHECKS = (
     _check_utc,
     _check_ohlc_invariants,
     _check_finite_positive_prices,
-    _check_nonnegative_volume,
+    _check_volume_values,
     _check_duplicate_identity,
     _check_ordering,
 )
@@ -450,12 +476,18 @@ def enforce_canonical_ohlcv(
     timeframe: str,
     *,
     error_cls: type[XretDataError] = SyncError,
+    source: str | None = None,
 ) -> QualityResult:
-    """Validate canonical rows and raise `error_cls` on a fatal invariant."""
+    """Validate canonical rows and raise `error_cls` on a fatal invariant.
+
+    `source` names what was validated, so a failure on stored rows points at
+    the file instead of leaving the operator to guess which partition is bad.
+    """
     result = evaluate_canonical_ohlcv(data, timeframe)
     if not result.is_valid:
         codes = ", ".join(f"{f.code} ({f.message})" for f in result.fatal)
-        raise error_cls(f"canonical OHLCV rows failed fatal quality checks: {codes}")
+        where = f" in {source}" if source else ""
+        raise error_cls(f"canonical OHLCV rows{where} failed fatal quality checks: {codes}")
     return result
 
 

@@ -290,7 +290,7 @@ def _validate_storage_frame(
     validators are always paired.
     """
     _validate_frame_identity(dataset_key, year_month, frame, error_cls=error_cls, source=source)
-    enforce_canonical_ohlcv(frame, dataset_key.timeframe, error_cls=error_cls)
+    enforce_canonical_ohlcv(frame, dataset_key.timeframe, error_cls=error_cls, source=source)
 
 
 def _validate_batch(dataset_key: DatasetKey, year_month: YearMonth, batch: pl.DataFrame) -> None:

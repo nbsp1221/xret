@@ -613,6 +613,65 @@ def test_same_dataset_syncs_serialize_provider_work_and_preserve_canonical_state
 
 
 # --------------------------------------------------------------------------
+# non-finite volume never becomes canonical
+# --------------------------------------------------------------------------
+
+
+class _NonFiniteVolumeExchange(FakeExchange):
+    """A venue whose volume overflows to `inf`, as `float(str(...))` can."""
+
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict | None = None,
+    ) -> list[list[float]]:
+        self.fetch_calls.append((symbol, timeframe, since, limit))
+        return [
+            [_BASE_MS, 100.0, 101.0, 99.0, 100.5, float("inf")],
+            [_BASE_MS + 3_600_000, 100.0, 101.0, 99.0, 100.5, 10.0],
+        ]
+
+
+def test_non_finite_volume_never_reaches_canonical_storage(tmp_path: Path) -> None:
+    """`ProviderRuntime` enforces canonical quality before `dataset.sync` can
+    remap the finding, so both verbs raise `ProviderError`. Correcting that
+    classification is tracked separately (review M-21)."""
+    config = _configure(tmp_path)
+    _register(_NonFiniteVolumeExchange())
+    provider_runtime._set_clock_override(lambda: _now(10))
+    dataset._set_clock_override(lambda: _now(10))
+    bars = _bars(_market_data(config))
+
+    with pytest.raises(ProviderError, match="volume.non_finite"):
+        bars.fetch(_now(0), _now(2))
+    with pytest.raises(ProviderError, match="volume.non_finite"):
+        bars.sync(_now(0), _now(2))
+
+    partial = bars.scan_partial(_now(0), _now(2))
+    assert not partial.covered
+    assert [gap.status for gap in partial.gaps] == [CoverageStatus.MISSING]
+    assert not list(config.data_dir.rglob("*.parquet"))
+
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        runs = catalog.list_ingestion_run_ids(
+            DatasetKey.from_identity(bars.identity, timeframe="1h")
+        )
+    assert len(runs) == 1
+    status, completed_at = _run_status(config, runs[0])
+    assert status == "failed"
+    assert completed_at is not None
+
+    _register(FakeExchange(candles=_hourly_candles(range(0, 2))))
+    recovered = _bars(_market_data(config)).sync(_now(0), _now(2)).require_complete()
+
+    assert recovered.fetched_rows == 2
+    assert _bars(_market_data(config)).scan(_now(0), _now(2)).collect().height == 2
+
+
+# --------------------------------------------------------------------------
 # unproved observation windows never become negative coverage
 # --------------------------------------------------------------------------
 

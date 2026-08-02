@@ -36,10 +36,10 @@ provider adapter
 Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
 ## Currently verified
-The currently listed matrix was requalified on 2026-07-31 using the built
+The currently listed matrix was requalified on 2026-08-01 using the built
 `xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt`
-4.5.70 and `polars` 1.43.1 resolved by that environment, after the bounded-window
-observation-evidence change. Each qualification records the provider dependency
+4.5.70 and `polars` 1.43.1 resolved by that environment, after the canonical
+volume-finiteness change. Each qualification records the provider dependency
 version it exercised, because a provider release can change endpoint behavior
 without any Xret change.
 

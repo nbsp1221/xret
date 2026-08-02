@@ -11,7 +11,9 @@ from xret.data.models import BarRequest, MarketIdentity
 from xret.data.quality import (
     _count_timeframe_gaps_python,
     count_timeframe_gaps,
+    enforce_canonical_ohlcv,
     enforce_ohlcv_batch,
+    evaluate_canonical_ohlcv,
     evaluate_ohlcv_batch,
 )
 from xret.data.schema import OHLCV_SCHEMA
@@ -219,6 +221,143 @@ def test_zero_volume_is_allowed() -> None:
     request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
     result = evaluate_ohlcv_batch(data, request)
     assert result.is_valid
+
+
+@pytest.mark.parametrize(
+    ("value", "expected_codes"),
+    [
+        pytest.param(float("nan"), ["volume.non_finite"], id="nan"),
+        pytest.param(float("inf"), ["volume.non_finite"], id="inf"),
+        pytest.param(float("-inf"), ["volume.non_finite", "volume.negative"], id="negative-inf"),
+        pytest.param(1e308, [], id="large-but-finite"),
+    ],
+)
+def test_volume_value_classification(value: float, expected_codes: list[str]) -> None:
+    """`-inf` breaks both contracts: representability and range.
+
+    Zero and plain negatives stay covered by `test_zero_volume_is_allowed` and
+    `test_negative_volume_is_fatal` above.
+    """
+    timestamps = _ts(0)
+    data = _frame(timestamps, volumes=[value])
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    volume_findings = [f for f in result.fatal if f.code.startswith("volume.")]
+    assert [f.code for f in volume_findings] == expected_codes
+
+
+def test_non_finite_volume_row_count_covers_every_offending_row() -> None:
+    timestamps = _ts(0, 1, 2, 3)
+    data = _frame(timestamps, volumes=[float("nan"), 10.0, float("inf"), 20.0])
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    findings = [f for f in result.fatal if f.code == "volume.non_finite"]
+    assert len(findings) == 1
+    assert findings[0].row_count == 2
+
+
+def test_null_volume_is_a_null_violation_not_a_finiteness_one() -> None:
+    """`is_finite()` yields null for a null row, and `sum()` skips it.
+
+    Null volume stays `_check_nulls`' responsibility, exactly as for prices, so
+    the two findings never double-report the same row.
+    """
+    timestamps = _ts(0, 1)
+    data = _frame(timestamps, volumes=[None, 10.0])
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    assert not any(f.code.startswith("volume.") for f in result.fatal)
+    assert any(f.code == "null.disallowed" for f in result.fatal)
+
+
+def test_volume_checks_on_an_empty_frame() -> None:
+    result = evaluate_ohlcv_batch(_frame([]), _request(_ts(0)[0], _ts(1)[0]))
+    assert not any(f.code.startswith("volume.") for f in result.fatal)
+
+
+def test_clean_batch_has_no_volume_findings() -> None:
+    timestamps = _ts(0, 1, 2)
+    data = _frame(timestamps, volumes=[0.0, 10.0, 1e308])
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+    result = evaluate_ohlcv_batch(data, request)
+    assert not any(f.code.startswith("volume.") for f in result.fatal)
+
+
+@pytest.mark.parametrize(
+    ("value", "price_codes", "volume_codes"),
+    [
+        pytest.param(float("inf"), ["price.non_finite"], ["volume.non_finite"], id="inf"),
+        pytest.param(float("nan"), ["price.non_finite"], ["volume.non_finite"], id="nan"),
+        pytest.param(
+            float("-inf"),
+            ["price.non_finite", "price.non_positive"],
+            ["volume.non_finite", "volume.negative"],
+            id="negative-inf",
+        ),
+        pytest.param(0.0, ["price.non_positive"], [], id="zero-only-asymmetry"),
+    ],
+)
+def test_price_and_volume_finiteness_contracts_stay_symmetric(
+    value: float, price_codes: list[str], volume_codes: list[str]
+) -> None:
+    """Pairs the two columns' codes for the same value.
+
+    Per-column classification is pinned by
+    `test_finite_positive_price_classification` and
+    `test_volume_value_classification`; this test exists so that changing one
+    column's rule without the other fails here. Zero is the one intentional
+    asymmetry: a quiet bar is not a bad price.
+    """
+    timestamps = _ts(0)
+    request = _request(timestamps[0], timestamps[-1] + timedelta(minutes=1))
+
+    price_result = evaluate_ohlcv_batch(_frame(timestamps, opens=[value]), request)
+    volume_result = evaluate_ohlcv_batch(_frame(timestamps, volumes=[value]), request)
+
+    assert [f.code for f in price_result.fatal if "'open'" in f.message] == price_codes
+    assert [f.code for f in volume_result.fatal if f.code.startswith("volume.")] == volume_codes
+
+
+# --------------------------------------------------------------------------
+# Canonical revalidation
+#
+# `_FATAL_CHECKS` also backs `evaluate_canonical_ohlcv`, which `parquet.py`
+# calls before publishing and when re-reading stored rows as rebuild evidence.
+# A row-level invariant that only held for freshly fetched batches would leave
+# publication and rebuild unguarded.
+# --------------------------------------------------------------------------
+
+
+def test_non_finite_volume_is_rejected_when_revalidating_canonical_rows() -> None:
+    data = _frame(_ts(0, 1), volumes=[float("inf"), 10.0])
+
+    result = evaluate_canonical_ohlcv(data, TIMEFRAME)
+
+    assert not result.is_valid
+    assert [f.code for f in result.fatal if f.code.startswith("volume.")] == ["volume.non_finite"]
+
+
+def test_enforcing_canonical_rows_raises_the_injected_error_for_non_finite_volume() -> None:
+    data = _frame(_ts(0), volumes=[float("nan")])
+
+    with pytest.raises(SyncError, match="volume.non_finite"):
+        enforce_canonical_ohlcv(data, TIMEFRAME)
+    with pytest.raises(ProviderError, match="volume.non_finite"):
+        enforce_canonical_ohlcv(data, TIMEFRAME, error_cls=ProviderError)
+
+
+def test_canonical_failure_names_its_source_when_one_is_given() -> None:
+    """Stored-row failures must point at the file, not leave it to guesswork."""
+    data = _frame(_ts(0), volumes=[float("inf")])
+
+    with pytest.raises(SyncError, match="in some/month/data.parquet"):
+        enforce_canonical_ohlcv(data, TIMEFRAME, source="some/month/data.parquet")
+
+
+def test_canonical_revalidation_accepts_zero_and_large_finite_volume() -> None:
+    data = _frame(_ts(0, 1), volumes=[0.0, 1e308])
+
+    assert evaluate_canonical_ohlcv(data, TIMEFRAME).is_valid
 
 
 # --------------------------------------------------------------------------
