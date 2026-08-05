@@ -1,10 +1,11 @@
-"""Public contracts for historical-bar provider authors."""
+"""Public contracts for market-data provider authors."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Final, Protocol
 
 import polars as pl
@@ -19,6 +20,10 @@ __all__ = [
     "BarRequest",
     "DerivativeInterpretation",
     "HistoricalBarProvider",
+    "Market",
+    "MarketDefinition",
+    "MarketDefinitionProvider",
+    "MarketIdentity",
     "ObservedWindow",
     "ProviderDescriptor",
     "ResolvedBarMarket",
@@ -68,8 +73,23 @@ class DerivativeInterpretation:
     contract_size: str | None = None
 
     def __post_init__(self) -> None:
-        if self.contract_size is not None and not self.contract_size:
-            raise InvalidRequestError("derivative contract_size must not be empty")
+        if self.linear is not None and not isinstance(self.linear, bool):
+            raise InvalidRequestError("derivative linear must be bool or None")
+        if self.inverse is not None and not isinstance(self.inverse, bool):
+            raise InvalidRequestError("derivative inverse must be bool or None")
+        if self.contract_size is not None and (
+            not isinstance(self.contract_size, str) or not self.contract_size
+        ):
+            raise InvalidRequestError("derivative contract_size must be a nonempty string or None")
+
+
+def _validate_derivative(
+    value: DerivativeInterpretation | None,
+    *,
+    owner: str,
+) -> None:
+    if value is not None and not isinstance(value, DerivativeInterpretation):
+        raise InvalidRequestError(f"{owner} derivative must be a DerivativeInterpretation or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,10 +117,55 @@ class ResolvedBarMarket:
             raise InvalidRequestError("resolved market timeframes must be a frozenset")
         for timeframe in self.timeframes:
             TimeBar.parse(timeframe)
+        _validate_derivative(self.derivative, owner="resolved market")
         if self.identity.market is Market.PERPETUAL and self.identity.settle is None:
             raise InvalidRequestError("resolved perpetual market must include settle")
         if self.identity.market is Market.SPOT and self.derivative is not None:
             raise InvalidRequestError("spot market must not include derivative interpretation")
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDefinition:
+    """One provider-advertised market translated into Xret vocabulary.
+
+    `timeframes` contains provider-advertised bar types that Xret can express;
+    it is not an Xret verification or exhaustive-pagination claim. `tick_size`
+    and `size_increment` are exact fixed increments when the provider exposes
+    them with unambiguous semantics, otherwise `None`.
+    """
+
+    identity: MarketIdentity
+    active: bool | None
+    timeframes: frozenset[str]
+    tick_size: Decimal | None
+    size_increment: Decimal | None
+    derivative: DerivativeInterpretation | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("market definition identity must be a MarketIdentity")
+        if self.active is not None and not isinstance(self.active, bool):
+            raise InvalidRequestError("market definition active must be bool or None")
+        if not isinstance(self.timeframes, frozenset):
+            raise InvalidRequestError("market definition timeframes must be a frozenset")
+        for timeframe in self.timeframes:
+            TimeBar.parse(timeframe)
+        _validate_increment(self.tick_size, field_name="tick_size")
+        _validate_increment(self.size_increment, field_name="size_increment")
+        _validate_derivative(self.derivative, owner="market definition")
+        if self.identity.market is Market.PERPETUAL and self.identity.settle is None:
+            raise InvalidRequestError("perpetual market definition must include settle")
+        if self.identity.market is Market.SPOT and self.derivative is not None:
+            raise InvalidRequestError("spot market definition must not include derivative metadata")
+
+
+def _validate_increment(value: Decimal | None, *, field_name: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, Decimal) or not value.is_finite() or value <= 0:
+        raise InvalidRequestError(
+            f"market definition {field_name} must be a positive finite Decimal or None"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,3 +208,14 @@ class HistoricalBarProvider(Protocol):
         request: BarRequest,
         market: ResolvedBarMarket,
     ) -> BarObservation: ...
+
+
+class MarketDefinitionProvider(Protocol):
+    """Optional provider capability for current market-definition snapshots."""
+
+    def fetch_markets(
+        self,
+        *,
+        exchange: str,
+        market: Market,
+    ) -> tuple[MarketDefinition, ...]: ...

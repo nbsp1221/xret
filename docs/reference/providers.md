@@ -1,12 +1,13 @@
-# Historical-bar providers
+# Market-data providers
 
 The experimental provider-author API lets an application or separately installed
 package acquire historical time bars through Xret without changing Xret itself.
 CCXT is the built-in implementation, not part of the provider contract.
 
 Xret owns canonical identity, finality, schema validation, coverage, storage,
-locking, and recovery. A provider owns native market resolution and network
-observation. Providers never write Xret's Parquet files or SQLite catalog.
+locking, and recovery. A provider owns native market resolution, optional
+market-definition snapshots, and network observation. Providers never write
+Xret's Parquet files or SQLite catalog.
 
 ## Architecture
 
@@ -23,7 +24,7 @@ xret/data/providers/
     ├── __init__.py      # CcxtProvider export
     ├── provider.py      # implementation orchestration
     ├── client.py        # CCXT construction, retry, and transport
-    ├── markets.py       # canonical-to-native crypto market resolution
+    ├── markets.py       # crypto market resolution and definition translation
     └── pagination.py    # qualified exhaustive observation windows
 ```
 
@@ -46,11 +47,19 @@ from xret.data.providers import (
     BarRequest,
     DerivativeInterpretation,
     HistoricalBarProvider,
+    Market,
+    MarketDefinition,
+    MarketDefinitionProvider,
+    MarketIdentity,
     ObservedWindow,
     ProviderDescriptor,
     ResolvedBarMarket,
 )
 ```
+
+This namespace is self-contained for provider authoring; provider packages do
+not import domain values from implementation modules such as
+`xret.data.models`.
 
 The initial protocol covers synchronous historical OHLCV time bars for spot and
 perpetual markets. It does not define streaming, trades, quotes, fundamentals,
@@ -72,6 +81,48 @@ class HistoricalBarProvider(Protocol):
         market: ResolvedBarMarket,
     ) -> BarObservation: ...
 ```
+
+## Optional market-definition capability
+
+Market-definition discovery is a separate structural protocol; adding it does
+not change `HistoricalBarProvider` SPI v1 or require existing providers to
+implement it.
+
+```python
+class MarketDefinitionProvider(Protocol):
+    def fetch_markets(
+        self,
+        *,
+        exchange: str,
+        market: Market,
+    ) -> tuple[MarketDefinition, ...]: ...
+```
+
+A provider used through `MarketData` still implements `HistoricalBarProvider`.
+It may additionally implement `MarketDefinitionProvider`. Calling
+`MarketData.fetch_markets(...)` against a provider without this optional
+capability raises `UnsupportedMarketError`; Xret never falls back to CCXT after
+an explicitly selected provider lacks or fails the operation.
+
+Every returned definition must belong to the requested canonical exchange and
+market family, and canonical identities must be unique. Xret rejects mutable
+collections, wrong value types, out-of-scope definitions, and duplicate
+identities as provider contract failures.
+
+`MarketDefinition` is immutable and contains canonical identity, nullable
+provider-advertised active status, canonical provider-advertised timeframes,
+optional exact `tick_size` and `size_increment`, and optional derivative
+interpretation. Its timeframes do not assert exhaustive historical pagination
+or Xret verification. Search, filtering, ordering, and result caching remain
+application responsibilities.
+
+The built-in CCXT adapter translates only entries safely expressible with the
+requested spot or perpetual identity. Unrelated native instrument families,
+unknown optional fields, and native timeframe names outside Xret's grammar do
+not reject the venue. Canonical identity collisions are excluded rather than
+resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT
+precision values become increments only in `TICK_SIZE` mode; limits and other
+precision modes are not guessed into fixed increments.
 
 ## Descriptor and market resolution
 
@@ -216,7 +267,7 @@ Xret wraps unknown failures in `ProviderError` and chains the original cause.
 Providers should use `UnsupportedMarketError` when a requested market or timeframe
 cannot be operated safely.
 
-Conformance to this SPI means Xret can validate and orchestrate the implementation.
+Conformance to these protocols means Xret can validate and orchestrate the implementation.
 It does not make a third-party provider an Xret-verified source. Verified claims
 require the separate live-provider qualification policy in
 [Verified support](../quality/verified-support.md).

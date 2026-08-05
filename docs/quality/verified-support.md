@@ -35,6 +35,14 @@ provider adapter
 
 Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
+This matrix is a public trust statement, not a runtime allowlist. Provider
+adapters do not reject an otherwise valid venue merely because it is absent
+here. Conversely, successfully fetching a provider's market definitions, an
+`active=True` value, or an advertised timeframe does not prove that Xret can
+exhaustively acquire historical bars for that combination. Market-definition
+availability, historical-bar operability, and verified support remain separate
+facts.
+
 ## Currently verified
 The currently listed matrix was requalified on 2026-08-01 using the built
 `xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt`

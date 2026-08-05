@@ -24,8 +24,76 @@ Construction resolves configuration but performs no provider or storage I/O. An
 explicit config bypasses configuration discovery. Omitting `provider` selects the
 built-in CCXT provider. A provider object uses direct dependency injection; a
 string selects an installed provider entry point. Both forms remain unresolved
-until `fetch` or `sync` needs the provider. See
-[Historical-bar providers](providers.md).
+until `fetch_markets`, `fetch`, or `sync` needs the provider. See
+[Market-data providers](providers.md).
+
+### `fetch_markets`
+
+```python
+market_data.fetch_markets(
+    *,
+    exchange: str,
+    market: str,
+) -> tuple[MarketDefinition, ...]
+```
+
+Fetches the selected provider's current market definitions for one canonical
+venue and market-family scope. This is an eager remote metadata operation. It
+never reads or changes canonical Parquet, the SQLite catalog, coverage, locks,
+or source lineage, and it does not cache the returned snapshot.
+
+```python
+from xret.data import MarketData
+
+market_data = MarketData()
+definitions = market_data.fetch_markets(
+    exchange="binance",
+    market="perpetual",
+)
+
+active_markets = [
+    definition.identity
+    for definition in definitions
+    if definition.active is not False
+]
+```
+
+Applications that need to name the result type in annotations import
+`MarketDefinition` from the deliberate public provider-contract namespace:
+
+```python
+from xret.data.providers import MarketDefinition
+```
+
+`exchange` is a lowercase canonical slug and `market` is `spot` or
+`perpetual`. They define the provider endpoint and normalization scope; they
+are not search filters. The method deliberately has no query, symbol,
+settlement, active-status, sorting, or pagination parameters. Callers search,
+filter, sort, and cache the returned immutable tuple themselves.
+
+Each `MarketDefinition` contains:
+
+- `identity`: provider-independent `MarketIdentity`, including settlement for
+  perpetuals;
+- `active`: provider-advertised `True` or `False`, or `None` when unknown;
+- `timeframes`: provider-advertised timeframe names that Xret's canonical
+  grammar can express;
+- `tick_size`: a positive exact `Decimal` fixed price increment, or `None`;
+- `size_increment`: a positive exact `Decimal` fixed quantity increment, or
+  `None`;
+- `derivative`: linear/inverse and contract-size interpretation for a
+  perpetual, otherwise `None`.
+
+`active=True` is not a guarantee that every venue operation is currently
+available. `timeframes` is neither an exhaustive-pagination qualification nor
+a verified-support claim. Market listing, historical-bar operability, and
+verified support are distinct facts.
+
+Provider-native client IDs, derivative symbols, and raw metadata are not part
+of `MarketDefinition`. Native transport failures raise chained
+`ProviderError`; a selected provider without the optional market-definition
+capability raises `UnsupportedMarketError`. A successful empty tuple means the
+provider returned no safely representable market in the requested scope.
 
 ### `bars`
 

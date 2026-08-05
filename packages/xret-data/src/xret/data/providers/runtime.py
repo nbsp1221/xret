@@ -1,4 +1,4 @@
-"""Provider-independent execution and validation for historical bars."""
+"""Provider-independent execution and validation for remote market data."""
 
 from __future__ import annotations
 
@@ -9,12 +9,13 @@ from typing import cast
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, MarketIdentity
+from xret.data.models import BarRequest, Market, MarketIdentity
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
     BarObservation,
     HistoricalBarProvider,
+    MarketDefinition,
     ObservedWindow,
     ProviderDescriptor,
     ResolvedBarMarket,
@@ -41,6 +42,54 @@ class ValidatedBarObservation:
     source: ProviderSnapshot
     evidence_at: datetime
     completed_at: datetime
+
+
+class MarketDefinitionRuntime:
+    """Validate one optional provider market-definition operation."""
+
+    def __init__(self, provider: HistoricalBarProvider) -> None:
+        self._provider = provider
+        self._descriptor = validate_provider_descriptor(provider)
+
+    def fetch_markets(
+        self,
+        *,
+        exchange: str,
+        market: Market,
+    ) -> tuple[MarketDefinition, ...]:
+        try:
+            method = getattr(self._provider, "fetch_markets", None)
+        except Exception as exc:
+            raise ProviderError(
+                f"provider {self._descriptor.name!r} market-definition capability "
+                f"access failed: {exc}"
+            ) from exc
+        if not callable(method):
+            raise UnsupportedMarketError(
+                f"provider {self._descriptor.name!r} has no market-definition capability"
+            )
+        try:
+            result = method(exchange=exchange, market=market)
+        except (UnsupportedMarketError, ProviderError):
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"provider {self._descriptor.name!r} failed to fetch market definitions "
+                f"for {exchange}/{market.value}: {exc}"
+            ) from exc
+        if not isinstance(result, tuple):
+            raise ProviderError("provider fetch_markets() must return a tuple")
+        identities: set[MarketIdentity] = set()
+        for definition in result:
+            if not isinstance(definition, MarketDefinition):
+                raise ProviderError("provider market entries must be MarketDefinition values")
+            identity = definition.identity
+            if identity.exchange != exchange or identity.market is not market:
+                raise ProviderError("provider returned a market definition outside requested scope")
+            if identity in identities:
+                raise ProviderError(f"provider returned duplicate canonical identity: {identity!r}")
+            identities.add(identity)
+        return result
 
 
 def _default_clock() -> datetime:

@@ -11,12 +11,13 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
 from xret.data.models import BarRequest, MarketIdentity
-from xret.data.providers import DerivativeInterpretation, ResolvedBarMarket
+from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.ccxt import CcxtProvider, markets
 from xret.data.providers.ccxt import provider as ccxt_provider
@@ -51,11 +52,13 @@ class FakeExchange:
         candles: list[list[float]] | None = None,
         fetch_override=None,
         page_size: int | None = None,
+        precision_mode: int = 4,
     ) -> None:
         self.id = client_id
         self.has = {"fetchOHLCV": has_fetch_ohlcv}
         self.markets = markets if markets is not None else _default_markets()
         self.timeframes = timeframes if timeframes is not None else {"1m": "1m", "1h": "1h"}
+        self.precisionMode = precision_mode
         self._candles = candles or []
         self._fetch_override = fetch_override
         self._page_size = page_size
@@ -133,6 +136,10 @@ def _register_perp(exchange: FakeExchange) -> None:
     _exchanges["binanceusdm"] = exchange
 
 
+def _register_as(client_id: str, exchange: FakeExchange) -> None:
+    _exchanges[client_id] = exchange
+
+
 _exchanges: dict[str, FakeExchange] = {}
 
 
@@ -144,6 +151,7 @@ def _ccxt_provider(**options) -> CcxtProvider:
     return CcxtProvider(
         exchange_factory=_exchange_factory,
         version_provider=lambda: "4.5.0",
+        tick_size_precision_mode_provider=lambda: 4,
         **options,
     )
 
@@ -222,6 +230,311 @@ def test_perpetual_client_id_defaults_to_slug_when_unmapped() -> None:
 
 def test_spot_client_id_is_always_the_slug() -> None:
     assert markets.client_id(_spot_identity()) == "binance"
+
+
+# --------------------------------------------------------------------------
+# Provider-neutral market-definition snapshots
+# --------------------------------------------------------------------------
+
+
+def test_fetch_markets_translates_all_selected_perpetuals_without_ui_filtering() -> None:
+    exchange = FakeExchange(
+        client_id="binanceusdm",
+        timeframes={"1m": "1m", "1h": "1h", "3M": "3M", "1y": "1y"},
+        markets={
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+                "active": True,
+                "linear": True,
+                "inverse": False,
+                "contractSize": 1,
+                "precision": {"price": 0.1, "amount": 0.001},
+                "info": {"native": "must not escape"},
+            },
+            "ETH/USDT:USDT": {
+                "id": "ETHUSDT",
+                "symbol": "ETH/USDT:USDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+                "active": False,
+                "linear": True,
+                "inverse": False,
+                "contractSize": 1,
+                "precision": {"price": 0.01, "amount": 0.001},
+            },
+            "BTC/USDT": {
+                "id": "BTCUSDT-SPOT",
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+                "active": True,
+                "precision": {"price": 0.01, "amount": 0.00001},
+            },
+            "BTC/USDT:USDT-260925": {
+                "id": "BTCUSDT_260925",
+                "symbol": "BTC/USDT:USDT-260925",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "future": True,
+                "active": True,
+            },
+        },
+    )
+    _register_perp(exchange)
+
+    definitions = _market_data().fetch_markets(
+        exchange="binance",
+        market="perpetual",
+    )
+
+    assert len(definitions) == 2
+    by_symbol = {definition.identity.symbol: definition for definition in definitions}
+    btc = by_symbol["BTC/USDT"]
+    eth = by_symbol["ETH/USDT"]
+    assert btc == MarketDefinition(
+        identity=MarketIdentity(
+            exchange="binance",
+            symbol="BTC/USDT",
+            market="perpetual",
+            settle="USDT",
+        ),
+        active=True,
+        timeframes=frozenset({"1m", "1h"}),
+        tick_size=Decimal("0.1"),
+        size_increment=Decimal("0.001"),
+        derivative=DerivativeInterpretation(
+            linear=True,
+            inverse=False,
+            contract_size="1",
+        ),
+    )
+    assert eth.active is False
+    assert eth.tick_size == Decimal("0.01")
+    assert not hasattr(btc, "native_market_id")
+    assert not hasattr(btc, "native_symbol")
+    assert not hasattr(btc, "info")
+    assert exchange.load_markets_calls == 1
+    assert exchange.fetch_calls == []
+
+
+def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
+    exchange = FakeExchange(
+        has_fetch_ohlcv=False,
+        markets={
+            "BTC/USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+                "active": True,
+                "precision": {"price": 0.01, "amount": 0.00001},
+            }
+        },
+    )
+    _register_spot(exchange)
+
+    definitions = _market_data().fetch_markets(exchange="binance", market="spot")
+
+    assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_fetch_markets_preserves_unknown_active_and_unknown_fixed_increments() -> None:
+    exchange = FakeExchange(
+        precision_mode=2,
+        markets={
+            "BTC/USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+                "active": "true",
+                "precision": {"price": 5, "amount": 8},
+            }
+        },
+    )
+    _register_spot(exchange)
+
+    (definition,) = _market_data().fetch_markets(exchange="binance", market="spot")
+
+    assert definition.active is None
+    assert definition.tick_size is None
+    assert definition.size_increment is None
+
+
+@pytest.mark.parametrize(
+    ("price", "amount"),
+    [
+        (0, 0),
+        (-0.1, -0.001),
+        (float("nan"), float("inf")),
+        ("not-a-number", object()),
+        (None, None),
+    ],
+)
+def test_fetch_markets_does_not_invent_invalid_increments(price: object, amount: object) -> None:
+    exchange = FakeExchange(
+        markets={
+            "BTC/USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+                "precision": {"price": price, "amount": amount},
+                "limits": {"amount": {"min": 0.5}},
+            }
+        },
+    )
+    _register_spot(exchange)
+
+    (definition,) = _market_data().fetch_markets(exchange="binance", market="spot")
+
+    assert definition.tick_size is None
+    assert definition.size_increment is None
+
+
+def test_fetch_markets_skips_only_unrepresentable_selected_entries() -> None:
+    exchange = FakeExchange(
+        markets={
+            "BTC/USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "spot": True,
+            },
+            "missing-base": {
+                "id": "BROKEN",
+                "symbol": "BROKEN/USDT",
+                "quote": "USDT",
+                "spot": True,
+            },
+            "not-a-string/USDT": {
+                "id": "BROKEN2",
+                "symbol": "BROKEN2/USDT",
+                "base": 123,
+                "quote": "USDT",
+                "spot": True,
+            },
+        },
+    )
+    _register_spot(exchange)
+
+    definitions = _market_data().fetch_markets(exchange="binance", market="spot")
+
+    assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_fetch_markets_isolates_malformed_optional_derivative_metadata() -> None:
+    exchange = FakeExchange(
+        markets={
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+                "contractSize": "",
+            },
+            "ETH/USDT:USDT": {
+                "id": "ETHUSDT",
+                "symbol": "ETH/USDT:USDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+                "contractSize": 1,
+            },
+        }
+    )
+    _register_perp(exchange)
+
+    definitions = _market_data().fetch_markets(exchange="binance", market="perpetual")
+
+    assert [definition.identity.symbol for definition in definitions] == ["ETH/USDT"]
+
+
+def test_fetch_markets_excludes_every_native_entry_in_an_identity_collision() -> None:
+    exchange = FakeExchange(
+        markets={
+            "BTC/USDT:USDT-a": {
+                "id": "BTCUSDT-A",
+                "symbol": "BTC/USDT:USDT-a",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+            },
+            "BTC/USDT:USDT-b": {
+                "id": "BTCUSDT-B",
+                "symbol": "BTC/USDT:USDT-b",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+            },
+            "ETH/USDT:USDT": {
+                "id": "ETHUSDT",
+                "symbol": "ETH/USDT:USDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+            },
+        }
+    )
+    _register_perp(exchange)
+
+    definitions = _market_data().fetch_markets(exchange="binance", market="perpetual")
+
+    assert [definition.identity.symbol for definition in definitions] == ["ETH/USDT"]
+
+
+def test_unmapped_exchange_market_metadata_is_not_blocked_by_pagination_profiles() -> None:
+    exchange = FakeExchange(
+        client_id="bitget",
+        markets={
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+            }
+        },
+    )
+    _register_as("bitget", exchange)
+
+    definitions = _market_data().fetch_markets(exchange="bitget", market="perpetual")
+
+    assert [definition.identity.exchange for definition in definitions] == ["bitget"]
+    assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_fetch_markets_chains_unknown_ccxt_metadata_failure() -> None:
+    class BrokenExchange(FakeExchange):
+        def load_markets(self, reload: bool = False) -> dict:
+            raise RuntimeError("market endpoint exploded")
+
+    _register_spot(BrokenExchange())
+
+    with pytest.raises(ProviderError, match="CCXT failed to fetch market definitions") as captured:
+        _market_data().fetch_markets(exchange="binance", market="spot")
+
+    assert isinstance(captured.value.__cause__, RuntimeError)
 
 
 # --------------------------------------------------------------------------

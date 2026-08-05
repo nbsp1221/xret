@@ -20,10 +20,18 @@ from typing import cast
 
 from xret.data.config import MarketDataConfig, resolve_config
 from xret.data.dataset import BarDataset
-from xret.data.errors import CatalogError
-from xret.data.models import CatalogRebuildResult, CatalogValidationResult, Market, MarketIdentity
-from xret.data.providers import HistoricalBarProvider
+from xret.data.errors import CatalogError, UnsupportedMarketError
+from xret.data.models import (
+    CatalogRebuildResult,
+    CatalogValidationResult,
+    Market,
+    MarketIdentity,
+    _coerce_market,
+    _validate_exchange,
+)
+from xret.data.providers import HistoricalBarProvider, MarketDefinition
 from xret.data.providers.discovery import ProviderHandle
+from xret.data.providers.runtime import MarketDefinitionRuntime
 from xret.data.storage.catalog import CATALOG_FILE_NAME
 from xret.data.storage.recovery import RecoveryService
 
@@ -111,6 +119,35 @@ class MarketData:
     def maintenance(self) -> _Maintenance:
         """Catalog validation/rebuild namespace bound to this instance's config."""
         return _Maintenance(self._config)
+
+    def fetch_markets(
+        self,
+        *,
+        exchange: str,
+        market: str,
+    ) -> tuple[MarketDefinition, ...]:
+        """Fetch one provider's current market definitions for a scope.
+
+        This is an eager remote metadata operation. It never reads or changes
+        canonical Parquet data, catalog state, coverage, or source lineage.
+        Search, sorting, filtering, and result caching belong to the caller.
+
+        `timeframes` on each returned definition are provider-advertised values
+        that Xret can express, not verified-support claims.
+        """
+        canonical_exchange = _validate_exchange(exchange)
+        canonical_market = _coerce_market(market)
+        if canonical_market not in (Market.SPOT, Market.PERPETUAL):
+            raise UnsupportedMarketError(
+                f"market {canonical_market.value!r} is not supported in V1: structurally "
+                "ambiguous without contract-attribute fields; only 'spot' and "
+                "'perpetual' are operable"
+            )
+        provider = self._provider.get()
+        return MarketDefinitionRuntime(provider).fetch_markets(
+            exchange=canonical_exchange,
+            market=canonical_market,
+        )
 
     def bars(
         self,

@@ -15,6 +15,7 @@ class CCXTExchange(Protocol):
     id: str
     has: dict[str, Any]
     markets: dict[str, Any] | None
+    precisionMode: int
     timeframes: dict[str, Any] | None
 
     def load_markets(self, reload: bool = False) -> dict[str, Any]: ...
@@ -74,6 +75,18 @@ def installed_version() -> str:
     if not isinstance(version, str) or not version:
         raise ProviderError("ccxt does not expose a version")
     return version
+
+
+def tick_size_precision_mode() -> int:
+    """Return CCXT's installed `TICK_SIZE` precision-mode discriminator."""
+    try:
+        import ccxt
+    except ImportError as exc:
+        raise ProviderError("ccxt is not installed; cannot interpret market precision") from exc
+    mode = getattr(ccxt, "TICK_SIZE", None)
+    if not isinstance(mode, int):
+        raise ProviderError("ccxt does not expose an integer TICK_SIZE precision mode")
+    return mode
 
 
 def exponential_backoff(attempt: int, *, base: float) -> float:

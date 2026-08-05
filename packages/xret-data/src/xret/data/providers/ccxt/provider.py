@@ -16,6 +16,7 @@ from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
     BarObservation,
+    MarketDefinition,
     ProviderDescriptor,
     ResolvedBarMarket,
 )
@@ -42,7 +43,7 @@ def _market_key(market: ResolvedBarMarket) -> tuple[MarketIdentity, str, str]:
 
 
 class CcxtProvider:
-    """Historical crypto bars through CCXT's unified exchange interface."""
+    """Crypto market definitions and historical bars through unified CCXT."""
 
     def __init__(
         self,
@@ -53,6 +54,7 @@ class CcxtProvider:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
         sleep: Callable[[float], None] | None = None,
+        tick_size_precision_mode_provider: Callable[[], int] = client.tick_size_precision_mode,
     ) -> None:
         self._exchange_factory = exchange_factory
         self._version_provider = version_provider
@@ -60,6 +62,7 @@ class CcxtProvider:
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._sleep = time.sleep if sleep is None else sleep
+        self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._resolution_lock = threading.RLock()
         self._resolutions_by_request: dict[MarketIdentity, _Resolution] = {}
         self._resolutions_by_market: dict[
@@ -121,6 +124,32 @@ class CcxtProvider:
                 self._resolutions_by_market[key] = resolution
             self._resolutions_by_request[identity] = resolution
             return resolution.market
+
+    def fetch_markets(
+        self,
+        *,
+        exchange: str,
+        market: Market,
+    ) -> tuple[MarketDefinition, ...]:
+        native_client_id = markets.scoped_client_id(exchange, market)
+        try:
+            ccxt_exchange = self._exchange_factory(native_client_id)
+            native_markets = ccxt_exchange.load_markets()
+            if not isinstance(native_markets, dict):
+                raise ProviderError("CCXT load_markets() must return a dict")
+            return markets.market_definitions(
+                canonical_exchange=exchange,
+                market_family=market,
+                native_markets=native_markets,
+                exchange=ccxt_exchange,
+                tick_size_precision_mode=self._tick_size_precision_mode_provider(),
+            )
+        except (ProviderError, UnsupportedMarketError):
+            raise
+        except Exception as exc:
+            raise ProviderError(
+                f"CCXT failed to fetch market definitions for {exchange}/{market.value}: {exc}"
+            ) from exc
 
     def observe_bars(
         self,
