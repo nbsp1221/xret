@@ -21,6 +21,7 @@ from typing import cast
 from xret.data.config import MarketDataConfig, resolve_config
 from xret.data.dataset import BarDataset
 from xret.data.errors import CatalogError, UnsupportedMarketError
+from xret.data.live import LiveMarketData
 from xret.data.models import (
     CatalogRebuildResult,
     CatalogValidationResult,
@@ -147,6 +148,13 @@ class MarketData:
         return MarketDefinitionRuntime(provider).fetch_markets(
             exchange=canonical_exchange,
             market=canonical_market,
+        )
+
+    def live(self, *, exchange: str) -> LiveMarketData:
+        """Bind a one-shot live session for one canonical exchange. No I/O."""
+        return LiveMarketData(
+            provider=self._provider,
+            exchange=_validate_exchange(exchange),
         )
 
     def bars(

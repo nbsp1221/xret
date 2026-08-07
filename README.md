@@ -29,6 +29,7 @@ Xret is a quant research ecosystem for individuals who want to know if their edg
 
 > [!NOTE]
 > **Current status:** Xret is being built in stages. `xret-data` is available today. The end-to-end workflow described here is the direction of the ecosystem; `xret-backtest` and `xret-cli` are planned.
+> See the [roadmap](docs/roadmap.md) for the maintained direction and the boundary between market data, research, and eventual execution.
 
 ## Ecosystem
 
@@ -81,6 +82,7 @@ df = bars.scan("2024-01-01", "2024-06-01").collect()
 ## Documentation
 
 - [Getting started](docs/getting-started/index.md)
+- [Roadmap](docs/roadmap.md)
 - [Synchronization guide](docs/guides/synchronization.md)
 - [API reference](docs/reference/api.md)
 - [Data lifecycle](docs/explanation/data-lifecycle.md)

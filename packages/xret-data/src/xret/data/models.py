@@ -27,6 +27,7 @@ __all__ = [
     "QualitySeverity",
     "MarketIdentity",
     "BarRequest",
+    "BarUpdate",
     "DataWarning",
     "DatasetKey",
     "NONE_SETTLE_SENTINEL",
@@ -337,6 +338,52 @@ class BarRequest:
     def dataset_key(self) -> DatasetKey:
         """The `DatasetKey` this request addresses."""
         return DatasetKey.from_identity(self.identity, timeframe=self.timeframe)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BarUpdate:
+    """One validated in-progress time-bar update from a live session.
+
+    ``timestamp`` is the inclusive UTC start of the bar. Multiple updates for
+    the same timestamp are valid; the value is not a finality signal.
+    ``received_at`` records when Xret normalized the provider update.
+    """
+
+    identity: MarketIdentity
+    timeframe: str
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    received_at: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("bar update identity must be a MarketIdentity")
+        time_bar = TimeBar.parse(_ensure_path_safe(self.timeframe, field_name="timeframe"))
+        _ensure_utc_aware(self.timestamp, field_name="timestamp")
+        _ensure_utc_aware(self.received_at, field_name="received_at")
+        if time_bar.floor(self.timestamp) != self.timestamp:
+            raise InvalidRequestError(
+                f"timestamp must be aligned to {self.timeframe}: {self.timestamp!r}"
+            )
+
+        from xret.data.quality import _validate_scalar_ohlcv
+
+        values = _validate_scalar_ohlcv(
+            self.open,
+            self.high,
+            self.low,
+            self.close,
+            self.volume,
+            error_cls=InvalidRequestError,
+        )
+        for field_name, value in zip(
+            ("open", "high", "low", "close", "volume"), values, strict=True
+        ):
+            object.__setattr__(self, field_name, value)
 
 
 @dataclass(frozen=True, slots=True)

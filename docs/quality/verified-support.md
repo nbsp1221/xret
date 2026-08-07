@@ -78,6 +78,28 @@ OKX spot `1h` qualification covers complete four-year synchronization across mon
 
 A rebuild restores Parquet-provable datasets, files, and available coverage; it intentionally does not restore unavailable observations, ingestion runs, warnings, or quality events.
 
+## Currently verified live bars
+
+The live-bar matrix below was qualified on 2026-08-07 from a built wheel in a
+fresh external uv project with CCXT 4.5.71. Each combination opened through the
+public API, resolved and subscribed successfully, delivered a validated forming
+bar, and closed cleanly without creating canonical state or catalog paths.
+
+| Provider | Venue | Market family | Bar type | Timeframe | Representative symbol |
+|---|---|---|---|---|---|
+| CCXT Pro | Binance | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | Binance USD-M | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
+
+This is a connectivity, normalization, multiplexing, and lifecycle claim. A
+transient live update cannot prove uninterrupted continuity, exhaustive
+delivery, historical finality, reconnect behavior, or long-running stability.
+Xret exposes disconnects and overflow as terminal failures rather than extending
+this matrix into those claims.
+
 ## Re-verification
 
 Human-style re-verification is required when a change can materially alter real provider behavior, including:

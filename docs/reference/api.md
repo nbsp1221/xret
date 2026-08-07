@@ -7,6 +7,8 @@
 - `MarketData`
 - `MarketDataConfig`
 - `BarDataset`
+- `BarUpdate`
+- `LiveMarketData`
 - `SyncResult`
 - `PartialScanResult`
 
@@ -24,7 +26,7 @@ Construction resolves configuration but performs no provider or storage I/O. An
 explicit config bypasses configuration discovery. Omitting `provider` selects the
 built-in CCXT provider. A provider object uses direct dependency injection; a
 string selects an installed provider entry point. Both forms remain unresolved
-until `fetch_markets`, `fetch`, or `sync` needs the provider. See
+until `fetch_markets`, a live context, `fetch`, or `sync` needs the provider. See
 [Market-data providers](providers.md).
 
 ### `fetch_markets`
@@ -115,6 +117,35 @@ Binds one provider-independent dataset identity and performs no I/O.
 - `market` is `spot` or `perpetual`.
 - Spot omits `settle`. A resolved perpetual identity always has a nonempty `settle` component without `/`. For `fetch`/`sync`, an omitted perpetual `settle` is inferred only when provider metadata has exactly one nonempty settlement value and exactly one listed perpetual market matching the base/quote and that settlement. Local reads infer an omitted `settle` only from exactly one locally known dataset candidate.
 - `timeframe` is case-sensitive `<amount><unit>`. Units are `s`, `m`, `h`, `d`, `w`, and `M`; `w` and `M` require amount `1`.
+
+### `live`
+
+```python
+market_data.live(*, exchange: str) -> LiveMarketData
+```
+
+Binds a one-shot asynchronous live session for one canonical exchange and
+performs no I/O. Enter the returned context before subscribing:
+
+```python
+async with market_data.live(exchange="binance") as live:
+    await live.subscribe_bar_updates(bars)
+    async for update in live:
+        ...
+```
+
+`bars` must be a `BarDataset` created by the same `MarketData` instance and
+must use the session exchange. One session may merge several bar subscriptions
+into its single-consumer iterator. The only current event type is immutable
+`BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start
+timestamp, OHLCV floats, and Xret's UTC normalization receipt time.
+
+Same-timestamp updates are valid and do not signal finality. Backward timestamps,
+provider failures, malformed events, and bounded-queue overflow fail the whole
+session with `ProviderError`; Xret does not silently retry, reconnect, coalesce,
+or drop old events. Live delivery never reads or changes canonical storage.
+See [Consume live bar updates](../guides/live-bars.md) for lifecycle and
+continuity guidance.
 
 ## Time ranges
 

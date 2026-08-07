@@ -8,6 +8,7 @@ and warning policy; those remain part of ingestion evaluation. Warnings
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import polars as pl
@@ -28,6 +29,49 @@ __all__ = [
 
 #: Absolute fractional close-to-close move treated as a statistical outlier.
 DEFAULT_OUTLIER_RETURN_THRESHOLD: float = 0.25
+_MINIMUM_PRICE_EXCLUSIVE = 0.0
+_MINIMUM_VOLUME = 0.0
+
+
+def _validate_scalar_ohlcv(
+    open_: object,
+    high: object,
+    low: object,
+    close: object,
+    volume: object,
+    *,
+    error_cls: type[XretDataError],
+) -> tuple[float, float, float, float, float]:
+    """Apply canonical OHLCV value rules without constructing a DataFrame."""
+    values: dict[str, float] = {}
+    for field_name, value in (
+        ("open", open_),
+        ("high", high),
+        ("low", low),
+        ("close", close),
+        ("volume", volume),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise error_cls(f"{field_name} must be a real number: {value!r}")
+        normalized = float(value)
+        if not math.isfinite(normalized):
+            raise error_cls(f"{field_name} must be finite: {value!r}")
+        values[field_name] = normalized
+    if any(values[name] <= _MINIMUM_PRICE_EXCLUSIVE for name in ("open", "high", "low", "close")):
+        raise error_cls("bar update prices must be positive")
+    if values["volume"] < _MINIMUM_VOLUME:
+        raise error_cls("bar update volume must be nonnegative")
+    if values["high"] < max(values["open"], values["low"], values["close"]):
+        raise error_cls("bar update high violates OHLC invariants")
+    if values["low"] > min(values["open"], values["high"], values["close"]):
+        raise error_cls("bar update low violates OHLC invariants")
+    return (
+        values["open"],
+        values["high"],
+        values["low"],
+        values["close"],
+        values["volume"],
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +220,7 @@ def _check_finite_positive_prices(data: pl.DataFrame) -> list[QualityFinding]:
         expressions.extend(
             [
                 (~pl.col(column).is_finite()).sum().alias(non_finite_alias),
-                (pl.col(column) <= 0).sum().alias(non_positive_alias),
+                (pl.col(column) <= _MINIMUM_PRICE_EXCLUSIVE).sum().alias(non_positive_alias),
             ]
         )
         checks.extend(
@@ -216,7 +260,7 @@ def _check_volume_values(data: pl.DataFrame) -> list[QualityFinding]:
     """
     counts = data.select(
         (~pl.col("volume").is_finite()).sum().alias("non_finite"),
-        (pl.col("volume") < 0).sum().alias("negative"),
+        (pl.col("volume") < _MINIMUM_VOLUME).sum().alias("negative"),
     ).row(0, named=True)
 
     findings: list[QualityFinding] = []

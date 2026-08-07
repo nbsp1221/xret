@@ -12,6 +12,11 @@ import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import BarRequest, Market, MarketIdentity
 from xret.data.providers.ccxt import client, markets, pagination
+from xret.data.providers.ccxt.live import (
+    CcxtLiveBarSession,
+    LiveExchangeFactory,
+    create_live_exchange,
+)
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -55,6 +60,7 @@ class CcxtProvider:
         retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
         sleep: Callable[[float], None] | None = None,
         tick_size_precision_mode_provider: Callable[[], int] = client.tick_size_precision_mode,
+        live_exchange_factory: LiveExchangeFactory = create_live_exchange,
     ) -> None:
         self._exchange_factory = exchange_factory
         self._version_provider = version_provider
@@ -63,6 +69,7 @@ class CcxtProvider:
         self._retry_backoff_base = retry_backoff_base
         self._sleep = time.sleep if sleep is None else sleep
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
+        self._live_exchange_factory = live_exchange_factory
         self._resolution_lock = threading.RLock()
         self._resolutions_by_request: dict[MarketIdentity, _Resolution] = {}
         self._resolutions_by_market: dict[
@@ -150,6 +157,13 @@ class CcxtProvider:
             raise ProviderError(
                 f"CCXT failed to fetch market definitions for {exchange}/{market.value}: {exc}"
             ) from exc
+
+    def open_live_bars(self, *, exchange: str) -> CcxtLiveBarSession:
+        """Open one lazy CCXT Pro live-bar connection scope."""
+        return CcxtLiveBarSession(
+            exchange=exchange,
+            exchange_factory=self._live_exchange_factory,
+        )
 
     def observe_bars(
         self,

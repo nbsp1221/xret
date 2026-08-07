@@ -1,7 +1,7 @@
 """Public import-surface tests for `xret.data` (S5).
 
-`xret.data` exports exactly five public names: the `MarketData` facade,
-its `MarketDataConfig`, `BarDataset`, and the two result types
+`xret.data` exports exactly seven public names: the `MarketData` facade,
+its `MarketDataConfig`, `BarDataset`, `LiveMarketData`, live `BarUpdate`, and the two result types
 (`SyncResult`, `PartialScanResult`). Every exception lives in
 `xret.data.errors` only -- never re-exported at the package top level.
 """
@@ -19,13 +19,15 @@ def test_package_is_importable() -> None:
     assert xret.data.__doc__ == "Trusted market data infrastructure for Xret."
 
 
-def test_public_surface_is_exactly_five_names() -> None:
+def test_public_surface_is_exactly_seven_names() -> None:
     import xret.data
 
     assert set(xret.data.__all__) == {
         "MarketData",
         "MarketDataConfig",
         "BarDataset",
+        "BarUpdate",
+        "LiveMarketData",
         "SyncResult",
         "PartialScanResult",
     }
@@ -33,7 +35,15 @@ def test_public_surface_is_exactly_five_names() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["MarketData", "MarketDataConfig", "BarDataset", "SyncResult", "PartialScanResult"],
+    [
+        "MarketData",
+        "MarketDataConfig",
+        "BarDataset",
+        "BarUpdate",
+        "LiveMarketData",
+        "SyncResult",
+        "PartialScanResult",
+    ],
 )
 def test_every_declared_public_name_is_importable(name: str) -> None:
     import xret.data
@@ -114,12 +124,15 @@ def test_provider_author_surface_is_explicit_and_importable() -> None:
         "BarRequest",
         "DerivativeInterpretation",
         "HistoricalBarProvider",
+        "LiveBarProvider",
+        "LiveBarSession",
         "Market",
         "MarketDefinition",
         "MarketDefinitionProvider",
         "MarketIdentity",
         "ObservedWindow",
         "ProviderDescriptor",
+        "ProviderBarUpdate",
         "ResolvedBarMarket",
     }
     for name in xret.data.providers.__all__:

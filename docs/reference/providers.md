@@ -6,7 +6,8 @@ CCXT is the built-in implementation, not part of the provider contract.
 
 Xret owns canonical identity, finality, schema validation, coverage, storage,
 locking, and recovery. A provider owns native market resolution, optional
-market-definition snapshots, and network observation. Providers never write
+market-definition snapshots, historical network observation, and optional live
+bar delivery. Providers never write
 Xret's Parquet files or SQLite catalog.
 
 ## Architecture
@@ -18,11 +19,13 @@ one directory per implementation:
 xret/data/providers/
 ├── __init__.py          # provider-author public exports
 ├── contracts.py         # immutable SPI values and protocol
-├── runtime.py           # validation and canonical normalization
+├── runtime.py           # historical validation and canonical normalization
+├── live_runtime.py      # live capability validation and normalization
 ├── discovery.py         # lazy direct/installed provider binding
 └── ccxt/                # built-in crypto implementation
     ├── __init__.py      # CcxtProvider export
     ├── provider.py      # implementation orchestration
+    ├── live.py          # CCXT Pro live-bar session
     ├── client.py        # CCXT construction, retry, and transport
     ├── markets.py       # crypto market resolution and definition translation
     └── pagination.py    # qualified exhaustive observation windows
@@ -47,12 +50,15 @@ from xret.data.providers import (
     BarRequest,
     DerivativeInterpretation,
     HistoricalBarProvider,
+    LiveBarProvider,
+    LiveBarSession,
     Market,
     MarketDefinition,
     MarketDefinitionProvider,
     MarketIdentity,
     ObservedWindow,
     ProviderDescriptor,
+    ProviderBarUpdate,
     ResolvedBarMarket,
 )
 ```
@@ -61,8 +67,9 @@ This namespace is self-contained for provider authoring; provider packages do
 not import domain values from implementation modules such as
 `xret.data.models`.
 
-The initial protocol covers synchronous historical OHLCV time bars for spot and
-perpetual markets. It does not define streaming, trades, quotes, fundamentals,
+The mandatory protocol covers synchronous historical OHLCV time bars for spot
+and perpetual markets. Live bars and market definitions are optional
+capabilities. The SPI does not define trades, quotes, order books, fundamentals,
 provider-specific columns, fallback, or synthetic timeframes.
 
 `HistoricalBarProvider` is a structural protocol. Inheritance is optional; an
@@ -123,6 +130,35 @@ not reject the venue. Canonical identity collisions are excluded rather than
 resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT
 precision values become increments only in `TICK_SIZE` mode; limits and other
 precision modes are not guessed into fixed increments.
+
+## Optional live-bar capability
+
+Adding live bars does not change `HistoricalBarProvider` SPI version 1 or force
+existing providers to implement streaming. A provider may additionally expose:
+
+```python
+class LiveBarProvider(Protocol):
+    def open_live_bars(self, *, exchange: str) -> LiveBarSession: ...
+```
+
+`LiveBarSession` is an async context manager and async iterator. Its
+`subscribe_bar_updates(resolved_market, timeframe)` method starts one stream;
+its iterator merges `ProviderBarUpdate` values from every subscription. The
+provider update carries canonical identity, timeframe, inclusive UTC bar-start,
+and OHLCV values. Xret validates it, enforces per-dataset nondecreasing
+timestamps, and adds `received_at` before exposing `BarUpdate`.
+
+The built-in provider implements this capability through CCXT Pro with
+`newUpdates=True` and rate limiting enabled. Async clients are distinct from
+historical sync clients and are reused by native CCXT client ID within one
+session. A canonical Binance session may therefore own separate `binance` and
+`binanceusdm` clients for spot and USD-M perpetual subscriptions.
+
+Live capability absence raises `UnsupportedMarketError`. Once open, a provider
+transport failure, malformed update, reader failure, or queue overflow raises a
+terminal `ProviderError` for the session. Providers and Xret do not silently
+retry, reconnect, coalesce, or claim continuity. Closing the context closes the
+provider's whole session; the initial contract has no unsubscribe operation.
 
 ## Descriptor and market resolution
 

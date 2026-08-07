@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Final, Protocol
+from typing import Final, Protocol, Self
 
 import polars as pl
 from xret.data.errors import InvalidRequestError, ProviderError
@@ -23,9 +24,12 @@ __all__ = [
     "Market",
     "MarketDefinition",
     "MarketDefinitionProvider",
+    "LiveBarProvider",
+    "LiveBarSession",
     "MarketIdentity",
     "ObservedWindow",
     "ProviderDescriptor",
+    "ProviderBarUpdate",
     "ResolvedBarMarket",
 ]
 
@@ -208,6 +212,47 @@ class HistoricalBarProvider(Protocol):
         request: BarRequest,
         market: ResolvedBarMarket,
     ) -> BarObservation: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ProviderBarUpdate:
+    """One provider-originated bar update before Xret receipt normalization."""
+
+    identity: MarketIdentity
+    timeframe: str
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+class LiveBarSession(Protocol):
+    """One provider-owned live-bar connection scope."""
+
+    async def __aenter__(self) -> Self: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> bool | None: ...
+
+    async def subscribe_bar_updates(
+        self,
+        market: ResolvedBarMarket,
+        timeframe: str,
+    ) -> None: ...
+
+    def __aiter__(self) -> AsyncIterator[ProviderBarUpdate]: ...
+
+
+class LiveBarProvider(Protocol):
+    """Optional provider capability for live time-bar updates."""
+
+    def open_live_bars(self, *, exchange: str) -> LiveBarSession: ...
 
 
 class MarketDefinitionProvider(Protocol):
