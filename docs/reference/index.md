@@ -9,10 +9,6 @@ This section defines the exact public contracts of the `xret-data` distribution,
 
 ## Public API policy
 
-The stable top-level import surface is the `xret.data.__all__` list documented here.
-Exception classes are public from `xret.data.errors`. The experimental,
-versioned provider-author surface is public from `xret.data.providers`. Other
-modules and objects are implementation details unless this reference explicitly
-states otherwise.
+The stable top-level import surface is the `xret.data.__all__` list documented here. Exception classes are public from `xret.data.errors`. The experimental, versioned provider-author surface is public from `xret.data.providers`. Other modules and objects are implementation details unless this reference explicitly states otherwise.
 
 Reference pages describe behavior precisely. Task-oriented examples belong in [guides](../guides/synchronization.md), while design and lifecycle concepts belong in [explanation](../explanation/data-lifecycle.md).

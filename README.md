@@ -28,8 +28,7 @@ Most backtest results are noise. Parameter sweeps, in-sample fitting, and surviv
 Xret is a quant research ecosystem for individuals who want to know if their edge is real. One pipeline from market data to live execution, where every experiment is tracked, every backtest must survive out-of-sample scrutiny, and overfitting is structurally harder than honesty.
 
 > [!NOTE]
-> **Current status:** Xret is being built in stages. `xret-data` is available today. The end-to-end workflow described here is the direction of the ecosystem; `xret-backtest` and `xret-cli` are planned.
-> See the [roadmap](docs/roadmap.md) for the maintained direction and the boundary between market data, research, and eventual execution.
+> **Current status:** Xret is being built in stages. `xret-data` is available today. The end-to-end workflow described here is the direction of the ecosystem; `xret-backtest` and `xret-cli` are planned. See the [roadmap](docs/roadmap.md) for the maintained direction and the boundary between market data, research, and eventual execution.
 
 ## Ecosystem
 

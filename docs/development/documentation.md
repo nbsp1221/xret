@@ -32,6 +32,7 @@ A behavior change is incomplete until its affected reference, guide, examples, a
 - Write Markdown under `docs/` and link with repository-relative paths.
 - Use stable terminology from the public API.
 - Keep examples copyable, minimal, and consistent with tested behavior.
+- Keep each prose paragraph on one physical line instead of hard-wrapping it to a fixed column; preserve line breaks required by Markdown structure.
 - State side effects, network access, mutation, strictness, and raised errors explicitly.
 - Add a page only when maintained content exists.
 - Check repository-relative links and examples affected by a documentation change.

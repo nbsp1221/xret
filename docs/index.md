@@ -23,9 +23,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - **Quality** records durable public trust criteria and verified combinations.
 - **Development** documents current contributor, documentation, and [release](development/releasing.md) policy.
 
-The [roadmap](roadmap.md) is directional. It does not define current behavior or
-promise release dates; released source, tests, and reference documentation remain
-the contract.
+The [roadmap](roadmap.md) is directional. It does not define current behavior or promise release dates; released source, tests, and reference documentation remain the contract.
 
 Directories are added only when they contain maintained content; Xret does not track empty documentation placeholders.
 

@@ -1,19 +1,12 @@
 # Market-data providers
 
-The experimental provider-author API lets an application or separately installed
-package acquire historical time bars through Xret without changing Xret itself.
-CCXT is the built-in implementation, not part of the provider contract.
+The experimental provider-author API lets an application or separately installed package acquire historical time bars through Xret without changing Xret itself. CCXT is the built-in implementation, not part of the provider contract.
 
-Xret owns canonical identity, finality, schema validation, coverage, storage,
-locking, and recovery. A provider owns native market resolution, optional
-market-definition snapshots, historical network observation, and optional live
-bar delivery. Providers never write
-Xret's Parquet files or SQLite catalog.
+Xret owns canonical identity, finality, schema validation, coverage, storage, locking, and recovery. A provider owns native market resolution, optional market-definition snapshots, historical network observation, and optional live bar delivery. Providers never write Xret's Parquet files or SQLite catalog.
 
 ## Architecture
 
-The provider package is organized around a stable provider-independent core and
-one directory per implementation:
+The provider package is organized around a stable provider-independent core and one directory per implementation:
 
 ```text
 xret/data/providers/
@@ -31,12 +24,7 @@ xret/data/providers/
     └── pagination.py    # qualified exhaustive observation windows
 ```
 
-An additional built-in provider would be a sibling implementation package, not
-another branch inside `runtime.py` or the CCXT package. Separately distributed
-providers implement the public contract in their own package and use direct
-injection or the installed-provider entry point. The current contract is
-deliberately limited to crypto spot and perpetual historical bars; it does not
-claim that non-crypto asset identity or session semantics have been designed.
+An additional built-in provider would be a sibling implementation package, not another branch inside `runtime.py` or the CCXT package. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. The current contract is deliberately limited to crypto spot and perpetual historical bars; it does not claim that non-crypto asset identity or session semantics have been designed.
 
 ## Public provider API
 
@@ -63,17 +51,11 @@ from xret.data.providers import (
 )
 ```
 
-This namespace is self-contained for provider authoring; provider packages do
-not import domain values from implementation modules such as
-`xret.data.models`.
+This namespace is self-contained for provider authoring; provider packages do not import domain values from implementation modules such as `xret.data.models`.
 
-The mandatory protocol covers synchronous historical OHLCV time bars for spot
-and perpetual markets. Live bars and market definitions are optional
-capabilities. The SPI does not define trades, quotes, order books, fundamentals,
-provider-specific columns, fallback, or synthetic timeframes.
+The mandatory protocol covers synchronous historical OHLCV time bars for spot and perpetual markets. Live bars and market definitions are optional capabilities. The SPI does not define trades, quotes, order books, fundamentals, provider-specific columns, fallback, or synthetic timeframes.
 
-`HistoricalBarProvider` is a structural protocol. Inheritance is optional; an
-implementation supplies:
+`HistoricalBarProvider` is a structural protocol. Inheritance is optional; an implementation supplies:
 
 ```python
 class HistoricalBarProvider(Protocol):
@@ -91,9 +73,7 @@ class HistoricalBarProvider(Protocol):
 
 ## Optional market-definition capability
 
-Market-definition discovery is a separate structural protocol; adding it does
-not change `HistoricalBarProvider` SPI v1 or require existing providers to
-implement it.
+Market-definition discovery is a separate structural protocol; adding it does not change `HistoricalBarProvider` SPI v1 or require existing providers to implement it.
 
 ```python
 class MarketDefinitionProvider(Protocol):
@@ -105,69 +85,30 @@ class MarketDefinitionProvider(Protocol):
     ) -> tuple[MarketDefinition, ...]: ...
 ```
 
-A provider used through `MarketData` still implements `HistoricalBarProvider`.
-It may additionally implement `MarketDefinitionProvider`. Calling
-`MarketData.fetch_markets(...)` against a provider without this optional
-capability raises `UnsupportedMarketError`; Xret never falls back to CCXT after
-an explicitly selected provider lacks or fails the operation.
+A provider used through `MarketData` still implements `HistoricalBarProvider`. It may additionally implement `MarketDefinitionProvider`. Calling `MarketData.fetch_markets(...)` against a provider without this optional capability raises `UnsupportedMarketError`; Xret never falls back to CCXT after an explicitly selected provider lacks or fails the operation.
 
-Every returned definition must belong to the requested canonical exchange and
-market family, and canonical identities must be unique. Xret rejects mutable
-collections, wrong value types, out-of-scope definitions, and duplicate
-identities as provider contract failures.
+Every returned definition must belong to the requested canonical exchange and market family, and canonical identities must be unique. Xret rejects mutable collections, wrong value types, out-of-scope definitions, and duplicate identities as provider contract failures.
 
-`MarketDefinition` is immutable and contains canonical identity, nullable
-provider-advertised active status, canonical provider-advertised timeframes,
-optional exact `tick_size` and `size_increment`, and optional derivative
-interpretation. Its timeframes do not assert exhaustive historical pagination
-or Xret verification. Search, filtering, ordering, and result caching remain
-application responsibilities.
+`MarketDefinition` is immutable and contains canonical identity, nullable provider-advertised active status, canonical provider-advertised timeframes, optional exact `tick_size` and `size_increment`, and optional derivative interpretation. Its timeframes do not assert exhaustive historical pagination or Xret verification. Search, filtering, ordering, and result caching remain application responsibilities.
 
-The built-in CCXT adapter translates only entries safely expressible with the
-requested spot or perpetual identity. Unrelated native instrument families,
-unknown optional fields, and native timeframe names outside Xret's grammar do
-not reject the venue. Canonical identity collisions are excluded rather than
-resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT
-precision values become increments only in `TICK_SIZE` mode; limits and other
-precision modes are not guessed into fixed increments.
+The built-in CCXT adapter translates only entries safely expressible with the requested spot or perpetual identity. Unrelated native instrument families, unknown optional fields, and native timeframe names outside Xret's grammar do not reject the venue. Canonical identity collisions are excluded rather than resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT precision values become increments only in `TICK_SIZE` mode; limits and other precision modes are not guessed into fixed increments.
 
 ## Optional live-bar capability
 
-Adding live bars does not change `HistoricalBarProvider` SPI version 1 or force
-existing providers to implement streaming. A provider may additionally expose:
+Adding live bars does not change `HistoricalBarProvider` SPI version 1 or force existing providers to implement streaming. A provider may additionally expose:
 
 ```python
 class LiveBarProvider(Protocol):
     def open_live_bars(self, *, exchange: str) -> LiveBarSession: ...
 ```
 
-`LiveBarSession` is an async context manager and async iterator. Its
-`subscribe_bar_updates(resolved_market, timeframe)` method starts one stream;
-its iterator merges `ProviderBarUpdate` values from every subscription. The
-provider update carries canonical identity, timeframe, inclusive UTC bar-start,
-and OHLCV values. Xret validates it, enforces per-dataset nondecreasing
-timestamps, and adds `received_at` before exposing `BarUpdate`.
-Xret also derives provider-neutral `BarFinality` from the bar interval, receipt
-time, and Xret's finality grace; providers do not add native closed/confirm
-flags to the SPI.
+`LiveBarSession` is an async context manager and async iterator. Its `subscribe_bar_updates(resolved_market, timeframe)` method starts one stream; its iterator merges `ProviderBarUpdate` values from every subscription. The provider update carries canonical identity, timeframe, inclusive UTC bar-start, and OHLCV values. Xret validates it, enforces per-dataset nondecreasing timestamps, and adds `received_at` before exposing `BarUpdate`. Xret also derives provider-neutral `BarFinality` from the bar interval, receipt time, and Xret's finality grace; providers do not add native closed/confirm flags to the SPI.
 
-The built-in provider implements this capability through CCXT Pro with
-`newUpdates=True` and rate limiting enabled. Async clients are distinct from
-historical sync clients and are reused by native CCXT client ID within one
-session. A canonical Binance session may therefore own separate `binance` and
-`binanceusdm` clients for spot and USD-M perpetual subscriptions.
+The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions.
 
-Live capability absence raises `UnsupportedMarketError`. Once open, a provider
-transport failure, malformed update, reader failure, or queue overflow raises a
-terminal `ProviderError` for the session. Providers and Xret do not silently
-retry, reconnect, coalesce, or claim continuity. Closing the context closes the
-provider's whole session; the initial contract has no unsubscribe operation.
+Live capability absence raises `UnsupportedMarketError`. Once open, a provider transport failure, malformed update, reader failure, or queue overflow raises a terminal `ProviderError` for the session. Providers and Xret do not silently retry, reconnect, coalesce, or claim continuity. Closing the context closes the provider's whole session; the initial contract has no unsubscribe operation.
 
-The optional public bootstrap reuses the mandatory historical `observe_bars`
-operation only for a bounded range of already closed intervals. Xret validates
-that recent observation without applying canonical-storage finality, merges it
-in memory with buffered live updates, and never writes provider observations to
-storage. Provider authors do not implement a second snapshot SPI.
+The optional public bootstrap reuses the mandatory historical `observe_bars` operation only for a bounded range of already closed intervals. Xret validates that recent observation without applying canonical-storage finality, merges it in memory with buffered live updates, and never writes provider observations to storage. Provider authors do not implement a second snapshot SPI.
 
 ## Descriptor and market resolution
 
@@ -177,25 +118,13 @@ storage. Provider authors do not implement a second snapshot SPI.
 - `version`: nonempty audit string, not required to follow PEP 440;
 - `api_version`: exact provider SPI major implemented by the provider.
 
-The provider name identifies the implementation lineage, not the exchange. For
-example, a Coinbase-native implementation might be named `coinbase-advanced`
-while resolving the canonical venue `coinbase`.
+The provider name identifies the implementation lineage, not the exchange. For example, a Coinbase-native implementation might be named `coinbase-advanced` while resolving the canonical venue `coinbase`.
 
-`resolve_market` receives Xret's provider-independent `MarketIdentity`. It returns
-the same canonical identity, provider-native IDs used for provenance, and the
-timeframes supported for that resolved market. A provider may resolve an omitted
-perpetual settlement only when it can do so unambiguously. It must not relabel the
-canonical venue, symbol, or market family.
+`resolve_market` receives Xret's provider-independent `MarketIdentity`. It returns the same canonical identity, provider-native IDs used for provenance, and the timeframes supported for that resolved market. A provider may resolve an omitted perpetual settlement only when it can do so unambiguously. It must not relabel the canonical venue, symbol, or market family.
 
-`timeframes` declares what Xret may request from that market, so every entry must
-be a canonical Xret timeframe. A venue legitimately offers bar types outside that
-vocabulary; exclude them instead of passing them through. A venue must not become
-unresolvable because it offers a bar type Xret cannot express.
+`timeframes` declares what Xret may request from that market, so every entry must be a canonical Xret timeframe. A venue legitimately offers bar types outside that vocabulary; exclude them instead of passing them through. A venue must not become unresolvable because it offers a bar type Xret cannot express.
 
-Excluding an entry is not a silent fallback. Requesting a non-canonical timeframe
-raises `InvalidRequestError` before any provider call, because the timeframe
-grammar rejects it. Requesting a canonical timeframe this venue does not offer
-raises `UnsupportedMarketError`. Neither case substitutes another bar type.
+Excluding an entry is not a silent fallback. Requesting a non-canonical timeframe raises `InvalidRequestError` before any provider call, because the timeframe grammar rejects it. Requesting a canonical timeframe this venue does not offer raises `UnsupportedMarketError`. Neither case substitutes another bar type.
 
 ## Observation contract
 
@@ -210,22 +139,11 @@ The provider frame contains only:
 timestamp, open, high, low, close, volume
 ```
 
-Identity columns are deliberately absent. Xret adds canonical identity after
-validating the returned value frame. An empty frame is valid when the provider
-exhaustively observed the requested window.
+Identity columns are deliberately absent. Xret adds canonical identity after validating the returned value frame. An empty frame is valid when the provider exhaustively observed the requested window.
 
-Observation evidence is stronger than returned rows. In the current SPI major,
-ordered windows must align to the requested timeframe and contiguously cover the
-entire request. A provider that cannot prove exhaustive coverage must raise an
-error; it must not return a partial observation as success. Immediately before
-calling the provider, Xret records a conservative evidence time and records
-completion separately after the call returns. The completed-bar gate and negative
-coverage use only the pre-call evidence time, so a bar becoming final during a
-slow request remains `missing` for the next sync. Xret also rejects rows outside
-the request or evidence and enforces canonical OHLCV invariants.
+Observation evidence is stronger than returned rows. In the current SPI major, ordered windows must align to the requested timeframe and contiguously cover the entire request. A provider that cannot prove exhaustive coverage must raise an error; it must not return a partial observation as success. Immediately before calling the provider, Xret records a conservative evidence time and records completion separately after the call returns. The completed-bar gate and negative coverage use only the pre-call evidence time, so a bar becoming final during a slow request remains `missing` for the next sync. Xret also rejects rows outside the request or evidence and enforces canonical OHLCV invariants.
 
-This distinction prevents a temporary empty native page from turning an unqueried
-tail into false `unavailable` coverage:
+This distinction prevents a temporary empty native page from turning an unqueried tail into false `unavailable` coverage:
 
 ```text
 no returned row != proof that the entire remaining range was observed empty
@@ -233,8 +151,7 @@ no returned row != proof that the entire remaining range was observed empty
 
 ## Direct injection
 
-Direct injection is the primary integration path. It supports application-owned
-credentials, sessions, clients, and lifecycle without a global registry:
+Direct injection is the primary integration path. It supports application-owned credentials, sessions, clients, and lifecycle without a global registry:
 
 ```python
 from xret.data import MarketData
@@ -243,14 +160,11 @@ provider = MyHistoricalBarProvider(...)
 market_data = MarketData(provider=provider)
 ```
 
-Construction and `bars(...)` do not inspect the provider. `scan`,
-`scan_partial`, `maintenance.validate`, and `maintenance.rebuild_catalog` remain
-local-only and never resolve it.
+Construction and `bars(...)` do not inspect the provider. `scan`, `scan_partial`, `maintenance.validate`, and `maintenance.rebuild_catalog` remain local-only and never resolve it.
 
 ## Installed provider packages
 
-A distribution may expose a zero-argument factory through the
-`xret.data.providers` entry-point group:
+A distribution may expose a zero-argument factory through the `xret.data.providers` entry-point group:
 
 ```toml
 [project.entry-points."xret.data.providers"]
@@ -268,51 +182,20 @@ Consumers select that exact name:
 market_data = MarketData(provider="acme")
 ```
 
-Discovery, import, and factory execution are lazy and cached per `MarketData`
-instance. Unknown or duplicate names, import or factory failures, descriptor-name
-mismatch, incompatible API versions, and missing protocol methods raise
-`ProviderError`. Xret never falls back to CCXT after an explicitly selected
-provider fails.
+Discovery, import, and factory execution are lazy and cached per `MarketData` instance. Unknown or duplicate names, import or factory failures, descriptor-name mismatch, incompatible API versions, and missing protocol methods raise `ProviderError`. Xret never falls back to CCXT after an explicitly selected provider fails.
 
-A zero-argument factory is suitable for providers configured from their own
-environment or configuration files. Providers needing application-owned runtime
-objects should use direct injection.
+A zero-argument factory is suitable for providers configured from their own environment or configuration files. Providers needing application-owned runtime objects should use direct injection.
 
 ## Source lineage and recovery
 
-The first `sync` that commits provider-derived canonical facts binds a canonical
-dataset to `ProviderDescriptor.name`. Those facts may be available rows published
-to Parquet or unavailable coverage for a finalized range. A successful remote
-observation that produces neither does not bind lineage. A newer implementation
-version with the same name may continue the history. A different name cannot
-silently append or rewrite it.
+The first `sync` that commits provider-derived canonical facts binds a canonical dataset to `ProviderDescriptor.name`. Those facts may be available rows published to Parquet or unavailable coverage for a finalized range. A successful remote observation that produces neither does not bind lineage. A newer implementation version with the same name may continue the history. A different name cannot silently append or rewrite it.
 
-This is a lineage constraint, not part of canonical market identity: `exchange`,
-`symbol`, `market`, `settle`, and `timeframe` still identify the dataset.
-Provider name, version, API version, native market ID, and native symbol are
-operational provenance stored in canonical Parquet metadata and ingestion state.
-Parquet metadata describes the provider snapshot that most recently published the
-current physical monthly file; it is not row-level acquisition history for every
-bar merged into that file. While the catalog exists, ingestion runs retain the
-provider snapshot for each remote operation. Rebuild can recover only the latest
-file snapshot and the stable provider-name lineage from canonical Parquet.
-Provider version and native IDs are audit facts, not lineage equality fields;
-changes under the same provider name update the latest publication snapshot and
-remain visible in ingestion runs while the catalog exists.
+This is a lineage constraint, not part of canonical market identity: `exchange`, `symbol`, `market`, `settle`, and `timeframe` still identify the dataset. Provider name, version, API version, native market ID, and native symbol are operational provenance stored in canonical Parquet metadata and ingestion state. Parquet metadata describes the provider snapshot that most recently published the current physical monthly file; it is not row-level acquisition history for every bar merged into that file. While the catalog exists, ingestion runs retain the provider snapshot for each remote operation. Rebuild can recover only the latest file snapshot and the stable provider-name lineage from canonical Parquet. Provider version and native IDs are audit facts, not lineage equality fields; changes under the same provider name update the latest publication snapshot and remain visible in ingestion runs while the catalog exists.
 
-Available lineage can be rebuilt from canonical Parquet. An exhaustive empty
-observation can create unavailable coverage and lineage without producing a
-Parquet file. Those catalog-only facts are intentionally non-rebuildable: after
-catalog loss, rebuild returns them to `missing` with no source binding.
+Available lineage can be rebuilt from canonical Parquet. An exhaustive empty observation can create unavailable coverage and lineage without producing a Parquet file. Those catalog-only facts are intentionally non-rebuildable: after catalog loss, rebuild returns them to `missing` with no source binding.
 
 ## Errors and qualification
 
-Provider-native exceptions should be allowed to propagate from provider methods;
-Xret wraps unknown failures in `ProviderError` and chains the original cause.
-Providers should use `UnsupportedMarketError` when a requested market or timeframe
-cannot be operated safely.
+Provider-native exceptions should be allowed to propagate from provider methods; Xret wraps unknown failures in `ProviderError` and chains the original cause. Providers should use `UnsupportedMarketError` when a requested market or timeframe cannot be operated safely.
 
-Conformance to these protocols means Xret can validate and orchestrate the implementation.
-It does not make a third-party provider an Xret-verified source. Verified claims
-require the separate live-provider qualification policy in
-[Verified support](../quality/verified-support.md).
+Conformance to these protocols means Xret can validate and orchestrate the implementation. It does not make a third-party provider an Xret-verified source. Verified claims require the separate live-provider qualification policy in [Verified support](../quality/verified-support.md).

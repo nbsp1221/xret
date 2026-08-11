@@ -35,21 +35,10 @@ provider adapter
 
 Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
-This matrix is a public trust statement, not a runtime allowlist. Provider
-adapters do not reject an otherwise valid venue merely because it is absent
-here. Conversely, successfully fetching a provider's market definitions, an
-`active=True` value, or an advertised timeframe does not prove that Xret can
-exhaustively acquire historical bars for that combination. Market-definition
-availability, historical-bar operability, and verified support remain separate
-facts.
+This matrix is a public trust statement, not a runtime allowlist. Provider adapters do not reject an otherwise valid venue merely because it is absent here. Conversely, successfully fetching a provider's market definitions, an `active=True` value, or an advertised timeframe does not prove that Xret can exhaustively acquire historical bars for that combination. Market-definition availability, historical-bar operability, and verified support remain separate facts.
 
 ## Currently verified
-The currently listed matrix was requalified on 2026-08-01 using the built
-`xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt`
-4.5.70 and `polars` 1.43.1 resolved by that environment, after the canonical
-volume-finiteness change. Each qualification records the provider dependency
-version it exercised, because a provider release can change endpoint behavior
-without any Xret change.
+The currently listed matrix was requalified on 2026-08-01 using the built `xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt` 4.5.70 and `polars` 1.43.1 resolved by that environment, after the canonical volume-finiteness change. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
 
 ### Binance
 
@@ -80,12 +69,7 @@ A rebuild restores Parquet-provable datasets, files, and available coverage; it 
 
 ## Currently verified live bars
 
-The live-bar matrix below was requalified on 2026-08-11 from the built
-`xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each
-combination opened through the public API, completed an initial bootstrap with
-two recent closed bars followed by the current forming bar in ascending,
-duplicate-free timestamp order, and closed cleanly without creating canonical
-state or catalog paths.
+The live-bar matrix below was requalified on 2026-08-11 from the built `xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each combination opened through the public API, completed an initial bootstrap with two recent closed bars followed by the current forming bar in ascending, duplicate-free timestamp order, and closed cleanly without creating canonical state or catalog paths.
 
 | Provider | Venue | Market family | Bar type | Timeframe | Representative symbol |
 |---|---|---|---|---|---|
@@ -96,16 +80,9 @@ state or catalog paths.
 | CCXT Pro | OKX | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
 | CCXT Pro | OKX | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
 
-The Binance USD-M qualification additionally exercised the handoff immediately
-after a one-minute boundary, while the just-closed bar remained provisional
-under the finality grace period. It produced consecutive `FINAL`,
-`PROVISIONAL`, and `FORMING` observations without touching canonical storage.
+The Binance USD-M qualification additionally exercised the handoff immediately after a one-minute boundary, while the just-closed bar remained provisional under the finality grace period. It produced consecutive `FINAL`, `PROVISIONAL`, and `FORMING` observations without touching canonical storage.
 
-This is a connectivity, normalization, initial-handoff, multiplexing, and
-lifecycle claim. It does not prove uninterrupted continuity, exhaustive
-delivery, canonical persistence of live observations, reconnect behavior, or
-long-running stability. Xret exposes disconnects and overflow as terminal
-failures rather than extending this matrix into those claims.
+This is a connectivity, normalization, initial-handoff, multiplexing, and lifecycle claim. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
 
 ## Re-verification
 

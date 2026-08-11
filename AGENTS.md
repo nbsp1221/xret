@@ -66,18 +66,12 @@ Do not turn Lane 3 into another committed harness. Ad hoc scripts, temporary sto
 
 ## Documentation
 
-Follow [`docs/index.md`](docs/index.md) and the
-[documentation policy](docs/development/documentation.md). Git tracks durable
-user, contributor, API, architecture, release, and verified-support
-documentation. Put research, design drafts, audits, detailed QA reports, and
-session-specific evidence under `.internal/`, `.gjc/`, or `/tmp` according to
-purpose.
+Follow [`docs/index.md`](docs/index.md) and the [documentation policy](docs/development/documentation.md). Git tracks durable user, contributor, API, architecture, release, and verified-support documentation. Put research, design drafts, audits, detailed QA reports, and session-specific evidence under `.internal/`, `.gjc/`, or `/tmp` according to purpose.
 
-Keep `README.md` concise and user-facing. Do not place transient reports at the
-repository root, create empty documentation placeholders, or retain migration
-history and old API examples without a real public compatibility obligation.
+Keep `README.md` concise and user-facing. Do not place transient reports at the repository root, create empty documentation placeholders, or retain migration history and old API examples without a real public compatibility obligation.
 
-For GitHub PR, issue, and release descriptions, keep each prose paragraph on one physical line; the 72-character limit applies only to Git commit messages.
+Do not hard-wrap Markdown prose to a fixed column. Keep each prose paragraph on one physical line, including GitHub PR, issue, and release descriptions; preserve line breaks required by code blocks, tables, lists, blockquotes, and other Markdown structure. The 72-character limit applies only to Git commit messages.
+
 PR titles must follow the repository's commit convention because squash merges use them as commit subjects.
 
 ## Artifact promotion gate

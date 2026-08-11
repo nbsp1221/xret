@@ -20,16 +20,9 @@ Coverage records facts: persisted `available` intervals have canonical bars. An 
 
 ## Transient live observation
 
-A live `BarUpdate` is an in-memory observation and carries explicit time-based
-finality. `FORMING` is still inside its interval, `PROVISIONAL` is time-closed
-but inside Xret's finality grace, and `FINAL` has passed that grace at Xret's
-receipt time. None of these states means the value is canonical or persisted.
+A live `BarUpdate` is an in-memory observation and carries explicit time-based finality. `FORMING` is still inside its interval, `PROVISIONAL` is time-closed but inside Xret's finality grace, and `FINAL` has passed that grace at Xret's receipt time. None of these states means the value is canonical or persisted.
 
-An opt-in live bootstrap observes a small recent closed window and merges it
-with updates buffered after the live stream activates. This bridges the initial
-historical-to-live boundary without weakening `fetch` or `sync` and without
-opening the catalog or storage. A later explicit `sync()` independently
-reacquires and validates the timestamp before it can become canonical.
+An opt-in live bootstrap observes a small recent closed window and merges it with updates buffered after the live stream activates. This bridges the initial historical-to-live boundary without weakening `fetch` or `sync` and without opening the catalog or storage. A later explicit `sync()` independently reacquires and validates the timestamp before it can become canonical.
 
 ## Local analysis: `scan` and `scan_partial`
 

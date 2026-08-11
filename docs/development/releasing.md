@@ -48,19 +48,11 @@ The release workflow then:
 2. Builds sdist + wheel (`uv build --package`)
 3. Smoke-tests the wheel in an isolated venv
 4. Publishes to PyPI via Trusted Publishing (OIDC)
-5. Creates a GitHub Release with automatically generated release notes and
-   attaches the built sdist and wheel
+5. Creates a GitHub Release with automatically generated release notes and attaches the built sdist and wheel
 
-The build job passes the exact distributions it tested to the publish and
-GitHub Release jobs as an Actions artifact. If GitHub Release creation fails
-after PyPI publishing succeeds, rerun only the failed `create-github-release`
-job so PyPI is not published again.
+The build job passes the exact distributions it tested to the publish and GitHub Release jobs as an Actions artifact. If GitHub Release creation fails after PyPI publishing succeeds, rerun only the failed `create-github-release` job so PyPI is not published again.
 
-The workflow does not maintain a repository `CHANGELOG.md`. GitHub Release
-notes are the release-history surface for the current pre-1.0 stage. Their
-categories are configured in [`.github/release.yml`](../../.github/release.yml)
-and are based on pull-request labels. If a release contains no new commits
-since the previous release, the release step refuses to create a duplicate.
+The workflow does not maintain a repository `CHANGELOG.md`. GitHub Release notes are the release-history surface for the current pre-1.0 stage. Their categories are configured in [`.github/release.yml`](../../.github/release.yml) and are based on pull-request labels. If a release contains no new commits since the previous release, the release step refuses to create a duplicate.
 
 ## Adding a new package to the release pipeline
 
@@ -68,7 +60,4 @@ since the previous release, the release step refuses to create a duplicate.
 2. Register the PyPI Trusted Publisher for the new project (owner: `nbsp1221`, repo: `xret`, workflow: `release.yml`, environment: `pypi`)
 3. Release with `git tag xret-<name>-v0.1.0`
 
-The workflow trigger uses `xret-*-v*`, but each package must have an explicit
-wheel smoke-test import configured in `.github/workflows/release.yml` before it
-can be released. Unknown packages fail closed instead of silently testing a
-different package.
+The workflow trigger uses `xret-*-v*`, but each package must have an explicit wheel smoke-test import configured in `.github/workflows/release.yml` before it can be released. Unknown packages fail closed instead of silently testing a different package.
