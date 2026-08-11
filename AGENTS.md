@@ -78,6 +78,7 @@ repository root, create empty documentation placeholders, or retain migration
 history and old API examples without a real public compatibility obligation.
 
 For GitHub PR, issue, and release descriptions, keep each prose paragraph on one physical line; the 72-character limit applies only to Git commit messages.
+PR titles must follow the repository's commit convention because squash merges use them as commit subjects.
 
 ## Artifact promotion gate
 
