@@ -77,6 +77,8 @@ Keep `README.md` concise and user-facing. Do not place transient reports at the
 repository root, create empty documentation placeholders, or retain migration
 history and old API examples without a real public compatibility obligation.
 
+For GitHub PR, issue, and release descriptions, keep each prose paragraph on one physical line; the 72-character limit applies only to Git commit messages.
+
 ## Artifact promotion gate
 
 A file created to investigate, reproduce, benchmark, dogfood, or verify a change is not automatically a repository deliverable. Default it to `/tmp` or `.internal/`.
