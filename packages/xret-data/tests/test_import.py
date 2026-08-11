@@ -1,9 +1,10 @@
 """Public import-surface tests for `xret.data` (S5).
 
-`xret.data` exports exactly seven public names: the `MarketData` facade,
-its `MarketDataConfig`, `BarDataset`, `LiveMarketData`, live `BarUpdate`, and the two result types
-(`SyncResult`, `PartialScanResult`). Every exception lives in
-`xret.data.errors` only -- never re-exported at the package top level.
+`xret.data` exports exactly eight public names: the `MarketData` facade,
+its `MarketDataConfig`, `BarDataset`, `LiveMarketData`, live `BarUpdate` and
+`BarFinality`, and the two result types (`SyncResult`, `PartialScanResult`).
+Every exception lives in `xret.data.errors` only -- never re-exported at the
+package top level.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ def test_package_is_importable() -> None:
     assert xret.data.__doc__ == "Trusted market data infrastructure for Xret."
 
 
-def test_public_surface_is_exactly_seven_names() -> None:
+def test_public_surface_is_exactly_eight_names() -> None:
     import xret.data
 
     assert set(xret.data.__all__) == {
@@ -27,6 +28,7 @@ def test_public_surface_is_exactly_seven_names() -> None:
         "MarketDataConfig",
         "BarDataset",
         "BarUpdate",
+        "BarFinality",
         "LiveMarketData",
         "SyncResult",
         "PartialScanResult",
@@ -40,6 +42,7 @@ def test_public_surface_is_exactly_seven_names() -> None:
         "MarketDataConfig",
         "BarDataset",
         "BarUpdate",
+        "BarFinality",
         "LiveMarketData",
         "SyncResult",
         "PartialScanResult",

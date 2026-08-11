@@ -338,6 +338,24 @@ def test_runtime_accepts_exact_schema_empty_exhaustive_observation() -> None:
     assert result.frame.is_empty()
 
 
+def test_recent_closed_observation_keeps_rows_inside_finality_grace() -> None:
+    now = datetime(2024, 1, 1, 3, 0, 2, tzinfo=UTC)
+    runtime._set_clock_override(lambda: now)
+    provider = FakeProvider()
+    provider_runtime = ProviderRuntime(provider)
+
+    canonical = provider_runtime.observe(REQUEST)
+    recent = provider_runtime.observe_recent_closed(REQUEST, market=provider.market)
+
+    assert canonical.frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, 0, tzinfo=UTC),
+        datetime(2024, 1, 1, 1, tzinfo=UTC),
+    ]
+    assert recent.frame["timestamp"].to_list() == [
+        datetime(2024, 1, 1, hour, tzinfo=UTC) for hour in range(3)
+    ]
+
+
 def test_runtime_rejects_identity_columns_in_provider_frame() -> None:
     provider = FakeProvider(
         observation=BarObservation(

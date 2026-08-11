@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CoverageStatus",
+    "BarFinality",
     "Market",
     "QualitySeverity",
     "MarketIdentity",
@@ -57,6 +58,19 @@ class CoverageStatus(enum.Enum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     MISSING = "missing"
+
+
+class BarFinality(enum.Enum):
+    """Xret's time-based confidence in one observed bar state.
+
+    Finality is independent of persistence. A ``FINAL`` update has passed
+    Xret's finality grace, but it is canonical only after an explicit
+    ``sync()`` reacquires, validates, and commits that timestamp.
+    """
+
+    FORMING = "forming"
+    PROVISIONAL = "provisional"
+    FINAL = "final"
 
 
 class Market(enum.Enum):
@@ -342,11 +356,12 @@ class BarRequest:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BarUpdate:
-    """One validated in-progress time-bar update from a live session.
+    """One validated full-state time-bar observation from a live session.
 
     ``timestamp`` is the inclusive UTC start of the bar. Multiple updates for
-    the same timestamp are valid; the value is not a finality signal.
-    ``received_at`` records when Xret normalized the provider update.
+    the same timestamp are valid. ``finality`` describes the bar relative to
+    Xret's receipt clock and finality grace; it never implies persistence.
+    ``received_at`` records when Xret normalized the observation.
     """
 
     identity: MarketIdentity
@@ -358,6 +373,7 @@ class BarUpdate:
     close: float
     volume: float
     received_at: datetime
+    finality: BarFinality
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, MarketIdentity):
@@ -365,6 +381,8 @@ class BarUpdate:
         time_bar = TimeBar.parse(_ensure_path_safe(self.timeframe, field_name="timeframe"))
         _ensure_utc_aware(self.timestamp, field_name="timestamp")
         _ensure_utc_aware(self.received_at, field_name="received_at")
+        if not isinstance(self.finality, BarFinality):
+            raise InvalidRequestError("bar update finality must be a BarFinality")
         if time_bar.floor(self.timestamp) != self.timestamp:
             raise InvalidRequestError(
                 f"timestamp must be aligned to {self.timeframe}: {self.timestamp!r}"

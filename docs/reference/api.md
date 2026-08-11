@@ -8,6 +8,7 @@
 - `MarketDataConfig`
 - `BarDataset`
 - `BarUpdate`
+- `BarFinality`
 - `LiveMarketData`
 - `SyncResult`
 - `PartialScanResult`
@@ -129,7 +130,7 @@ performs no I/O. Enter the returned context before subscribing:
 
 ```python
 async with market_data.live(exchange="binance") as live:
-    await live.subscribe_bar_updates(bars)
+    await live.subscribe_bar_updates(bars, bootstrap=True)
     async for update in live:
         ...
 ```
@@ -138,12 +139,25 @@ async with market_data.live(exchange="binance") as live:
 must use the session exchange. One session may merge several bar subscriptions
 into its single-consumer iterator. The only current event type is immutable
 `BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start
-timestamp, OHLCV floats, and Xret's UTC normalization receipt time.
+timestamp, OHLCV floats, Xret's UTC normalization receipt time, and
+`BarFinality` (`FORMING`, `PROVISIONAL`, or `FINAL`). Finality describes the
+observation relative to the bar interval and Xret's finality grace. It never
+claims that the value is stored as canonical data.
 
-Same-timestamp updates are valid and do not signal finality. Backward timestamps,
-provider failures, malformed events, and bounded-queue overflow fail the whole
-session with `ProviderError`; Xret does not silently retry, reconnect, coalesce,
-or drop old events. Live delivery never reads or changes canonical storage.
+`subscribe_bar_updates(bars, *, bootstrap=False)` starts live-only delivery by
+default. With `bootstrap=True`, Xret buffers the activated live stream, observes
+the two most recent closed intervals through the same provider, coalesces
+timestamp overlap with the last buffered live value taking precedence, emits
+the bootstrap sequence in ascending timestamp order, and then continues live
+delivery. The operation performs remote I/O but never reads or changes canonical
+storage.
+
+Same-timestamp updates are valid after bootstrap. Backward timestamps, provider
+failures, malformed events, and bounded queue or bootstrap-buffer overflow fail
+the whole session with `ProviderError`; Xret does not silently retry, reconnect,
+or drop old events. Ordering is nondecreasing per dataset, not globally across
+different datasets in one session. A non-boolean `bootstrap` value raises
+`InvalidRequestError` before provider I/O.
 See [Consume live bar updates](../guides/live-bars.md) for lifecycle and
 continuity guidance.
 
