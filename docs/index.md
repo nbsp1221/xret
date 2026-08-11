@@ -9,7 +9,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - [Getting started](getting-started/index.md) — install `xret-data`, synchronize a market, and read it locally.
 - [Roadmap](roadmap.md) — see how Xret plans to connect trusted data, research, backtesting, and eventual live operation.
 - [Synchronize and read bars](guides/synchronization.md) — choose between `fetch`, `sync`, `scan`, and `scan_partial`.
-- [Consume live bar updates](guides/live-bars.md) — subscribe to forming bars with explicit lifecycle and failure semantics.
+- [Consume live bar updates](guides/live-bars.md) — subscribe to typed bar observations and optionally bridge recent history into the live stream.
 - [Market data API](reference/api.md) — exact public contracts.
 - [Market-data providers](reference/providers.md) — implement historical and optional live capabilities.
 - [Verified support](quality/verified-support.md) — combinations exercised against real providers.

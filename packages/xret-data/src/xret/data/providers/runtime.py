@@ -44,6 +44,15 @@ class ValidatedBarObservation:
     completed_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class _ValidatedProviderObservation:
+    frame: pl.DataFrame
+    observed: tuple[ObservedWindow, ...]
+    market: ResolvedBarMarket
+    evidence_at: datetime
+    completed_at: datetime
+
+
 class MarketDefinitionRuntime:
     """Validate one optional provider market-definition operation."""
 
@@ -190,21 +199,12 @@ def _validate_provider_frame(frame: object) -> pl.DataFrame:
     return frame
 
 
-def _canonical_frame(
+def _xret_frame(
     frame: pl.DataFrame,
     request: BarRequest,
     market: ResolvedBarMarket,
-    evidence_at: datetime,
-    time_bar: TimeBar,
 ) -> pl.DataFrame:
-    finalizable_end = min(
-        request.end,
-        time_bar.floor(evidence_at - DEFAULT_FINALITY_GRACE),
-    )
-    finalized = frame.filter(
-        (pl.col("timestamp") >= request.start) & (pl.col("timestamp") < finalizable_end)
-    )
-    n = finalized.height
+    n = frame.height
     identity = market.identity
     return pl.DataFrame(
         {
@@ -213,7 +213,7 @@ def _canonical_frame(
             "market": pl.Series("market", [identity.market.value] * n, dtype=pl.String),
             "settle": pl.Series("settle", [identity.settle] * n, dtype=pl.String),
             "timeframe": pl.Series("timeframe", [request.timeframe] * n, dtype=pl.String),
-            **{name: finalized.get_column(name) for name in PROVIDER_BAR_SCHEMA.names()},
+            **{name: frame.get_column(name) for name in PROVIDER_BAR_SCHEMA.names()},
         },
         schema=OHLCV_SCHEMA,
     )
@@ -222,9 +222,15 @@ def _canonical_frame(
 class ProviderRuntime:
     """One provider-bound validation context for a remote operation."""
 
-    def __init__(self, provider: HistoricalBarProvider) -> None:
+    def __init__(
+        self,
+        provider: HistoricalBarProvider,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._provider = provider
         self._descriptor = validate_provider_descriptor(provider)
+        self._clock = clock or _clock
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -252,6 +258,40 @@ class ProviderRuntime:
         *,
         market: ResolvedBarMarket | None = None,
     ) -> ValidatedBarObservation:
+        raw = self._observe_provider(request, market=market)
+        time_bar = TimeBar.parse(request.timeframe)
+        finalizable_end = min(
+            request.end,
+            time_bar.floor(raw.evidence_at - DEFAULT_FINALITY_GRACE),
+        )
+        finalized = raw.frame.filter(pl.col("timestamp") < finalizable_end)
+        canonical = _xret_frame(finalized, request, raw.market)
+        enforce_ohlcv_batch(canonical, request, error_cls=ProviderError)
+        return self._result(raw, canonical)
+
+    def observe_recent_closed(
+        self,
+        request: BarRequest,
+        *,
+        market: ResolvedBarMarket,
+    ) -> ValidatedBarObservation:
+        """Validate a closed recent window without applying storage finality.
+
+        This internal observation is for transient live bootstrap only. It
+        performs the same provider, range, schema, and OHLCV validation as the
+        canonical path, but it never writes or claims canonical coverage.
+        """
+        raw = self._observe_provider(request, market=market)
+        recent = _xret_frame(raw.frame, request, raw.market)
+        enforce_ohlcv_batch(recent, request, error_cls=ProviderError)
+        return self._result(raw, recent)
+
+    def _observe_provider(
+        self,
+        request: BarRequest,
+        *,
+        market: ResolvedBarMarket | None,
+    ) -> _ValidatedProviderObservation:
         resolved = (
             self.resolve_market(request.identity)
             if market is None
@@ -270,7 +310,7 @@ class ProviderRuntime:
             raise ProviderError(
                 f"provider request boundaries are not aligned to {request.timeframe}"
             )
-        evidence_at = _clock()
+        evidence_at = self._clock()
         try:
             raw = self._provider.observe_bars(request, resolved)
         except (UnsupportedMarketError, ProviderError):
@@ -280,7 +320,7 @@ class ProviderRuntime:
                 f"provider {self._descriptor.name!r} failed to observe "
                 f"{request.identity.exchange}/{request.identity.symbol}: {exc}"
             ) from exc
-        completed_at = _clock()
+        completed_at = self._clock()
         if completed_at < evidence_at:
             raise ProviderError(
                 "provider observation clock moved backwards: "
@@ -300,17 +340,28 @@ class ProviderRuntime:
                 raise ProviderError("provider observation contains rows outside the request")
             if not any(window.start <= timestamp < window.end for window in raw.observed):
                 raise ProviderError("provider observation contains a row outside observed windows")
-        canonical = _canonical_frame(frame, request, resolved, evidence_at, time_bar)
-        enforce_ohlcv_batch(canonical, request, error_cls=ProviderError)
-        return ValidatedBarObservation(
-            frame=canonical,
+        return _ValidatedProviderObservation(
+            frame=frame,
             observed=raw.observed,
             market=resolved,
-            source=ProviderSnapshot(
-                descriptor=self._descriptor,
-                native_market_id=resolved.native_market_id,
-                native_symbol=resolved.native_symbol,
-            ),
             evidence_at=evidence_at,
             completed_at=completed_at,
+        )
+
+    def _result(
+        self,
+        raw: _ValidatedProviderObservation,
+        frame: pl.DataFrame,
+    ) -> ValidatedBarObservation:
+        return ValidatedBarObservation(
+            frame=frame,
+            observed=raw.observed,
+            market=raw.market,
+            source=ProviderSnapshot(
+                descriptor=self._descriptor,
+                native_market_id=raw.market.native_market_id,
+                native_symbol=raw.market.native_symbol,
+            ),
+            evidence_at=raw.evidence_at,
+            completed_at=raw.completed_at,
         )

@@ -36,8 +36,10 @@ bars with explicit remote and local operations:
 - read complete local coverage strictly or inspect partial coverage explicitly;
 - validate provider results, source lineage, storage, and catalog recovery;
 - use the built-in CCXT provider or an experimental external provider contract;
-- consume provider-neutral forming time-bar updates through an explicit async
-  session without mutating historical storage.
+- consume provider-neutral time-bar observations with explicit finality through
+  an async session without mutating historical storage;
+- opt into a validated recent snapshot-to-live handoff when initializing a
+  continuous consumer.
 
 See the [market-data API](reference/api.md) and
 [verified support](quality/verified-support.md) for the maintained contracts and

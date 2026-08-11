@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime
 
 import pytest
+from xret.data import BarFinality
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import MarketIdentity
 from xret.data.providers import (
@@ -144,5 +145,33 @@ def test_runtime_rejects_invalid_receipt_clock() -> None:
             await runtime.subscribe(_identity(), "1m")
             with pytest.raises(ProviderError, match="received_at"):
                 await anext(runtime.updates())
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("received_at", "expected"),
+    [
+        (datetime(2026, 8, 7, 0, 0, 59, 999999, tzinfo=UTC), BarFinality.FORMING),
+        (datetime(2026, 8, 7, 0, 1, tzinfo=UTC), BarFinality.PROVISIONAL),
+        (datetime(2026, 8, 7, 0, 1, 4, 999999, tzinfo=UTC), BarFinality.PROVISIONAL),
+        (datetime(2026, 8, 7, 0, 1, 5, tzinfo=UTC), BarFinality.FINAL),
+    ],
+)
+def test_runtime_classifies_bar_finality_at_exact_boundaries(
+    received_at: datetime,
+    expected: BarFinality,
+) -> None:
+    async def scenario() -> None:
+        runtime = LiveBarRuntime(
+            Provider(Session([_update()])),
+            exchange="binance",
+            clock=lambda: received_at,
+        )
+        async with runtime:
+            await runtime.subscribe(_identity(), "1m")
+            update = await anext(runtime.updates())
+
+        assert update.finality is expected
 
     asyncio.run(scenario())

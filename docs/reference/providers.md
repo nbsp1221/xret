@@ -147,6 +147,9 @@ its iterator merges `ProviderBarUpdate` values from every subscription. The
 provider update carries canonical identity, timeframe, inclusive UTC bar-start,
 and OHLCV values. Xret validates it, enforces per-dataset nondecreasing
 timestamps, and adds `received_at` before exposing `BarUpdate`.
+Xret also derives provider-neutral `BarFinality` from the bar interval, receipt
+time, and Xret's finality grace; providers do not add native closed/confirm
+flags to the SPI.
 
 The built-in provider implements this capability through CCXT Pro with
 `newUpdates=True` and rate limiting enabled. Async clients are distinct from
@@ -159,6 +162,12 @@ transport failure, malformed update, reader failure, or queue overflow raises a
 terminal `ProviderError` for the session. Providers and Xret do not silently
 retry, reconnect, coalesce, or claim continuity. Closing the context closes the
 provider's whole session; the initial contract has no unsubscribe operation.
+
+The optional public bootstrap reuses the mandatory historical `observe_bars`
+operation only for a bounded range of already closed intervals. Xret validates
+that recent observation without applying canonical-storage finality, merges it
+in memory with buffered live updates, and never writes provider observations to
+storage. Provider authors do not implement a second snapshot SPI.
 
 ## Descriptor and market resolution
 

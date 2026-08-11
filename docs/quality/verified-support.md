@@ -80,25 +80,32 @@ A rebuild restores Parquet-provable datasets, files, and available coverage; it 
 
 ## Currently verified live bars
 
-The live-bar matrix below was qualified on 2026-08-07 from a built wheel in a
-fresh external uv project with CCXT 4.5.71. Each combination opened through the
-public API, resolved and subscribed successfully, delivered a validated forming
-bar, and closed cleanly without creating canonical state or catalog paths.
+The live-bar matrix below was requalified on 2026-08-11 from the built
+`xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each
+combination opened through the public API, completed an initial bootstrap with
+two recent closed bars followed by the current forming bar in ascending,
+duplicate-free timestamp order, and closed cleanly without creating canonical
+state or catalog paths.
 
 | Provider | Venue | Market family | Bar type | Timeframe | Representative symbol |
 |---|---|---|---|---|---|
-| CCXT Pro | Binance | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
-| CCXT Pro | Binance USD-M | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
-| CCXT Pro | Bybit | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
-| CCXT Pro | Bybit | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
-| CCXT Pro | OKX | Spot | Forming time-bar updates | `1m` | `BTC/USDT` |
-| CCXT Pro | OKX | USDT-settled linear perpetual | Forming time-bar updates | `1m` | `BTC/USDT` |
+| CCXT Pro | Binance | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | Binance USD-M | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
 
-This is a connectivity, normalization, multiplexing, and lifecycle claim. A
-transient live update cannot prove uninterrupted continuity, exhaustive
-delivery, historical finality, reconnect behavior, or long-running stability.
-Xret exposes disconnects and overflow as terminal failures rather than extending
-this matrix into those claims.
+The Binance USD-M qualification additionally exercised the handoff immediately
+after a one-minute boundary, while the just-closed bar remained provisional
+under the finality grace period. It produced consecutive `FINAL`,
+`PROVISIONAL`, and `FORMING` observations without touching canonical storage.
+
+This is a connectivity, normalization, initial-handoff, multiplexing, and
+lifecycle claim. It does not prove uninterrupted continuity, exhaustive
+delivery, canonical persistence of live observations, reconnect behavior, or
+long-running stability. Xret exposes disconnects and overflow as terminal
+failures rather than extending this matrix into those claims.
 
 ## Re-verification
 
