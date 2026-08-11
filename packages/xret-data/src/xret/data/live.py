@@ -169,6 +169,11 @@ class LiveMarketData:
         self._routes[key] = gate
         try:
             await self._runtime.subscribe_resolved(resolved, bars.timeframe)
+        except asyncio.CancelledError:
+            self._publish_failure(
+                ProviderError("live subscription was cancelled during provider activation")
+            )
+            raise
         except BaseException:
             self._routes.pop(key, None)
             raise
