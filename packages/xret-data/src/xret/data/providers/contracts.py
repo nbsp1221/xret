@@ -36,6 +36,10 @@ __all__ = [
 PROVIDER_API_VERSION: Final[int] = 1
 _PROVIDER_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9-]*$")
 
+#: Provider values before canonical identity columns are attached. OHLC must
+#: summarize eligible executed trades in the requested half-open interval, and
+#: volume must already be normalized to base-asset quantity. Providers must
+#: reject a source that cannot satisfy those meanings losslessly.
 PROVIDER_BAR_SCHEMA: Final[pl.Schema] = pl.Schema(
     {
         "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
@@ -101,9 +105,11 @@ class ResolvedBarMarket:
     """A canonical market resolved to one provider-native historical-bar target.
 
     `timeframes` declares what Xret may request from this market, so every
-    entry must be a canonical Xret timeframe. Providers exclude native bar
-    types outside that vocabulary rather than passing them through: a venue
-    must stay resolvable even when it offers bar types Xret cannot express.
+    entry must be a canonical Xret timeframe whose interval origin, event
+    universe, volume unit, finality, and exhaustive observation behavior the
+    provider can satisfy. Providers exclude native bar types outside that
+    vocabulary rather than passing them through: a venue must stay resolvable
+    even when it offers a bar type Xret cannot express or normalize exactly.
     """
 
     identity: MarketIdentity
@@ -193,7 +199,12 @@ class ObservedWindow:
 
 @dataclass(frozen=True, slots=True)
 class BarObservation:
-    """Untrusted provider rows plus the windows their absence can describe."""
+    """Untrusted canonical trade bars plus windows their absence can describe.
+
+    Rows use inclusive UTC interval starts, trade-derived OHLC values, and
+    base-asset volume. A provider must fail before constructing an observation
+    when its native source cannot satisfy those meanings losslessly.
+    """
 
     frame: pl.DataFrame
     observed: tuple[ObservedWindow, ...]
@@ -216,7 +227,13 @@ class HistoricalBarProvider(Protocol):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ProviderBarUpdate:
-    """One provider-originated bar update before Xret receipt normalization."""
+    """One canonical trade-bar update before Xret receipt normalization.
+
+    OHLC values summarize eligible executed trades and volume is base-asset
+    quantity. Provider-native mark, index, settlement, quote-volume, or
+    contract-count values are not valid here unless an exact approved
+    normalization produced this canonical value.
+    """
 
     identity: MarketIdentity
     timeframe: str

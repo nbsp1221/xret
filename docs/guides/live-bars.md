@@ -39,7 +39,7 @@ Bootstrap waits for the first live update as evidence that the stream is active.
 
 ## Event semantics
 
-Each `BarUpdate` contains canonical `identity` and `timeframe`, the inclusive UTC bar-start `timestamp`, floating-point OHLCV values, Xret's UTC `received_at` time, and a `BarFinality` value:
+Each `BarUpdate` contains canonical `identity` and `timeframe`, the inclusive UTC bar-start `timestamp`, trade-derived floating-point OHLC values, base-asset `volume`, Xret's UTC `received_at` time, and a `BarFinality` value. See the [canonical time-bar contract](../reference/time-bars.md) for exact interval and unit semantics.
 
 - `FORMING`: Xret received the observation before the bar interval ended.
 - `PROVISIONAL`: the interval ended, but Xret's finality grace has not elapsed.

@@ -53,7 +53,7 @@ from xret.data.providers import (
 
 This namespace is self-contained for provider authoring; provider packages do not import domain values from implementation modules such as `xret.data.models`.
 
-The mandatory protocol covers synchronous historical OHLCV time bars for spot and perpetual markets. Live bars and market definitions are optional capabilities. The SPI does not define trades, quotes, order books, fundamentals, provider-specific columns, fallback, or synthetic timeframes.
+The mandatory protocol covers synchronous historical [canonical trade OHLCV time bars](time-bars.md) for spot and perpetual markets. Live bars and market definitions are optional capabilities. The SPI does not expose raw trades, quotes, order books, fundamentals, provider-specific columns, fallback, or synthetic timeframes.
 
 `HistoricalBarProvider` is a structural protocol. Inheritance is optional; an implementation supplies:
 
@@ -102,7 +102,7 @@ class LiveBarProvider(Protocol):
     def open_live_bars(self, *, exchange: str) -> LiveBarSession: ...
 ```
 
-`LiveBarSession` is an async context manager and async iterator. Its `subscribe_bar_updates(resolved_market, timeframe)` method starts one stream; its iterator merges `ProviderBarUpdate` values from every subscription. The provider update carries canonical identity, timeframe, inclusive UTC bar-start, and OHLCV values. Xret validates it, enforces per-dataset nondecreasing timestamps, and adds `received_at` before exposing `BarUpdate`. Xret also derives provider-neutral `BarFinality` from the bar interval, receipt time, and Xret's finality grace; providers do not add native closed/confirm flags to the SPI.
+`LiveBarSession` is an async context manager and async iterator. Its `subscribe_bar_updates(resolved_market, timeframe)` method starts one stream; its iterator merges `ProviderBarUpdate` values from every subscription. The provider update carries canonical identity, timeframe, inclusive UTC bar-start, trade-derived OHLC values, and base-asset volume. Xret validates it, enforces per-dataset nondecreasing timestamps, and adds `received_at` before exposing `BarUpdate`. Xret also derives provider-neutral `BarFinality` from the bar interval, receipt time, and Xret's finality grace; providers do not add native closed/confirm flags to the SPI.
 
 The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions.
 
@@ -122,7 +122,7 @@ The provider name identifies the implementation lineage, not the exchange. For e
 
 `resolve_market` receives Xret's provider-independent `MarketIdentity`. It returns the same canonical identity, provider-native IDs used for provenance, and the timeframes supported for that resolved market. A provider may resolve an omitted perpetual settlement only when it can do so unambiguously. It must not relabel the canonical venue, symbol, or market family.
 
-`timeframes` declares what Xret may request from that market, so every entry must be a canonical Xret timeframe. A venue legitimately offers bar types outside that vocabulary; exclude them instead of passing them through. A venue must not become unresolvable because it offers a bar type Xret cannot express.
+`timeframes` declares what Xret may request from that market, so every entry must be a canonical Xret timeframe whose interval origin, event universe, volume unit, finality, and exhaustive-observation behavior the provider can satisfy. A venue legitimately offers bar types outside that vocabulary; exclude them instead of passing them through. A venue must not become unresolvable because it offers a bar type Xret cannot express or normalize losslessly.
 
 Excluding an entry is not a silent fallback. Requesting a non-canonical timeframe raises `InvalidRequestError` before any provider call, because the timeframe grammar rejects it. Requesting a canonical timeframe this venue does not offer raises `UnsupportedMarketError`. Neither case substitutes another bar type.
 
@@ -139,7 +139,9 @@ The provider frame contains only:
 timestamp, open, high, low, close, volume
 ```
 
-Identity columns are deliberately absent. Xret adds canonical identity after validating the returned value frame. An empty frame is valid when the provider exhaustively observed the requested window.
+Identity columns are deliberately absent. Xret adds canonical identity after validating the returned value frame. OHLC values must summarize eligible executed trades and `volume` must already represent base-asset quantity. A provider must reject a source when mark/index/settlement prices or quote/contract volume cannot be normalized exactly. An empty frame is valid when the provider exhaustively observed the requested window.
+
+These meanings make explicit the canonical semantics already required by the provider value schema; they do not add a method or field to SPI version 1. A provider that emitted a differently defined value was not producing canonical Xret OHLCV even if its frame shape passed structural validation.
 
 Observation evidence is stronger than returned rows. In the current SPI major, ordered windows must align to the requested timeframe and contiguously cover the entire request. A provider that cannot prove exhaustive coverage must raise an error; it must not return a partial observation as success. Immediately before calling the provider, Xret records a conservative evidence time and records completion separately after the call returns. The completed-bar gate and negative coverage use only the pre-call evidence time, so a bar becoming final during a slow request remains `missing` for the next sync. Xret also rejects rows outside the request or evidence and enforces canonical OHLCV invariants.
 

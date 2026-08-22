@@ -95,6 +95,8 @@ Binds one provider-independent dataset identity and performs no I/O.
 - Spot omits `settle`. A resolved perpetual identity always has a nonempty `settle` component without `/`. For `fetch`/`sync`, an omitted perpetual `settle` is inferred only when provider metadata has exactly one nonempty settlement value and exactly one listed perpetual market matching the base/quote and that settlement. Local reads infer an omitted `settle` only from exactly one locally known dataset candidate.
 - `timeframe` is case-sensitive `<amount><unit>`. Units are `s`, `m`, `h`, `d`, `w`, and `M`; `w` and `M` require amount `1`.
 
+All historical and live rows use Xret's [canonical trade time-bar contract](time-bars.md). OHLC summarizes eligible executed trades, `volume` is base-asset quantity, and a provider-native timeframe is usable only when its complete interval semantics match or can be normalized losslessly. Fixed `s`, `m`, `h`, and `d` multiples use the Unix epoch as their origin; `1w` begins Monday UTC and `1M` begins at the UTC calendar-month boundary. Consequently `7d` and `1w` are distinct identities.
+
 ### `live`
 
 ```python
@@ -110,7 +112,7 @@ async with market_data.live(exchange="binance") as live:
         ...
 ```
 
-`bars` must be a `BarDataset` created by the same `MarketData` instance and must use the session exchange. One session may merge several bar subscriptions into its single-consumer iterator. The only current event type is immutable `BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start timestamp, OHLCV floats, Xret's UTC normalization receipt time, and `BarFinality` (`FORMING`, `PROVISIONAL`, or `FINAL`). Finality describes the observation relative to the bar interval and Xret's finality grace. It never claims that the value is stored as canonical data.
+`bars` must be a `BarDataset` created by the same `MarketData` instance and must use the session exchange. One session may merge several bar subscriptions into its single-consumer iterator. The only current event type is immutable `BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start timestamp, trade-derived OHLC floats, base-asset `volume`, Xret's UTC normalization receipt time, and `BarFinality` (`FORMING`, `PROVISIONAL`, or `FINAL`). Finality describes the observation relative to the bar interval and Xret's finality grace. It never claims that the value is stored as canonical data.
 
 `subscribe_bar_updates(bars, *, bootstrap=False)` starts live-only delivery by default. With `bootstrap=True`, Xret buffers the activated live stream, observes the two most recent closed intervals through the same provider, coalesces timestamp overlap with the last buffered live value taking precedence, emits the bootstrap sequence in ascending timestamp order, and then continues live delivery. The operation performs remote I/O but never reads or changes canonical storage.
 
