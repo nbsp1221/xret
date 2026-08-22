@@ -4,24 +4,26 @@
 
 ## What the gate claims
 
-The gate does not prove every symbol and timestamp. It proves that the selected exchange has no unexplained violations of Xret's canonical invariants across a declared, reproducible sample design. The design has two layers:
+The gate does not prove every symbol and timestamp. It proves that the selected exchange has no unexplained violations of Xret's canonical invariants across a declared, reproducible sample design. The design has two independent layers:
 
-1. The union of every CCXT-advertised timeframe across the market-definition universe that Xret's canonical grammar can express is included in at least one smoke case for each market family. The smoke uses a real selected market that advertises that timeframe.
-2. Additional symbol and period cases are stratified and sampled until the configured confidence sample count is reached. The default is 59 independent case targets, which is the minimum zero-failure sample for a one-sided 95% upper bound below a 5% violation rate under the declared sampling model.
+1. Mandatory history-derived cases run regardless of the statistical budget. They cover every CCXT-advertised timeframe that Xret's canonical grammar can express, one- and two-bar ranges, the current closed-bar boundary, the qualified provider page limit at `N-1`, `N`, `N+1`, and `2N+1`, explicit month and year boundaries, one- and three-year history, left/right incremental extension, identical no-op synchronization, concurrent synchronization of one dataset, invalid zero-length and misaligned ranges, strict/partial reads, and catalog validation/rebuild equivalence.
+2. Additional symbol, timeframe, length, and historical-offset combinations are deterministically stratified and sampled. The default is 135 statistical cases per exchange, the minimum zero-failure sample for a one-sided 99.9% upper bound below a 5% violation rate under the declared sampling model. Mandatory cases never count toward those 135 observations.
 
-The confidence statement applies to the sampled invariant-violation rate under the sampling assumptions. It is not a probability that an exchange is universally reliable. Cases sharing one endpoint, symbol, or contiguous page sequence are correlated and must not be counted as independent evidence during final review.
+The confidence statement applies to the sampled invariant-violation rate under the sampling assumptions. It is not a probability that an exchange is universally reliable. Cases sharing one endpoint, symbol, or contiguous page sequence are correlated, so the mathematical bound is a declared sampling target rather than a proof of universal independence. The mandatory suite addresses known low-frequency, high-impact failure modes that random sampling would discover inefficiently.
 
 ## Invariants exercised
 
-The harness checks canonical market identity, timeframe alignment, in-range and strictly increasing timestamps, uniqueness, finite OHLCV values, OHLC relationships, non-negative volume, bounded acquisition, `fetch`/`sync` consistency, idempotent synchronization, strict/partial scan agreement, and catalog rebuild equivalence. A genuine provider-observed empty interval is reported as `coverage_review`; it is not silently filled or ignored. It must be independently classified as pre-listing, native no-trade, or a documented provider history boundary before promotion.
+The harness checks canonical market identity, timeframe alignment, in-range and strictly increasing timestamps, uniqueness, finite OHLCV values, OHLC relationships, non-negative volume, bounded acquisition, `fetch`/`sync` consistency, incremental and idempotent synchronization, concurrent same-dataset synchronization, strict/partial scan agreement, and catalog rebuild equivalence. A genuine provider-observed empty interval is reported as `coverage_review`; it is not silently filled or ignored. It must be independently classified as pre-listing, native no-trade, or a documented provider history boundary before promotion.
+
+Malformed-row injection, publication failure, crash recovery, and other destructive fault injection remain deterministic repository-test prerequisites. They are not repeated against public exchange endpoints because a live venue cannot be instructed to return a controlled corrupt response or crash at an exact storage phase.
 
 ## Cost and parallelism policy
 
 Cases within one exchange run sequentially because the exchange's rate limit is the primary bottleneck and concurrent requests can distort the evidence. Different exchanges may run in parallel. The default of four workers matches the current machine's four physical cores while avoiding unnecessary pressure on a single venue. Increase it only when the run contains several independent exchanges and the operator has confirmed rate-limit headroom.
 
-The default plan uses six representative symbols, all expressible advertised timeframes, a short smoke range for each, and deterministic recent/boundary additions up to 59 planned cases per exchange. Coarser timeframes use longer windows than minute bars. Use `--plan-only` first to inspect case counts; use a pilot run with one exchange before widening the venue set. The script records the seed, timeout, retry, page-limit, worker, and sampling settings in every artifact so a run can be reproduced.
+The default plan uses six representative symbols, all expressible advertised timeframes, the mandatory risk suite, and 135 deterministic statistical cases drawn across 32-, 96-, and 257-bar windows ending in recent and older historical strata. Use `--plan-only` first to inspect mandatory/statistical counts and estimated pages; use a pilot run with one exchange before widening the venue set. The script records the confidence target, failure-rate threshold, seed, timeout, retry, effective provider page limit, worker count, request count, returned-row count, and elapsed time in its artifacts.
 
-On the current machine, a Binance pilot with two symbols and the all-timeframe smoke set produced 36 cases and 54 estimated pages and completed in about 25 seconds with one exchange worker. The pilot intentionally exposed three real qualification issues (a perpetual `1s` invalid interval and `3d` boundary mismatches) rather than treating every advertised timeframe as automatically supported. A full default plan is expected to be measured from `--plan-only` before execution; the operator should stop and revise the strata if estimated pages or projected runtime are disproportionate.
+Do not reuse the earlier 95% pilot runtime as an estimate for this gate. The strengthened gate has a larger statistical budget and mandatory multi-page cases. Measure every campaign with `--plan-only`, retain the generated request metrics, and stop or revise the run if the projected traffic is disproportionate.
 
 ## Usage
 
@@ -59,4 +61,4 @@ The harness must be run against a built Xret distribution whose CCXT pagination 
 
 ## Promotion rule
 
-Promotion requires all advertised canonical timeframes to have structural smoke evidence, the declared combinatorial sample to be complete, zero unexplained invariant failures, and independent review of every `coverage_review`. Spot and perpetual, settlement, historical, and live claims are promoted separately. Passing one endpoint family or one timeframe never promotes the whole exchange.
+Promotion requires every mandatory case to pass or receive an independent native-coverage classification, all 135 statistical observations to complete without an invariant violation, and independent review of every `coverage_review`. A classified native listing, retention, or no-trade boundary remains visible evidence and narrows the promoted claim; it is never converted into synthetic coverage or an exchange-specific Xret exception. Spot and perpetual, settlement, historical, and live claims are promoted separately. Passing one endpoint family or one timeframe never promotes the whole exchange.
