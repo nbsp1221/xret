@@ -38,9 +38,19 @@ Representative symbols exercise shared adapter behavior. Verification does not m
 This matrix is a public trust statement, not a runtime allowlist. Provider adapters do not reject an otherwise valid venue merely because it is absent here. Conversely, successfully fetching a provider's market definitions, an `active=True` value, or an advertised timeframe does not prove that Xret can exhaustively acquire historical bars for that combination. Market-definition availability, historical-bar operability, and verified support remain separate facts.
 
 ## Currently verified
-The currently listed matrix combines the earlier long-range qualifications with the 2026-08-23 qualification gate for the newly added CCXT endpoint families. The new gate used the built `xret-data` 0.4.0 distribution in a fresh external uv environment with CCXT 4.5.75, and exercised representative spot/perpetual markets over recent, seven-day, and one-year ranges, including fetch, sync, strict scan, idempotent sync, partial scan, and catalog validation/rebuild. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
 
-The autonomous requalification batch on 2026-08-23 independently checked every remaining gate `coverage_review` interval for OKX and Bybit against each venue's official market metadata and candle endpoint. The intervals were confirmed as native listing or contract-launch boundaries. They remain explicit unavailable coverage in Xret; no exchange-specific fill or scan exception was added. Accordingly, the OKX and Bybit claims below are coverage-qualified for the exercised endpoint families and representative timeframe/symbol sample, with the documented historical boundary caveat rather than an unexplained failure.
+The currently listed matrix combines earlier long-range qualifications with the 2026-08-23 CCXT qualification campaigns. The latest campaign used the built `xret-data` 0.4.0 distribution in a fresh external uv environment with CCXT 4.5.75. For each venue it ran every CCXT-advertised timeframe expressible by Xret, mandatory boundary and lifecycle cases, and 135 additional deterministic statistical observations: the zero-failure sample target for a one-sided 99.9% bound below a 5% invariant-violation rate under the declared sampling model. The campaign exercised fetch, synchronization, strict and partial scans, incremental and no-op synchronization, concurrent synchronization, long-history and pagination boundaries, and catalog validation/rebuild. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
+
+The autonomous requalification batches on 2026-08-23 independently checked the remaining `coverage_review` intervals for Coinbase, OKX, HashKey, and the previously qualified Bybit scope against official market metadata and candle endpoints. Coinbase's interior one-minute gaps matched its native sparse candle response; the other reviewed intervals matched native listing, venue-launch, or contract-launch boundaries. They remain explicit unavailable coverage in Xret; no exchange-specific fill or scan exception was added. The corresponding claims below are coverage-qualified for the exercised endpoint families and representative timeframe/symbol samples, with the documented historical boundary caveat rather than an unexplained failure.
+
+### Coinbase
+
+| Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
+|---|---|---|---|---|---|
+| CCXT | Coinbase candles | Spot | Time bars | `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `6h`, `1d` | `BTC/USDT`, `BTC/USDC`, `ETH/USDT`, `ETH/USDC`, `SOL/USDT`, `SOL/USDC` |
+| CCXT | Coinbase candles | USDC-settled linear perpetual | Time bars | `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `6h`, `1d` | `BTC/USDC`, `ETH/USDC`, `SOL/USDC`, `DOGE/USDC`, `XRP/USDC`, `1000PEPE/USDC` |
+
+Coinbase passed the 2026-08-23 strengthened qualification gate with no unexplained invariant violation. Direct comparison with the official candle endpoint confirmed that the observed spot `BTC/USDT` one-minute interior gaps were native sparse no-trade intervals rather than CCXT or Xret data loss. Product-history prefixes remain explicit unavailable coverage; Xret does not fill or exempt them.
 
 ### Binance
 
@@ -63,9 +73,10 @@ Bybit spot and perpetual `1h` qualification covers complete four-year synchroniz
 
 | Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
 |---|---|---|---|---|---|
-| CCXT | OKX market candles | Spot | Time bars | `1h` | `BTC/USDT` |
+| CCXT | OKX market candles | Spot | Time bars | `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `1w`, `1M` | `BTC/USDT`, `BTC/USDC`, `ETH/USDT`, `ETH/USDC`, `SOL/USDT`, `SOL/USDC` |
+| CCXT | OKX market candles | USDT-settled linear perpetual | Time bars | `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `12h`, `1d`, `1w`, `1M` | `BTC/USDT`, `ETH/USDT`, `SOL/USDT` |
 
-OKX spot `1h` qualification covers complete four-year synchronization across monthly partitions, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. OKX perpetual combinations remain unlisted pending equivalent re-verification.
+OKX passed the 2026-08-23 strengthened qualification gate with no unexplained invariant violation. Direct official market metadata confirmed that the observed USDC spot and perpetual history prefixes match product listing or contract launch times. Those prefixes remain explicit unavailable coverage; Xret does not fill or exempt them. Inverse perpetual settlements were sampled but remain unlisted pending an equally complete settlement-specific promotion review.
 
 ### Gate
 
@@ -80,10 +91,10 @@ Gate spot and perpetual `1h` passed the 2026-08-23 qualification gate over recen
 
 | Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
 |---|---|---|---|---|---|
-| CCXT | HashKey spot OHLCV | Spot | Time bars | `1h` | `BTC/USDT` |
-| CCXT | HashKey perpetual OHLCV | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
+| CCXT | HashKey spot OHLCV | Spot | Time bars | `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `1w`, `1M` | `BTC/USDT`, `ETH/USDT`, `SOL/USDT`, `AVAX/USDT`, `0G/USDT`, `AGI/USDT` |
+| CCXT | HashKey perpetual OHLCV | USDT-settled linear perpetual | Time bars | `1m`, `3m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `6h`, `8h`, `12h`, `1d`, `1w`, `1M` | `BTC/USDT`, `ETH/USDT` |
 
-HashKey spot and perpetual `1h` passed the 2026-08-23 qualification gate over recent, seven-day, and one-year ranges, including canonical sync, strict reads, idempotent synchronization, partial reads, and catalog validation/rebuild.
+HashKey passed the 2026-08-23 strengthened qualification gate with no unexplained invariant violation. Direct official market and candle endpoints confirmed that the observed history prefixes match venue or product launch dates. Those prefixes remain explicit unavailable coverage; Xret does not fill or exempt them. USD-settled perpetuals were sampled but remain unlisted pending an equally complete settlement-specific promotion review.
 
 ### WOO
 
