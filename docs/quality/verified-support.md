@@ -40,6 +40,8 @@ This matrix is a public trust statement, not a runtime allowlist. Provider adapt
 ## Currently verified
 The currently listed matrix combines the earlier long-range qualifications with the 2026-08-23 qualification gate for the newly added CCXT endpoint families. The new gate used the built `xret-data` 0.4.0 distribution in a fresh external uv environment with CCXT 4.5.75, and exercised representative spot/perpetual markets over recent, seven-day, and one-year ranges, including fetch, sync, strict scan, idempotent sync, partial scan, and catalog validation/rebuild. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
 
+The autonomous requalification batch on 2026-08-23 independently checked every remaining gate `coverage_review` interval for OKX and Bybit against each venue's official market metadata and candle endpoint. The intervals were confirmed as native listing or contract-launch boundaries. They remain explicit unavailable coverage in Xret; no exchange-specific fill or scan exception was added. Accordingly, the OKX and Bybit claims below are coverage-qualified for the exercised endpoint families and representative timeframe/symbol sample, with the documented historical boundary caveat rather than an unexplained failure.
+
 ### Binance
 
 | Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |

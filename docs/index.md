@@ -21,7 +21,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - **Reference** defines exact API, configuration, schema, and error contracts.
 - **Explanation** describes concepts, architecture, and design rationale.
 - **Quality** records durable public trust criteria and verified combinations.
-- **Development** documents current contributor, documentation, and [release](development/releasing.md) policy.
+- **Development** documents current contributor, documentation, [CCXT qualification](development/ccxt-qualification.md), and [release](development/releasing.md) policy.
 
 The [roadmap](roadmap.md) is directional. It does not define current behavior or promise release dates; released source, tests, and reference documentation remain the contract.
 
