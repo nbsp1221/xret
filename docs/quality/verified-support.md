@@ -38,7 +38,7 @@ Representative symbols exercise shared adapter behavior. Verification does not m
 This matrix is a public trust statement, not a runtime allowlist. Provider adapters do not reject an otherwise valid venue merely because it is absent here. Conversely, successfully fetching a provider's market definitions, an `active=True` value, or an advertised timeframe does not prove that Xret can exhaustively acquire historical bars for that combination. Market-definition availability, historical-bar operability, and verified support remain separate facts.
 
 ## Currently verified
-The currently listed matrix was requalified on 2026-08-01 using the built `xret-data` 0.1.0 distribution in a fresh external uv environment, with `ccxt` 4.5.70 and `polars` 1.43.1 resolved by that environment, after the canonical volume-finiteness change. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
+The currently listed matrix combines the earlier long-range qualifications with the 2026-08-23 qualification gate for the newly added CCXT endpoint families. The new gate used the built `xret-data` 0.4.0 distribution in a fresh external uv environment with CCXT 4.5.75, and exercised representative spot/perpetual markets over recent, seven-day, and one-year ranges, including fetch, sync, strict scan, idempotent sync, partial scan, and catalog validation/rebuild. Each qualification records the provider dependency version it exercised, because a provider release can change endpoint behavior without any Xret change.
 
 ### Binance
 
@@ -64,6 +64,41 @@ Bybit spot and perpetual `1h` qualification covers complete four-year synchroniz
 | CCXT | OKX market candles | Spot | Time bars | `1h` | `BTC/USDT` |
 
 OKX spot `1h` qualification covers complete four-year synchronization across monthly partitions, incremental extension, exact and concurrent canonical-data no-op synchronization, strict/partial read equivalence, bar invariants, validation, and file-derived catalog/strict-read equivalence after rebuild. OKX perpetual combinations remain unlisted pending equivalent re-verification.
+
+### Gate
+
+| Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
+|---|---|---|---|---|---|
+| CCXT | Gate spot OHLCV | Spot | Time bars | `1h` | `BTC/USDT` |
+| CCXT | Gate perpetual OHLCV | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
+
+Gate spot and perpetual `1h` passed the 2026-08-23 qualification gate over recent, seven-day, and one-year ranges, including canonical sync, strict reads, idempotent synchronization, partial reads, and catalog validation/rebuild.
+
+### HashKey
+
+| Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
+|---|---|---|---|---|---|
+| CCXT | HashKey spot OHLCV | Spot | Time bars | `1h` | `BTC/USDT` |
+| CCXT | HashKey perpetual OHLCV | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
+
+HashKey spot and perpetual `1h` passed the 2026-08-23 qualification gate over recent, seven-day, and one-year ranges, including canonical sync, strict reads, idempotent synchronization, partial reads, and catalog validation/rebuild.
+
+### WOO
+
+| Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
+|---|---|---|---|---|---|
+| CCXT | WOO spot OHLCV | Spot | Time bars | `1h` | `BTC/USDT` |
+| CCXT | WOO perpetual OHLCV | USDT-settled linear perpetual | Time bars | `1h` | `BTC/USDT` |
+
+WOO spot and perpetual `1h` passed the 2026-08-23 qualification gate over recent, seven-day, and one-year ranges, including canonical sync, strict reads, idempotent synchronization, partial reads, and catalog validation/rebuild.
+
+### Bitrue
+
+| Provider | Endpoint family | Market family | Bar type | Timeframes | Representative symbols |
+|---|---|---|---|---|---|
+| CCXT | Bitrue spot OHLCV | Spot | Time bars | `1h` | `BTC/USDT` |
+
+Bitrue spot `1h` passed the 2026-08-23 qualification gate over recent, seven-day, and one-year ranges, including canonical sync, strict reads, idempotent synchronization, partial reads, and catalog validation/rebuild. No perpetual market was selected by the gate, so this claim does not cover Bitrue perpetuals.
 
 A rebuild restores Parquet-provable datasets, files, and available coverage; it intentionally does not restore unavailable observations, ingestion runs, warnings, or quality events.
 

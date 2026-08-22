@@ -46,6 +46,10 @@ _PROFILES: Final[dict[str, _PaginationProfile]] = {
     "binanceusdm": _PaginationProfile(max_bars=1000),
     "bybit": _PaginationProfile(max_bars=1000),
     "okx": _PaginationProfile(max_bars=100),
+    "gate": _PaginationProfile(max_bars=1000),
+    "hashkey": _PaginationProfile(max_bars=1000),
+    "woo": _PaginationProfile(max_bars=1000),
+    "bitrue": _PaginationProfile(max_bars=1000),
 }
 
 
