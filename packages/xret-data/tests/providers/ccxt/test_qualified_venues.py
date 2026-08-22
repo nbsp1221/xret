@@ -23,6 +23,7 @@ from xret.data.errors import InvalidRequestError
 from xret.data.models import Market, MarketIdentity
 from xret.data.providers.ccxt.markets import supported_timeframes
 from xret.data.providers.ccxt.pagination import _PROFILES
+from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import ResolvedBarMarket
 from xret.data.timeframe import TimeBar
 
@@ -84,7 +85,10 @@ def test_supported_timeframes_only_removes_advertised_entries(client_id: str) ->
     accepted = supported_timeframes(exchange)
 
     assert accepted <= advertised
-    assert accepted == frozenset(key for key in advertised if _is_canonical(key))
+    assert accepted == canonical_timeframes(
+        client_id,
+        {key for key in advertised if _is_canonical(key)},
+    )
 
 
 def test_installed_ccxt_still_advertises_bar_types_xret_cannot_express() -> None:

@@ -20,32 +20,48 @@ import tempfile
 import threading
 import time
 import traceback
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 VENUES = (
     "binance",
+    "coinbase",
     "okx",
     "bybit",
-    "gate",
-    "hashkey",
-    "woo",
-    "bitrue",
-    "coinbase",
     "bitget",
+    "gate",
     "mexc",
+    "kucoin",
+    "kraken",
+    "htx",
+    "upbit",
     "bingx",
+    "cryptocom",
     "bitfinex",
+    "bitstamp",
+    "bithumb",
+    "lbank",
+    "hashkey",
     "toobit",
-    "hyperliquid",
-    "extended",
+    "bitso",
     "bitvavo",
+    "phemex",
+    "woo",
     "xt",
+    "bitrue",
+    "btcturk",
     "deribit",
+    "hyperliquid",
+    "aster",
     "lighter",
     "apex",
+    "extended",
+    "pacifica",
+    "paradex",
+    "dydx",
+    "derive",
 )
 PREFERRED_SYMBOLS = ("BTC/USDT", "BTC/USDC", "ETH/USDT", "ETH/USDC", "SOL/USDT", "SOL/USDC")
 TIMEFRAME_DAYS = {
@@ -88,6 +104,9 @@ class RequestMetrics:
     fetch_ohlcv_calls: int = 0
     fetch_ohlcv_rows: int = 0
     fetch_ohlcv_seconds: float = 0.0
+    fetch_trades_calls: int = 0
+    fetch_trades_rows: int = 0
+    fetch_trades_seconds: float = 0.0
 
 
 _STATISTICAL_OFFSETS_DAYS = (0, 7, 45, 180, 540, 1000)
@@ -173,7 +192,7 @@ def plan_cases(
         stratum: str,
         kind: str,
         lifecycle: str = "standard",
-    ) -> None:
+    ) -> bool:
         identity = definition.identity
         key = (identity.market.value, identity.symbol, timeframe, scenario, kind)
         if key not in seen:
@@ -193,6 +212,8 @@ def plan_cases(
                     lifecycle,
                 )
             )
+            return True
+        return False
 
     for (_market, timeframe), definition in sorted(
         all_by_market_timeframe.items(),
@@ -356,7 +377,7 @@ def plan_cases(
         if statistical_count >= target_samples:
             break
         symbol_class = _symbol_stratum(definition.identity.symbol, preferred)
-        add(
+        added = add(
             definition,
             timeframe,
             f"sample-o{offset}-b{bars}",
@@ -366,7 +387,7 @@ def plan_cases(
             f"{symbol_class}:offset-{offset}",
             "statistical",
         )
-        statistical_count += 1
+        statistical_count += int(added)
     if statistical_count != target_samples:
         raise ValueError(
             f"statistical sample universe has {statistical_count} unique cases, "
@@ -418,6 +439,221 @@ def _frame_rows(frame: Any) -> list[tuple[Any, ...]]:
         tuple(row)
         for row in frame.select(["timestamp", "open", "high", "low", "close", "volume"]).iter_rows()
     ]
+
+
+def _trade_base_amount(trade: dict[str, Any], market: dict[str, Any]) -> float:
+    amount = float(trade["amount"])
+    if not market.get("contract"):
+        return amount
+    price = float(trade["price"])
+    contract_size = float(market["contractSize"])
+    if market.get("inverse"):
+        return amount * contract_size / price
+    cost = trade.get("cost")
+    if cost is not None and price:
+        # CCXT adapters differ on whether derivative trade `amount` is already
+        # base quantity or remains contract count. Unified `cost` is quote
+        # notional, so cost / price is the representation-independent oracle.
+        return float(cost) / price
+    return amount * contract_size
+
+
+def _aggregate_trades(trades: list[dict[str, Any]], market: dict[str, Any]) -> list[float]:
+    ordered = sorted(trades, key=lambda trade: (int(trade["timestamp"]), str(trade.get("id", ""))))
+    prices = [float(trade["price"]) for trade in ordered]
+    return [
+        prices[0],
+        max(prices),
+        min(prices),
+        prices[-1],
+        sum(_trade_base_amount(trade, market) for trade in ordered),
+    ]
+
+
+def _semantic_field_matches(
+    actual: list[float], trades: list[dict[str, Any]], market: dict[str, Any]
+) -> dict[str, bool]:
+    timestamps = [int(trade["timestamp"]) for trade in trades]
+    first_timestamp = min(timestamps)
+    last_timestamp = max(timestamps)
+    first_prices = [
+        float(trade["price"]) for trade in trades if int(trade["timestamp"]) == first_timestamp
+    ]
+    last_prices = [
+        float(trade["price"]) for trade in trades if int(trade["timestamp"]) == last_timestamp
+    ]
+    expected = _aggregate_trades(trades, market)
+    precision = market.get("precision")
+    raw_tick = precision.get("price") if isinstance(precision, dict) else None
+    tick = (
+        float(raw_tick) * 1.000001 if isinstance(raw_tick, int | float) and raw_tick > 0 else 1e-12
+    )
+    return {
+        # Millisecond timestamps lose execution order among trades sharing a
+        # boundary millisecond. Membership is the strongest lossless check.
+        "open": any(
+            _numbers_close(actual[0], price, relative=1e-9, absolute=tick) for price in first_prices
+        ),
+        "high": _numbers_close(actual[1], expected[1], relative=1e-9, absolute=tick),
+        "low": _numbers_close(actual[2], expected[2], relative=1e-9, absolute=tick),
+        "close": any(
+            _numbers_close(actual[3], price, relative=1e-9, absolute=tick) for price in last_prices
+        ),
+        # Official derivative candle endpoints sometimes round base volume
+        # below the public trade feed's precision. This still rejects unit
+        # confusion by orders of magnitude.
+        "volume": _numbers_close(actual[4], expected[4], relative=0.001, absolute=1e-12),
+    }
+
+
+def _complete_trade_buckets(
+    trades: list[dict[str, Any]], *, step_ms: int
+) -> list[tuple[int, list[dict[str, Any]]]]:
+    valid = [
+        trade
+        for trade in trades
+        if trade.get("timestamp") is not None
+        and trade.get("price") is not None
+        and trade.get("amount") is not None
+    ]
+    if not valid:
+        return []
+    earliest = min(int(trade["timestamp"]) for trade in valid)
+    latest = max(int(trade["timestamp"]) for trade in valid)
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for trade in valid:
+        timestamp = int(trade["timestamp"])
+        bucket = timestamp - timestamp % step_ms
+        grouped.setdefault(bucket, []).append(trade)
+    return sorted(
+        (
+            (bucket, values)
+            for bucket, values in grouped.items()
+            if earliest < bucket and latest >= bucket + step_ms
+        ),
+        reverse=True,
+    )
+
+
+def _numbers_close(left: float, right: float, *, relative: float, absolute: float) -> bool:
+    return math.isclose(left, right, rel_tol=relative, abs_tol=absolute)
+
+
+def _semantic_probe(
+    exchange_id: str,
+    definitions: dict[str, tuple[Any, ...]],
+    factory: Any,
+    *,
+    symbol_limit: int,
+) -> dict[str, Any]:
+    """Cross-check venue candles against a complete public-trade minute.
+
+    The first and last minute represented in a bounded trade response are
+    excluded because either may be truncated by the endpoint's row limit or
+    by the request time. A successful middle minute independently proves the
+    candle's trade-price OHLC and base-asset volume semantics.
+    """
+    from xret.data.models import Market
+    from xret.data.providers.ccxt import markets, pagination, semantics
+
+    results: dict[str, Any] = {}
+    for market_name, market_family in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL)):
+        available = definitions.get(market_name, ())
+        if not available:
+            continue
+        client_id = markets.scoped_client_id(exchange_id, market_family)
+        exchange = factory(client_id)
+        if not exchange.has.get("fetchTrades"):
+            results[market_name] = {
+                "status": "unresolved",
+                "reason": f"{client_id} does not provide fetchTrades",
+            }
+            continue
+        try:
+            exchange.load_markets()
+            attempted: list[dict[str, Any]] = []
+            candidates = choose_symbols(available, symbol_limit, PREFERRED_SYMBOLS)
+            candidates.sort(
+                key=lambda definition: (
+                    definition.derivative is not None and not definition.derivative.linear
+                )
+            )
+            first_failure: dict[str, Any] | None = None
+            for definition in candidates:
+                native = markets.resolve(definition.identity, exchange)
+                native_market = exchange.market(native.native_symbol)
+                trades = exchange.fetch_trades(native.native_symbol, None, 1000)
+                buckets = _complete_trade_buckets(trades, step_ms=60_000)
+                attempted.append(
+                    {
+                        "symbol": definition.identity.symbol,
+                        "settle": definition.identity.settle,
+                        "returned_trades": len(trades),
+                        "complete_trade_minutes": len(buckets),
+                    }
+                )
+                for start_ms, bucket_trades in buckets[:3]:
+                    profile = pagination._PROFILES[client_id]
+                    until_ms = start_ms + 60_000 - (1 if profile.until_inclusive else 0)
+                    candles = exchange.fetch_ohlcv(
+                        native.native_symbol,
+                        "1m",
+                        start_ms,
+                        2,
+                        {"until": until_ms},
+                    )
+                    matching = [row for row in candles if int(row[0]) == start_ms]
+                    if len(matching) != 1:
+                        continue
+                    normalized = semantics.normalize_ohlcv(
+                        client_id,
+                        native_market,
+                        (tuple(float(value) for value in matching[0]),),
+                    )[0]
+                    expected = _aggregate_trades(bucket_trades, native_market)
+                    actual = [float(value) for value in normalized[1:6]]
+                    matches = _semantic_field_matches(actual, bucket_trades, native_market)
+                    evidence = {
+                        "status": "pass" if all(matches.values()) else "fail",
+                        "client_id": client_id,
+                        "symbol": definition.identity.symbol,
+                        "native_symbol": native.native_symbol,
+                        "settle": definition.identity.settle,
+                        "minute": datetime.fromtimestamp(start_ms / 1000, tz=UTC).isoformat(),
+                        "trades": len(bucket_trades),
+                        "actual_ohlcv": actual,
+                        "trade_aggregate_ohlcv": expected,
+                        "field_matches": matches,
+                        "attempted": attempted,
+                    }
+                    if evidence["status"] == "pass":
+                        results[market_name] = evidence
+                        break
+                    if first_failure is None:
+                        first_failure = evidence
+                if results.get(market_name, {}).get("status") == "pass":
+                    break
+            else:
+                if first_failure is not None:
+                    first_failure["failed_probe_minutes"] = sum(
+                        min(3, item["complete_trade_minutes"]) for item in attempted
+                    )
+                    results[market_name] = first_failure
+                else:
+                    results[market_name] = {
+                        "status": "unresolved",
+                        "reason": (
+                            "no complete public-trade minute was available within the probe limit"
+                        ),
+                        "attempted": attempted,
+                    }
+        except Exception as exc:  # noqa: BLE001 - semantic evidence keeps attribution
+            results[market_name] = {
+                "status": "unresolved",
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+    return results
 
 
 def _assert_frame_invariants(frame: Any, *, timeframe: str, start: datetime, end: datetime) -> None:
@@ -514,6 +750,54 @@ def _assert_complete_lifecycle(
     return scanned.height, no_op.fetched_rows
 
 
+def _assert_partial_lifecycle(
+    bars: Any,
+    *,
+    fetched: Any,
+    start: datetime,
+    end: datetime,
+    timeframe: str,
+) -> tuple[int, list[str]]:
+    """Prove that genuine provider omissions remain explicit Xret gaps."""
+    from xret.data.errors import CoverageError
+
+    partial = bars.scan_partial(start, end)
+    if partial.is_complete or not partial.gaps:
+        raise AssertionError("incomplete synchronization did not report explicit gaps")
+    partial_frame = partial.data.collect()
+    _assert_frame_invariants(partial_frame, timeframe=timeframe, start=start, end=end)
+    if partial_frame.shape != fetched.shape or not partial_frame.equals(fetched):
+        raise AssertionError("partial scan does not preserve the provider rows that were available")
+    try:
+        bars.scan(start, end).collect()
+    except CoverageError:
+        pass
+    else:
+        raise AssertionError("strict scan accepted incomplete provider coverage")
+    return partial_frame.height, [str(gap) for gap in partial.gaps]
+
+
+def _assert_explicit_incomplete_coverage(
+    bars: Any,
+    *,
+    start: datetime,
+    end: datetime,
+    timeframe: str,
+) -> None:
+    """Require partial visibility and strict rejection for a native omission."""
+    from xret.data.errors import CoverageError
+
+    partial = bars.scan_partial(start, end)
+    if partial.is_complete or not partial.gaps:
+        raise AssertionError("incomplete synchronization did not report explicit gaps")
+    _assert_frame_invariants(partial.data.collect(), timeframe=timeframe, start=start, end=end)
+    try:
+        bars.scan(start, end).collect()
+    except CoverageError:
+        return
+    raise AssertionError("strict scan accepted incomplete provider coverage")
+
+
 def _run_incremental_case(
     market_data: Any,
     bars: Any,
@@ -541,7 +825,13 @@ def _run_incremental_case(
             }
         )
         if not sync.is_complete:
-            return {"status": "coverage_review", "phases": phase_results}
+            _assert_explicit_incomplete_coverage(
+                bars,
+                start=phase_start,
+                end=phase_end,
+                timeframe=case.timeframe,
+            )
+            return {"status": "pass_expected_unavailability", "phases": phase_results}
     scan_rows, _ = _assert_complete_lifecycle(
         market_data, bars, start=start, end=end, timeframe=case.timeframe
     )
@@ -558,8 +848,14 @@ def _run_concurrent_case(
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         syncs = list(pool.map(lambda _index: bars.sync(start, end), range(2)))
     if any(not sync.is_complete for sync in syncs):
+        _assert_explicit_incomplete_coverage(
+            bars,
+            start=start,
+            end=end,
+            timeframe=case.timeframe,
+        )
         return {
-            "status": "coverage_review",
+            "status": "pass_expected_unavailability",
             "syncs": [
                 {
                     "changed": sync.changed,
@@ -620,8 +916,21 @@ def _run_case(
             "fetched_rows": sync.fetched_rows,
         }
         if not sync.is_complete:
-            partial = bars.scan_partial(start, end)
-            result.update({"status": "coverage_review", "partial_complete": partial.is_complete})
+            partial_rows, gaps = _assert_partial_lifecycle(
+                bars,
+                fetched=fetched,
+                start=start,
+                end=end,
+                timeframe=case.timeframe,
+            )
+            result.update(
+                {
+                    "status": "pass_expected_unavailability",
+                    "fetch_rows": fetched.height,
+                    "partial_rows": partial_rows,
+                    "reported_gaps": gaps,
+                }
+            )
             return result
         scan_rows, _ = _assert_complete_lifecycle(
             market_data, bars, start=start, end=end, timeframe=case.timeframe
@@ -644,7 +953,49 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
     from xret.data.providers import Market
     from xret.data.providers.ccxt import CcxtProvider
     from xret.data.providers.ccxt.markets import scoped_client_id
-    from xret.data.providers.ccxt.pagination import _PROFILES
+    from xret.data.providers.ccxt.pagination import _PROFILES, _PaginationProfile
+
+    # Qualification must exercise an unapproved endpoint rather than confuse
+    # the production allowlist with a venue failure. A small profile is
+    # installed only in this short-lived process. The bounded-window and
+    # pagination edge cases below decide whether that assumption is valid;
+    # production remains fail-closed until the resulting endpoint family is
+    # promoted deliberately.
+    market_pairs = tuple(
+        (name, market)
+        for name, market in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL))
+        if not args.market or name in args.market
+    )
+    qualification_scopes = {
+        (scoped_client_id(exchange_id, market), name) for name, market in market_pairs
+    }
+    assumed_profiles = sorted(
+        f"{client_id}/{family}"
+        for client_id, family in qualification_scopes
+        if client_id not in _PROFILES or family not in _PROFILES[client_id].market_families
+    )
+    for client_id in {client_id for client_id, _ in qualification_scopes}:
+        requested_families = frozenset(
+            family for scoped_id, family in qualification_scopes if scoped_id == client_id
+        )
+        existing = _PROFILES.get(client_id)
+        if existing is not None and requested_families <= existing.market_families:
+            continue
+        qualification_max_spans = {
+            "bitget": timedelta(days=90),
+        }
+        if existing is None:
+            _PROFILES[client_id] = _PaginationProfile(
+                max_bars=args.qualification_page_bars,
+                max_span=qualification_max_spans.get(client_id),
+                until_inclusive=client_id != "bitvavo",
+                market_families=requested_families,
+            )
+        else:
+            _PROFILES[client_id] = replace(
+                existing,
+                market_families=existing.market_families | requested_families,
+            )
 
     metrics = RequestMetrics()
     metrics_lock = threading.Lock()
@@ -652,6 +1003,7 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
     def instrument(exchange: Any) -> Any:
         original_load_markets = exchange.load_markets
         original_fetch_ohlcv = exchange.fetch_ohlcv
+        original_fetch_trades = exchange.fetch_trades
 
         def load_markets(*call_args: Any, **call_kwargs: Any) -> Any:
             with metrics_lock:
@@ -671,8 +1023,22 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
                 metrics.fetch_ohlcv_rows += len(rows)
             return rows
 
+        def fetch_trades(*call_args: Any, **call_kwargs: Any) -> Any:
+            started = time.perf_counter()
+            try:
+                rows = original_fetch_trades(*call_args, **call_kwargs)
+            finally:
+                elapsed = time.perf_counter() - started
+                with metrics_lock:
+                    metrics.fetch_trades_calls += 1
+                    metrics.fetch_trades_seconds += elapsed
+            with metrics_lock:
+                metrics.fetch_trades_rows += len(rows)
+            return rows
+
         exchange.load_markets = load_markets
         exchange.fetch_ohlcv = fetch_ohlcv
+        exchange.fetch_trades = fetch_trades
         return exchange
 
     def factory(client_id: str) -> Any:
@@ -690,13 +1056,14 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         "exchange": exchange_id,
         "ccxt": ccxt.__version__,
         "status": "error",
+        "qualification_only_profiles": assumed_profiles,
         "cases": [],
     }
     exchange_started = datetime.now(UTC)
     try:
         definitions: dict[str, tuple[Any, ...]] = {}
         errors: dict[str, str] = {}
-        for name, market in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL)):
+        for name, market in market_pairs:
             try:
                 definitions[name] = provider.fetch_markets(exchange=exchange_id, market=market)
             except Exception as exc:  # noqa: BLE001 - persisted evidence
@@ -705,11 +1072,9 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         result["market_errors"] = errors
         profile_limits = [
             _PROFILES[client_id].max_bars
-            for market in (Market.SPOT, Market.PERPETUAL)
+            for _, market in market_pairs
             if (client_id := scoped_client_id(exchange_id, market)) in _PROFILES
         ]
-        if not profile_limits:
-            raise ValueError(f"{exchange_id} has no qualified pagination profile")
         page_bars = min(args.page_limit, min(profile_limits))
         cases = plan_cases(
             definitions,
@@ -731,23 +1096,73 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         if args.plan_only:
             result["status"] = "planned"
         else:
-            state_root = Path(
-                tempfile.mkdtemp(prefix=f"xret-qualification-{exchange_id}-", dir=args.temp_root)
+            result["semantic_evidence"] = _semantic_probe(
+                exchange_id,
+                definitions,
+                factory,
+                symbol_limit=args.semantic_symbols,
             )
-            try:
-                now = datetime.now(UTC)
-                for case in cases:
-                    result["cases"].append(
-                        _run_case(exchange_id, provider, case, state_root, now, page_bars)
+            if args.semantic_only:
+                expected_markets = {name for name, values in definitions.items() if values}
+                semantic_markets = {
+                    name
+                    for name, evidence in result["semantic_evidence"].items()
+                    if evidence["status"] == "pass"
+                }
+                result["semantically_verified_markets"] = sorted(semantic_markets)
+                result["status"] = (
+                    "semantic_pass"
+                    if expected_markets and expected_markets <= semantic_markets
+                    else "candidate"
+                )
+            else:
+                state_root = Path(
+                    tempfile.mkdtemp(
+                        prefix=f"xret-qualification-{exchange_id}-", dir=args.temp_root
                     )
-            finally:
-                if not args.keep_state:
-                    shutil.rmtree(state_root, ignore_errors=True)
-            result["status"] = (
-                "pass"
-                if result["cases"] and all(case["status"] == "pass" for case in result["cases"])
-                else "candidate"
-            )
+                )
+                try:
+                    now = datetime.now(UTC)
+                    for case in cases:
+                        case_result = _run_case(
+                            exchange_id, provider, case, state_root, now, page_bars
+                        )
+                        result["cases"].append(case_result)
+                        if (
+                            sum(item["status"] == "fail" for item in result["cases"])
+                            >= args.max_failures
+                        ):
+                            result["early_stop"] = {
+                                "reason": "maximum failure evidence reached",
+                                "max_failures": args.max_failures,
+                                "remaining_cases": len(cases) - len(result["cases"]),
+                            }
+                            break
+                finally:
+                    if not args.keep_state:
+                        shutil.rmtree(state_root, ignore_errors=True)
+                accepted_statuses = {"pass", "pass_expected_unavailability"}
+                witnessed_markets = {
+                    case["plan"]["market"]
+                    for case in result["cases"]
+                    if case.get("fetch_rows", case.get("scan_rows", 0)) > 0
+                }
+                expected_markets = {name for name, values in definitions.items() if values}
+                semantic_markets = {
+                    name
+                    for name, evidence in result["semantic_evidence"].items()
+                    if evidence["status"] == "pass"
+                }
+                result["nonempty_witnessed_markets"] = sorted(witnessed_markets)
+                result["semantically_verified_markets"] = sorted(semantic_markets)
+                result["status"] = (
+                    "pass"
+                    if result["cases"]
+                    and all(case["status"] in accepted_statuses for case in result["cases"])
+                    and expected_markets <= witnessed_markets
+                    and expected_markets <= semantic_markets
+                    else "candidate"
+                )
     except Exception as exc:  # noqa: BLE001 - persisted evidence
         result.update(
             {
@@ -792,6 +1207,18 @@ def main() -> None:
     )
     parser.add_argument("--symbols", type=int, default=6)
     parser.add_argument(
+        "--market",
+        action="append",
+        choices=("spot", "perpetual"),
+        help="Qualify only the selected market family; repeat to select both.",
+    )
+    parser.add_argument(
+        "--semantic-symbols",
+        type=int,
+        default=20,
+        help="Maximum symbols tried per market family for trade-derived semantic evidence.",
+    )
+    parser.add_argument(
         "--samples",
         type=int,
         help="Statistical cases per exchange; defaults to the configured confidence minimum.",
@@ -801,11 +1228,28 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260823)
     parser.add_argument("--timeout-ms", type=int, default=15000)
     parser.add_argument("--page-limit", type=int, default=1000)
+    parser.add_argument(
+        "--qualification-page-bars",
+        type=int,
+        default=100,
+        help="Conservative temporary page width for endpoint families not yet promoted.",
+    )
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--backoff", type=float, default=0.5)
+    parser.add_argument(
+        "--max-failures",
+        type=int,
+        default=10,
+        help="Stop one venue after this many failed cases; passing venues always run exhaustively.",
+    )
     parser.add_argument("--temp-root", type=Path, default=Path("/tmp"))
     parser.add_argument("--keep-state", action="store_true")
     parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument(
+        "--semantic-only",
+        action="store_true",
+        help="Run only the independent trade-derived OHLCV semantic cross-check.",
+    )
     args = parser.parse_args()
     started_at = datetime.now(UTC)
     try:
@@ -814,9 +1258,17 @@ def main() -> None:
         parser.error(str(exc))
     if args.samples is None:
         args.samples = required_samples
-    if args.workers < 1 or args.symbols < 1 or args.samples < required_samples:
+    if (
+        args.workers < 1
+        or args.symbols < 1
+        or args.semantic_symbols < 1
+        or args.samples < required_samples
+        or args.qualification_page_bars < 1
+        or args.max_failures < 1
+    ):
         parser.error(
-            "workers and symbols must be positive; samples must be at least "
+            "workers, symbols, qualification page bars, and max failures must be positive; "
+            "samples must be at least "
             f"{required_samples} for the configured confidence target"
         )
     args.output.mkdir(parents=True, exist_ok=True)
@@ -829,6 +1281,8 @@ def main() -> None:
         parser.error("unknown CCXT exchange(s): " + ", ".join(sorted(unknown)))
     if args.all_ccxt and requested:
         parser.error("--all-ccxt cannot be combined with --exchange")
+    if args.plan_only and args.semantic_only:
+        parser.error("--plan-only cannot be combined with --semantic-only")
     venues = sorted(known_venues) if args.all_ccxt else (args.exchange or VENUES)
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.workers, len(venues))) as pool:
         rows = list(pool.map(lambda venue: _run_exchange(venue, args.output, args), venues))
@@ -839,17 +1293,35 @@ def main() -> None:
         "configuration": {
             "workers": args.workers,
             "symbols": args.symbols,
+            "markets": args.market or ["spot", "perpetual"],
+            "semantic_symbols": args.semantic_symbols,
             "samples": args.samples,
             "confidence": args.confidence,
             "target_failure_rate": args.target_failure_rate,
             "seed": args.seed,
             "timeout_ms": args.timeout_ms,
             "page_limit": args.page_limit,
+            "qualification_page_bars": args.qualification_page_bars,
             "retries": args.retries,
             "backoff": args.backoff,
+            "max_failures": args.max_failures,
             "plan_only": args.plan_only,
+            "semantic_only": args.semantic_only,
         },
-        "gate": "pass" if rows and all(row["status"] == "pass" for row in rows) else "candidate",
+        "gate": (
+            "not_run"
+            if args.plan_only or args.semantic_only
+            else "pass"
+            if rows and all(row["status"] == "pass" for row in rows)
+            else "candidate"
+        ),
+        "semantic_gate": (
+            "pass"
+            if args.semantic_only and rows and all(row["status"] == "semantic_pass" for row in rows)
+            else "candidate"
+            if args.semantic_only
+            else "included_in_full_gate"
+        ),
         "confidence": {
             "target_failure_rate": args.target_failure_rate,
             "level": args.confidence,
@@ -865,9 +1337,16 @@ def main() -> None:
             "fetch_ohlcv_seconds": sum(
                 row["request_metrics"]["fetch_ohlcv_seconds"] for row in rows
             ),
+            "fetch_trades_calls": sum(row["request_metrics"]["fetch_trades_calls"] for row in rows),
+            "fetch_trades_rows": sum(row["request_metrics"]["fetch_trades_rows"] for row in rows),
+            "fetch_trades_seconds": sum(
+                row["request_metrics"]["fetch_trades_seconds"] for row in rows
+            ),
         },
         "venues": len(rows),
+        "planned": [row["exchange"] for row in rows if row["status"] == "planned"],
         "passed": [row["exchange"] for row in rows if row["status"] == "pass"],
+        "semantic_passed": [row["exchange"] for row in rows if row["status"] == "semantic_pass"],
         "candidates": [row["exchange"] for row in rows if row["status"] == "candidate"],
         "failed": [row["exchange"] for row in rows if row["status"] == "error"],
     }

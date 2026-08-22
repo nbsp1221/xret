@@ -19,7 +19,7 @@ from xret.data.market_data import MarketData
 from xret.data.models import BarRequest, MarketIdentity
 from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
 from xret.data.providers import runtime as provider_runtime
-from xret.data.providers.ccxt import CcxtProvider, markets
+from xret.data.providers.ccxt import CcxtProvider, markets, pagination
 from xret.data.providers.ccxt import provider as ccxt_provider
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_COLUMNS
@@ -230,6 +230,43 @@ def test_perpetual_client_id_defaults_to_slug_when_unmapped() -> None:
 
 def test_spot_client_id_is_always_the_slug() -> None:
     assert markets.client_id(_spot_identity()) == "binance"
+
+
+def test_provider_pools_client_but_preserves_independent_dataset_locks() -> None:
+    exchange = FakeExchange(
+        markets={
+            **_default_markets(),
+            "ETH/USDT": {
+                "id": "ETHUSDT",
+                "symbol": "ETH/USDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "spot": True,
+            },
+        }
+    )
+    creations = 0
+
+    def factory(_client_id: str) -> FakeExchange:
+        nonlocal creations
+        creations += 1
+        return exchange
+
+    provider = CcxtProvider(
+        exchange_factory=factory,
+        version_provider=lambda: "4.5.0",
+        tick_size_precision_mode_provider=lambda: 4,
+    )
+    first = provider.resolve_market(_spot_identity())
+    second = provider.resolve_market(
+        MarketIdentity(exchange="binance", symbol="ETH/USDT", market="spot")
+    )
+
+    assert creations == 1
+    first_resolution = provider._resolutions_by_market[ccxt_provider._market_key(first)]
+    second_resolution = provider._resolutions_by_market[ccxt_provider._market_key(second)]
+    assert first_resolution.exchange is second_resolution.exchange
+    assert first_resolution.observation_lock is not second_resolution.observation_lock
 
 
 # --------------------------------------------------------------------------
@@ -1226,6 +1263,66 @@ def test_coinbase_effective_limit_does_not_skip_a_later_window() -> None:
     assert [call[3] for call in exchange.fetch_calls] == [300, 300]
 
 
+def test_endpoint_maximum_time_span_splits_pages_below_the_bar_limit(monkeypatch) -> None:
+    minute = 60_000
+    exchange = FakeExchange(candles=[_row(index * minute) for index in range(5)])
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        pagination._PROFILES,
+        "binance",
+        pagination._PaginationProfile(max_bars=100, max_span=timedelta(minutes=2)),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+    )
+
+    assert frame.height == 5
+    assert [call[2:] for call in exchange.fetch_calls] == [
+        (_BASE_MS, 100),
+        (_BASE_MS + 2 * minute, 100),
+        (_BASE_MS + 4 * minute, 100),
+    ]
+
+
+def test_exclusive_until_endpoint_receives_the_half_open_end(monkeypatch) -> None:
+    minute = 60_000
+    received_params: list[dict] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        _since: int,
+        _limit: int,
+        params: dict,
+    ) -> list[list[float]]:
+        received_params.append(params)
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        pagination._PROFILES,
+        "binance",
+        pagination._PaginationProfile(max_bars=100, until_inclusive=False),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received_params == [{"until": _BASE_MS + minute}]
+
+
 def test_unqualified_exchange_pagination_fails_closed() -> None:
     identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
     exchange = FakeExchange(client_id="kraken")
@@ -1238,6 +1335,13 @@ def test_unqualified_exchange_pagination_fails_closed() -> None:
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
         )
+
+
+def test_qualified_profile_can_be_restricted_to_one_market_family() -> None:
+    assert pagination._profile("bitrue", "spot").market_families == frozenset({"spot"})
+
+    with pytest.raises(UnsupportedMarketError, match="bitrue/perpetual"):
+        pagination._profile("bitrue", "perpetual")
 
 
 # --------------------------------------------------------------------------

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import BarRequest, Market, MarketIdentity
-from xret.data.providers.ccxt import client, markets, pagination
+from xret.data.providers.ccxt import client, markets, pagination, semantics
 from xret.data.providers.ccxt.live import (
     CcxtLiveBarSession,
     LiveExchangeFactory,
@@ -71,11 +71,20 @@ class CcxtProvider:
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
         self._resolution_lock = threading.RLock()
+        self._clients_by_id: dict[str, client.CCXTExchange] = {}
         self._resolutions_by_request: dict[MarketIdentity, _Resolution] = {}
         self._resolutions_by_market: dict[
             tuple[MarketIdentity, str, str],
             _Resolution,
         ] = {}
+
+    def _client(self, client_id: str) -> client.CCXTExchange:
+        with self._resolution_lock:
+            exchange = self._clients_by_id.get(client_id)
+            if exchange is None:
+                exchange = self._exchange_factory(client_id)
+                self._clients_by_id[client_id] = exchange
+            return exchange
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -93,7 +102,7 @@ class CcxtProvider:
 
             native_client_id = markets.client_id(identity)
             try:
-                exchange = self._exchange_factory(native_client_id)
+                exchange = self._client(native_client_id)
                 native_market = markets.resolve(identity, exchange)
             except (ProviderError, UnsupportedMarketError):
                 raise
@@ -111,7 +120,11 @@ class CcxtProvider:
                 identity=resolved_identity,
                 native_market_id=native_market.native_market_id,
                 native_symbol=native_market.native_symbol,
-                timeframes=markets.supported_timeframes(exchange),
+                timeframes=semantics.canonical_timeframes(
+                    native_client_id,
+                    set(markets.supported_timeframes(exchange)),
+                    native_market.metadata,
+                ),
                 derivative=(
                     markets.derivative_interpretation(native_market)
                     if identity.market is Market.PERPETUAL
@@ -140,14 +153,20 @@ class CcxtProvider:
     ) -> tuple[MarketDefinition, ...]:
         native_client_id = markets.scoped_client_id(exchange, market)
         try:
-            ccxt_exchange = self._exchange_factory(native_client_id)
+            ccxt_exchange = self._client(native_client_id)
             native_markets = ccxt_exchange.load_markets()
             if not isinstance(native_markets, dict):
                 raise ProviderError("CCXT load_markets() must return a dict")
+            compatible_markets = {
+                symbol: metadata
+                for symbol, metadata in native_markets.items()
+                if not isinstance(metadata, dict)
+                or semantics.supports_canonical_volume(native_client_id, metadata)
+            }
             return markets.market_definitions(
                 canonical_exchange=exchange,
                 market_family=market,
-                native_markets=native_markets,
+                native_markets=compatible_markets,
                 exchange=ccxt_exchange,
                 tick_size_precision_mode=self._tick_size_precision_mode_provider(),
             )
@@ -188,6 +207,7 @@ class CcxtProvider:
             )
             result = pagination.paginate_ohlcv(
                 client_id=resolution.client_id,
+                market_family=market.identity.market.value,
                 exchange_id=resolution.exchange.id,
                 native_symbol=resolution.native_market.native_symbol,
                 time_bar=TimeBar.parse(request.timeframe),
@@ -204,8 +224,13 @@ class CcxtProvider:
                     retry,
                 ),
             )
+        normalized_rows = semantics.normalize_ohlcv(
+            resolution.client_id,
+            resolution.native_market.metadata,
+            result.rows,
+        )
         return BarObservation(
-            frame=_provider_frame(result.rows),
+            frame=_provider_frame(normalized_rows),
             observed=result.observed,
         )
 
