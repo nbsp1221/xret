@@ -44,6 +44,17 @@ uv run python tools/ccxt_qualification_gate.py \
 
 Multiple exchanges can be supplied by repeating `--exchange`; the default four workers run exchanges in parallel and cases within each exchange serially. `summary.json` reports `pass`, `candidate`, or `error`. `candidate` means coverage or another reviewable result remains; it is not an approval.
 
+To run the same gate over every client exposed by the installed CCXT version, use `--all-ccxt`. This is a campaign-scale operation and should be run with an operator-selected output directory and conservative worker count:
+
+```bash
+uv run python tools/ccxt_qualification_gate.py \
+  --all-ccxt \
+  --output /tmp/xret-qualification/all-$(date -u +%Y%m%dT%H%M%SZ) \
+  --workers 8
+```
+
+The all-client mode is an evidence campaign, not a blanket approval. Clients without a qualified Xret pagination contract will produce explicit contract failures; clients with a provider capability failure remain separate from those contract failures.
+
 The harness must be run against a built Xret distribution whose CCXT pagination contract is already present. An exchange without a qualified provider pagination profile remains blocked by contract; this tool must not bypass that protection or add native REST fallbacks.
 
 ## Promotion rule

@@ -413,7 +413,16 @@ def main() -> None:
     parser.add_argument(
         "--output", type=Path, required=True, help="Run artifact directory; use /tmp for live runs."
     )
-    parser.add_argument("--exchange", action="append", choices=VENUES)
+    parser.add_argument(
+        "--exchange",
+        action="append",
+        help="CCXT client ID to qualify; repeat for multiple exchanges.",
+    )
+    parser.add_argument(
+        "--all-ccxt",
+        action="store_true",
+        help="Qualify every client ID exposed by the installed CCXT version.",
+    )
     parser.add_argument(
         "--workers",
         type=int,
@@ -440,7 +449,16 @@ def main() -> None:
     if args.workers < 1 or args.symbols < 1 or args.samples < 1:
         parser.error("workers, symbols, and samples must be positive")
     args.output.mkdir(parents=True, exist_ok=True)
-    venues = args.exchange or VENUES
+    import ccxt
+
+    known_venues = set(ccxt.exchanges)
+    requested = set(args.exchange or ())
+    unknown = requested - known_venues
+    if unknown:
+        parser.error("unknown CCXT exchange(s): " + ", ".join(sorted(unknown)))
+    if args.all_ccxt and requested:
+        parser.error("--all-ccxt cannot be combined with --exchange")
+    venues = sorted(known_venues) if args.all_ccxt else (args.exchange or VENUES)
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(args.workers, len(venues))) as pool:
         rows = list(pool.map(lambda venue: _run_exchange(venue, args.output, args), venues))
     summary = {
