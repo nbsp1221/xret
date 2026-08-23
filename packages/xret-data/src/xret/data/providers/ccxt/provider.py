@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import BarRequest, Market, MarketIdentity
-from xret.data.providers.ccxt import client, markets, pagination, semantics
+from xret.data.providers.ccxt import client, compatibility, markets, pagination, semantics
 from xret.data.providers.ccxt.live import (
     CcxtLiveBarSession,
     LiveExchangeFactory,
@@ -40,6 +40,7 @@ class _Resolution:
     market: ResolvedBarMarket
     exchange: client.CCXTExchange
     native_market: markets.CcxtMarket
+    compatibility_policy: compatibility.CompatibilityPolicy
     observation_lock: LockType
 
 
@@ -59,6 +60,7 @@ class CcxtProvider:
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_backoff_base: float = DEFAULT_RETRY_BACKOFF_BASE,
         sleep: Callable[[float], None] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
         tick_size_precision_mode_provider: Callable[[], int] = client.tick_size_precision_mode,
         live_exchange_factory: LiveExchangeFactory = create_live_exchange,
     ) -> None:
@@ -68,10 +70,12 @@ class CcxtProvider:
         self._max_retries = max_retries
         self._retry_backoff_base = retry_backoff_base
         self._sleep = time.sleep if sleep is None else sleep
+        self._monotonic = monotonic
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
+        self._pacers_by_id: dict[str, client.RequestPacer] = {}
         self._resolutions_by_request: dict[MarketIdentity, _Resolution] = {}
         self._resolutions_by_market: dict[
             tuple[MarketIdentity, str, str],
@@ -84,6 +88,13 @@ class CcxtProvider:
             if exchange is None:
                 exchange = self._exchange_factory(client_id)
                 self._clients_by_id[client_id] = exchange
+                self._pacers_by_id[client_id] = client.RequestPacer(
+                    minimum_interval_seconds=compatibility.transport_policy(
+                        client_id
+                    ).minimum_ohlcv_interval_seconds,
+                    monotonic=self._monotonic,
+                    sleep=self._sleep,
+                )
             return exchange
 
     @property
@@ -116,6 +127,10 @@ class CcxtProvider:
                 if native_market.settle is None or identity.settle == native_market.settle
                 else replace(identity, settle=native_market.settle)
             )
+            compatibility_policy = compatibility.compatibility_policy(
+                native_client_id,
+                identity.market.value,
+            )
             market = ResolvedBarMarket(
                 identity=resolved_identity,
                 native_market_id=native_market.native_market_id,
@@ -124,6 +139,7 @@ class CcxtProvider:
                     native_client_id,
                     set(markets.supported_timeframes(exchange)),
                     native_market.metadata,
+                    policy=compatibility_policy,
                 ),
                 derivative=(
                     markets.derivative_interpretation(native_market)
@@ -139,6 +155,7 @@ class CcxtProvider:
                     market=market,
                     exchange=exchange,
                     native_market=native_market,
+                    compatibility_policy=compatibility_policy,
                     observation_lock=threading.Lock(),
                 )
                 self._resolutions_by_market[key] = resolution
@@ -206,8 +223,11 @@ class CcxtProvider:
                 sleep=self._sleep,
             )
             result = pagination.paginate_ohlcv(
-                client_id=resolution.client_id,
-                market_family=market.identity.market.value,
+                profile=compatibility.observation_profile(
+                    resolution.client_id,
+                    market.identity.market.value,
+                    market.identity.settle,
+                ),
                 exchange_id=resolution.exchange.id,
                 native_symbol=resolution.native_market.native_symbol,
                 time_bar=TimeBar.parse(request.timeframe),
@@ -222,12 +242,14 @@ class CcxtProvider:
                     limit,
                     params,
                     retry,
+                    self._pacers_by_id[resolution.client_id],
                 ),
             )
         normalized_rows = semantics.normalize_ohlcv(
             resolution.client_id,
             resolution.native_market.metadata,
             result.rows,
+            policy=resolution.compatibility_policy,
         )
         return BarObservation(
             frame=_provider_frame(normalized_rows),

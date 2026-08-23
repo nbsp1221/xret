@@ -14,9 +14,9 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final
 
-from xret.data.errors import ProviderError, UnsupportedMarketError
+from xret.data.errors import ProviderError
+from xret.data.providers.ccxt.compatibility import ObservationProfile
 from xret.data.providers.contracts import ObservedWindow
 from xret.data.timeframe import TimeBar
 
@@ -32,51 +32,6 @@ class PaginationResult:
     observed: tuple[ObservedWindow, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _PaginationProfile:
-    max_bars: int
-    max_span: timedelta | None = None
-    until_inclusive: bool = True
-    market_families: frozenset[str] = frozenset({"spot", "perpetual"})
-
-
-# Conservative maxima for CCXT endpoint families whose OHLCV adapters accept
-# an explicit ``until`` bound.  These are correctness facts, not performance
-# hints: callers must never build a wider page and assume it was exhaustive.
-_PROFILES: Final[dict[str, _PaginationProfile]] = {
-    "apex": _PaginationProfile(max_bars=100, market_families=frozenset({"perpetual"})),
-    "coinbase": _PaginationProfile(max_bars=300),
-    "binance": _PaginationProfile(max_bars=1000),
-    "binanceusdm": _PaginationProfile(max_bars=1000),
-    "bingx": _PaginationProfile(max_bars=100, market_families=frozenset({"perpetual"})),
-    "bybit": _PaginationProfile(max_bars=1000),
-    "bitget": _PaginationProfile(max_bars=100, max_span=timedelta(days=90)),
-    "okx": _PaginationProfile(max_bars=100),
-    "deribit": _PaginationProfile(max_bars=100),
-    "gate": _PaginationProfile(max_bars=1000),
-    "hashkey": _PaginationProfile(max_bars=1000),
-    "mexc": _PaginationProfile(max_bars=100),
-    "toobit": _PaginationProfile(max_bars=100),
-    "woo": _PaginationProfile(max_bars=1000),
-    "bitrue": _PaginationProfile(max_bars=1000, market_families=frozenset({"spot"})),
-    "bitvavo": _PaginationProfile(
-        max_bars=100,
-        until_inclusive=False,
-        market_families=frozenset({"spot"}),
-    ),
-}
-
-
-def _profile(client_id: str, market_family: str) -> _PaginationProfile:
-    profile = _PROFILES.get(client_id)
-    if profile is None or market_family not in profile.market_families:
-        raise UnsupportedMarketError(
-            f"{client_id}/{market_family} has no qualified exhaustive "
-            "fetchOHLCV pagination contract"
-        )
-    return profile
-
-
 def _epoch_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
 
@@ -87,16 +42,18 @@ def _advance(
     bars: int,
     end: datetime,
     max_span: timedelta | None,
-) -> datetime:
+) -> tuple[datetime, int]:
     cursor = start
+    traversed = 0
     for _ in range(bars):
         next_cursor = time_bar.next_boundary(cursor)
         if max_span is not None and next_cursor - start > max_span:
             break
         cursor = next_cursor
+        traversed += 1
         if cursor >= end:
-            return end
-    return cursor
+            return end, traversed
+    return cursor, traversed
 
 
 def _validate_page(
@@ -106,6 +63,7 @@ def _validate_page(
     exchange_id: str,
     window_start_ms: int,
     window_end_ms: int,
+    accept_end_boundary: bool,
 ) -> None:
     """Reject a page that does not honor the bounded window it answers.
 
@@ -136,7 +94,9 @@ def _validate_page(
             raise ProviderError(
                 f"fetchOHLCV returned non-ascending candles for {native_symbol} on {exchange_id}"
             )
-        if not window_start_ms <= timestamp_ms < window_end_ms:
+        within_window = window_start_ms <= timestamp_ms < window_end_ms
+        is_qualified_end_boundary = accept_end_boundary and timestamp_ms == window_end_ms
+        if not within_window and not is_qualified_end_boundary:
             raise ProviderError(
                 f"fetchOHLCV returned a candle outside the requested window for "
                 f"{native_symbol} on {exchange_id}: "
@@ -160,8 +120,7 @@ def _describe_ms(value: int) -> str:
 
 def paginate_ohlcv(
     *,
-    client_id: str,
-    market_family: str,
+    profile: ObservationProfile,
     exchange_id: str,
     native_symbol: str,
     time_bar: TimeBar,
@@ -178,14 +137,19 @@ def paginate_ohlcv(
     """
     if requested_limit <= 0:
         raise ProviderError(f"page limit must be positive, got {requested_limit!r}")
-    profile = _profile(client_id, market_family)
     effective_limit = min(requested_limit, profile.max_bars)
     cursor = start
     collected: list[tuple[float, ...]] = []
     observed: list[ObservedWindow] = []
 
     while cursor < end:
-        page_end = _advance(time_bar, cursor, effective_limit, end, profile.max_span)
+        page_end, page_bars = _advance(
+            time_bar,
+            cursor,
+            effective_limit,
+            end,
+            profile.max_span,
+        )
         if page_end <= cursor:
             raise ProviderError(
                 f"pagination made no progress for {native_symbol} on {exchange_id}: "
@@ -197,16 +161,21 @@ def paginate_ohlcv(
         # adapters disagree on whether it is inclusive. Translate Xret's
         # half-open page using the qualified endpoint contract so a full page
         # contains at most `effective_limit` candle boundaries.
-        provider_until_ms = end_ms - 1 if profile.until_inclusive else end_ms
-        batch = fetch_page(start_ms, effective_limit, {"until": provider_until_ms})
+        params: dict[str, int] = {}
+        if profile.send_unified_until:
+            params["until"] = end_ms - 1 if profile.until_inclusive else end_ms
+        batch = fetch_page(start_ms, page_bars, params)
         _validate_page(
             batch,
             native_symbol=native_symbol,
             exchange_id=exchange_id,
             window_start_ms=start_ms,
             window_end_ms=end_ms,
+            accept_end_boundary=profile.accept_end_boundary,
         )
-        collected.extend(tuple(float(value) for value in row[:6]) for row in batch)
+        collected.extend(
+            tuple(float(value) for value in row[:6]) for row in batch if int(float(row[0])) < end_ms
+        )
         observed.append(ObservedWindow(cursor, page_end))
         cursor = page_end
 

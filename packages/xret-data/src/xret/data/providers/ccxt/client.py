@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Final, Protocol
 
 from xret.data.errors import ProviderError
@@ -49,6 +51,26 @@ class RetryPolicy:
     max_retries: int
     backoff: Callable[[int], float]
     sleep: Callable[[float], None]
+
+
+@dataclass(slots=True)
+class RequestPacer:
+    """Serialize one client's OHLCV calls at a proven minimum interval."""
+
+    minimum_interval_seconds: float
+    monotonic: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+    _next_request_at: float = field(default=0.0, init=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def wait(self) -> None:
+        with self._lock:
+            now = self.monotonic()
+            scheduled = max(now, self._next_request_at)
+            delay = scheduled - now
+            if delay > 0:
+                self.sleep(delay)
+            self._next_request_at = scheduled + self.minimum_interval_seconds
 
 
 def create_exchange(client_id: str) -> CCXTExchange:
@@ -106,11 +128,13 @@ def fetch_page(
     page_limit: int,
     params: dict[str, int],
     retry: RetryPolicy,
+    pacer: RequestPacer,
 ) -> list[list[float]]:
     """Fetch one native page with bounded transient-error retries."""
     attempt = 0
     while True:
         try:
+            pacer.wait()
             return exchange.fetch_ohlcv(
                 native_symbol,
                 timeframe,

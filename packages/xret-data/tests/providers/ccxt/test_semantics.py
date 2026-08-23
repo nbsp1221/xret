@@ -51,7 +51,7 @@ def test_proven_incompatible_endpoint_timeframes_are_removed_by_scope() -> None:
     advertised = {"1s", "1m", "3d", "1w"}
 
     assert semantics.canonical_timeframes("binance", advertised) == frozenset({"1s", "1m", "1w"})
-    assert semantics.canonical_timeframes("binanceusdm", advertised) == frozenset({"1m", "1w"})
+    assert semantics.canonical_timeframes("binanceusdm", advertised) == frozenset({"1m"})
     assert semantics.canonical_timeframes("okx", advertised) == frozenset(advertised)
     assert semantics.canonical_timeframes("deribit", {"1m", "3h", "6h", "12h", "1d"}) == frozenset(
         {"1m"}

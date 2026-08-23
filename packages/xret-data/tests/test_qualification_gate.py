@@ -6,7 +6,9 @@ import importlib.util
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
 from xret.data.models import MarketIdentity
 
 _SCRIPT = Path(__file__).parents[3] / "tools" / "ccxt_qualification_gate.py"
@@ -22,6 +24,7 @@ class _Definition:
     identity: MarketIdentity
     active: bool
     timeframes: frozenset[str]
+    derivative: object | None = None
 
 
 def _definitions() -> dict[str, tuple[_Definition, ...]]:
@@ -110,6 +113,38 @@ def test_semantic_probe_uses_only_complete_middle_trade_minutes() -> None:
     assert gate._complete_trade_buckets(trades, step_ms=60_000) == [(60_000, trades[1:3])]
 
 
+def test_settlement_filter_applies_only_to_perpetual_definitions() -> None:
+    definitions = _definitions()
+
+    assert gate.select_settlements(definitions["spot"], "spot", ["USDC"]) == definitions["spot"]
+    assert gate.select_settlements(definitions["perpetual"], "perpetual", ["USDC"]) == ()
+    assert (
+        gate.select_settlements(definitions["perpetual"], "perpetual", ["USDT"])
+        == definitions["perpetual"]
+    )
+
+
+def test_expected_semantic_scopes_keep_derivative_settlements_separate() -> None:
+    definitions = _definitions()
+    btc_inverse = _Definition(
+        MarketIdentity(
+            exchange="kraken",
+            symbol="BTC/USD",
+            market="perpetual",
+            settle="BTC",
+        ),
+        True,
+        frozenset({"1m"}),
+    )
+    definitions["perpetual"] += (btc_inverse,)
+
+    assert gate._expected_scope_keys(definitions) == {
+        "spot",
+        "perpetual/USDT",
+        "perpetual/BTC",
+    }
+
+
 def test_semantic_trade_aggregate_converts_contracts_to_base_volume() -> None:
     trades = [
         {"timestamp": 1, "id": "a", "price": 100.0, "amount": 2.0},
@@ -151,6 +186,119 @@ def test_semantic_open_and_close_accept_timestamp_ties_without_inventing_order()
     )
 
     assert all(matches.values())
+
+
+def test_rest_semantic_mismatch_is_adjudicated_by_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xret.data.providers.ccxt import markets
+
+    definition = _Definition(
+        MarketIdentity(exchange="bybit", symbol="BTC/USDT", market="spot"),
+        True,
+        frozenset({"1m"}),
+    )
+    trades = [
+        {"timestamp": 1, "price": 10.0, "amount": 1.0},
+        {"timestamp": 60_000, "price": 10.0, "amount": 1.0},
+        {"timestamp": 90_000, "price": 11.0, "amount": 1.0},
+        {"timestamp": 120_000, "price": 11.0, "amount": 1.0},
+    ]
+
+    class Exchange:
+        has = {"fetchTrades": True}
+
+        def load_markets(self) -> None:
+            return None
+
+        def market(self, _symbol: str) -> dict[str, object]:
+            return {"spot": True, "contract": False}
+
+        def fetch_trades(self, _symbol: str, _since: None, _limit: int) -> list[dict[str, object]]:
+            return trades
+
+        def fetch_ohlcv(
+            self,
+            _symbol: str,
+            _timeframe: str,
+            since: int,
+            _limit: int,
+            _params: dict[str, int],
+        ) -> list[list[float]]:
+            return [[since, 10.0, 11.0, 10.0, 11.0, 99.0]]
+
+    monkeypatch.setattr(
+        markets,
+        "resolve",
+        lambda _identity, _exchange: SimpleNamespace(native_symbol="BTC/USDT"),
+    )
+    pro_calls: list[str] = []
+
+    def pro_probe(*_args: object, **kwargs: object) -> dict[str, object]:
+        pro_calls.append(str(kwargs["rest_failure"]))
+        return {"status": "pass", "source": "ccxt_pro_watch_trades"}
+
+    monkeypatch.setattr(gate, "_pro_semantic_probe", pro_probe)
+
+    result = gate._semantic_probe(
+        "bybit",
+        {"spot": (definition,)},
+        lambda _client_id: Exchange(),
+        symbol_limit=1,
+        pro_timeout_seconds=1.0,
+    )
+
+    assert result["spot"]["status"] == "pass"
+    assert result["spot"]["rest_evidence"]["status"] == "fail"
+    assert pro_calls == [
+        "REST public-trade buckets disagreed with the candle; the bounded response may be truncated"
+    ]
+
+
+def test_missing_complete_rest_minute_is_adjudicated_by_pro(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xret.data.providers.ccxt import markets
+
+    definition = _Definition(
+        MarketIdentity(exchange="kraken", symbol="BTC/USD", market="perpetual", settle="BTC"),
+        True,
+        frozenset({"1m"}),
+    )
+
+    class Exchange:
+        has = {"fetchTrades": True}
+
+        def load_markets(self) -> None:
+            return None
+
+        def market(self, _symbol: str) -> dict[str, object]:
+            return {"contract": True, "inverse": True, "contractSize": 1.0}
+
+        def fetch_trades(self, _symbol: str, _since: None, _limit: int) -> list[dict[str, object]]:
+            return [{"timestamp": 60_000, "price": 10.0, "amount": 1.0}]
+
+    monkeypatch.setattr(
+        markets,
+        "resolve",
+        lambda _identity, _exchange: SimpleNamespace(native_symbol="BTC/USD:BTC"),
+    )
+    monkeypatch.setattr(
+        gate,
+        "_pro_semantic_probe",
+        lambda *_args, **_kwargs: {"status": "pass", "source": "ccxt_pro_watch_trades"},
+    )
+
+    result = gate._semantic_probe(
+        "kraken",
+        {"perpetual": (definition,)},
+        lambda _client_id: Exchange(),
+        symbol_limit=1,
+        pro_timeout_seconds=1.0,
+    )
+
+    assert result["perpetual"]["status"] == "pass"
+    assert result["perpetual"]["rest_evidence"]["attempted"][0]["complete_trade_minutes"] == 0
 
 
 def test_mandatory_risk_cases_do_not_count_toward_statistical_sample() -> None:

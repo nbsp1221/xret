@@ -62,6 +62,10 @@ Multiple exchanges can be supplied by repeating `--exchange`; the default four w
 
 Qualification and promotion are endpoint-family scoped. Use `--market spot` or `--market perpetual` when one family must be proved independently; repeat the option to select both. This is required when, for example, a venue's spot endpoint passes while its advertised perpetual endpoint remains unresolved.
 
+Derivative qualification is settlement-scoped. Repeat `--settle USDT` or another canonical settlement to restrict perpetual definitions and cases to the exact support claim; spot definitions are unaffected. The gate plans historical cases and requires a separate executed-trade semantic witness for every selected settlement. Never infer that a passing USDT endpoint also approves USDC, inverse, or another settlement family.
+
+The semantic probe uses unified REST `fetchTrades` when it can establish a complete public-trade minute. If that method is absent, fails because it is actually wallet-specific, or produces a candle disagreement consistent with a bounded-tail truncation, the gate can cross-check a fully observed minute through public CCXT Pro `watchTrades`. The fallback is qualification evidence only; it does not add a second historical acquisition path to `CcxtProvider`.
+
 To run the same gate over every client exposed by the installed CCXT version, use `--all-ccxt`. This is a campaign-scale operation and should be run with an operator-selected output directory and conservative worker count:
 
 ```bash
@@ -72,6 +76,8 @@ uv run python tools/ccxt_qualification_gate.py \
 ```
 
 The all-client mode is an evidence campaign, not a blanket approval. For an unapproved client, the harness installs a conservative qualification-only pagination profile in its process so the production allowlist cannot predetermine the result. The full bounded-window, pagination, lifecycle, semantic, and edge-case suite then decides whether that assumption is safe. Production remains fail-closed until a passing endpoint is deliberately promoted.
+
+Some CCXT adapters derive the native right bound from `since + limit`, while some documented native endpoints use a closed right boundary. During investigation, repeat `--omit-until CLIENT_ID` or `--accept-end-boundary CLIENT_ID` to test those hypotheses without changing production policy. The latter accepts only a row exactly equal to the requested right boundary and discards that witness; any other out-of-range row remains fatal. A passing qualification-only hypothesis must be encoded as an exact typed observation profile and rerun from a built wheel before promotion.
 
 The harness must be run from the repository against the current workspace environment. It may use qualification-only profiles, but it never mutates production profiles, adds native REST fallbacks, or treats the temporary profile as approval.
 

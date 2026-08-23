@@ -21,13 +21,13 @@ import ccxt
 import pytest
 from xret.data.errors import InvalidRequestError
 from xret.data.models import Market, MarketIdentity
+from xret.data.providers.ccxt.compatibility import qualified_client_ids
 from xret.data.providers.ccxt.markets import supported_timeframes
-from xret.data.providers.ccxt.pagination import _PROFILES
 from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import ResolvedBarMarket
 from xret.data.timeframe import TimeBar
 
-_QUALIFIED_CLIENT_IDS = sorted(_PROFILES)
+_QUALIFIED_CLIENT_IDS = qualified_client_ids()
 
 #: Every qualified venue offers hourly bars, and `verified-support.md` claims
 #: `1h` for each venue it lists. Filtering must never drop it.

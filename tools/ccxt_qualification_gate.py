@@ -9,6 +9,7 @@ Xret state to an output directory chosen by the operator (normally /tmp).
 from __future__ import annotations
 
 import argparse
+import asyncio
 import concurrent.futures
 import hashlib
 import json
@@ -20,7 +21,7 @@ import tempfile
 import threading
 import time
 import traceback
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,15 @@ VENUES = (
     "dydx",
     "derive",
 )
-PREFERRED_SYMBOLS = ("BTC/USDT", "BTC/USDC", "ETH/USDT", "ETH/USDC", "SOL/USDT", "SOL/USDC")
+PREFERRED_SYMBOLS = (
+    "HYPE/USDC",
+    "BTC/USDT",
+    "BTC/USDC",
+    "ETH/USDT",
+    "ETH/USDC",
+    "SOL/USDT",
+    "SOL/USDC",
+)
 TIMEFRAME_DAYS = {
     "1s": 1 / 86400,
     "1m": 1 / 1440,
@@ -147,6 +156,19 @@ def choose_symbols(
         if item not in selected:
             selected.append(item)
     return selected[:limit]
+
+
+def select_settlements(
+    definitions: tuple[Any, ...],
+    market_name: str,
+    settlements: list[str] | None,
+) -> tuple[Any, ...]:
+    """Restrict perpetual evidence to the settlements named by its support claim."""
+    if market_name != "perpetual" or not settlements:
+        return definitions
+    return tuple(
+        definition for definition in definitions if definition.identity.settle in settlements
+    )
 
 
 def plan_cases(
@@ -535,6 +557,170 @@ def _complete_trade_buckets(
     )
 
 
+def _watch_complete_trade_minute(
+    client_id: str,
+    native_symbol: str,
+    *,
+    timeout_seconds: float,
+) -> tuple[int, list[dict[str, Any]]]:
+    """Observe one complete public-trade minute through CCXT Pro."""
+
+    async def observe() -> tuple[int, list[dict[str, Any]]]:
+        import ccxt.pro as ccxtpro
+
+        exchange_class = getattr(ccxtpro, client_id, None)
+        if exchange_class is None:
+            raise RuntimeError(f"CCXT Pro has no {client_id!r} client")
+        exchange = exchange_class({"enableRateLimit": True, "newUpdates": True})
+        started = time.monotonic()
+        target_start_ms: int | None = None
+        collected: dict[tuple[object, ...], dict[str, Any]] = {}
+        try:
+            await exchange.load_markets()
+            if not exchange.has.get("watchTrades"):
+                raise RuntimeError(f"{client_id} does not provide CCXT Pro watchTrades")
+            while True:
+                remaining = timeout_seconds - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError(
+                        f"no complete public-trade minute for {native_symbol} on {client_id}"
+                    )
+                now_ms = int(time.time() * 1000)
+                if target_start_ms is not None:
+                    target_end_ms = target_start_ms + 60_000
+                    if now_ms >= target_end_ms + 2_000 and collected:
+                        return target_start_ms, list(collected.values())
+                    until_closed = max(0.1, (target_end_ms + 2_000 - now_ms) / 1000)
+                    wait_seconds = min(remaining, until_closed)
+                else:
+                    wait_seconds = remaining
+                try:
+                    trades = await asyncio.wait_for(
+                        exchange.watch_trades(native_symbol),
+                        timeout=wait_seconds,
+                    )
+                except TimeoutError:
+                    if (
+                        target_start_ms is not None
+                        and int(time.time() * 1000) >= target_start_ms + 62_000
+                        and collected
+                    ):
+                        return target_start_ms, list(collected.values())
+                    continue
+                if target_start_ms is None:
+                    observed_ms = int(time.time() * 1000)
+                    target_start_ms = observed_ms - observed_ms % 60_000 + 60_000
+                target_end_ms = target_start_ms + 60_000
+                for trade in trades:
+                    timestamp = trade.get("timestamp")
+                    if (
+                        timestamp is None
+                        or trade.get("price") is None
+                        or trade.get("amount") is None
+                        or not target_start_ms <= int(timestamp) < target_end_ms
+                    ):
+                        continue
+                    key = (
+                        trade.get("id"),
+                        timestamp,
+                        trade.get("price"),
+                        trade.get("amount"),
+                        trade.get("side"),
+                    )
+                    collected[key] = trade
+        finally:
+            await exchange.close()
+
+    return asyncio.run(observe())
+
+
+def _pro_semantic_probe(
+    client_id: str,
+    market_name: str,
+    exchange: Any,
+    candidates: list[Any],
+    *,
+    timeout_seconds: float,
+    rest_failure: str,
+) -> dict[str, Any]:
+    """Use public CCXT Pro trades when the REST trade surface is unavailable."""
+    from xret.data.providers.ccxt import compatibility, markets, semantics
+
+    attempted: list[dict[str, Any]] = []
+    for definition in candidates[:3]:
+        native = markets.resolve(definition.identity, exchange)
+        native_market = exchange.market(native.native_symbol)
+        try:
+            start_ms, trades = _watch_complete_trade_minute(
+                client_id,
+                native.native_symbol,
+                timeout_seconds=timeout_seconds,
+            )
+            attempted.append(
+                {
+                    "symbol": definition.identity.symbol,
+                    "settle": definition.identity.settle,
+                    "returned_trades": len(trades),
+                }
+            )
+            profile = compatibility.observation_profile(
+                client_id,
+                market_name,
+                definition.identity.settle,
+            )
+            until_ms = start_ms + 60_000 - (1 if profile.until_inclusive else 0)
+            params = {"until": until_ms} if profile.send_unified_until else {}
+            candles = exchange.fetch_ohlcv(
+                native.native_symbol,
+                "1m",
+                start_ms,
+                2,
+                params,
+            )
+            matching = [row for row in candles if int(row[0]) == start_ms]
+            if len(matching) != 1:
+                continue
+            normalized = semantics.normalize_ohlcv(
+                client_id,
+                native_market,
+                (tuple(float(value) for value in matching[0]),),
+            )[0]
+            expected = _aggregate_trades(trades, native_market)
+            actual = [float(value) for value in normalized[1:6]]
+            matches = _semantic_field_matches(actual, trades, native_market)
+            return {
+                "status": "pass" if all(matches.values()) else "fail",
+                "source": "ccxt_pro_watch_trades",
+                "rest_failure": rest_failure,
+                "client_id": client_id,
+                "symbol": definition.identity.symbol,
+                "native_symbol": native.native_symbol,
+                "settle": definition.identity.settle,
+                "minute": datetime.fromtimestamp(start_ms / 1000, tz=UTC).isoformat(),
+                "trades": len(trades),
+                "actual_ohlcv": actual,
+                "trade_aggregate_ohlcv": expected,
+                "field_matches": matches,
+                "attempted": attempted,
+            }
+        except Exception as exc:  # noqa: BLE001 - preserve per-symbol evidence
+            attempted.append(
+                {
+                    "symbol": definition.identity.symbol,
+                    "settle": definition.identity.settle,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+    return {
+        "status": "unresolved",
+        "source": "ccxt_pro_watch_trades",
+        "rest_failure": rest_failure,
+        "reason": "no complete public-trade minute was observed through CCXT Pro",
+        "attempted": attempted,
+    }
+
+
 def _numbers_close(left: float, right: float, *, relative: float, absolute: float) -> bool:
     return math.isclose(left, right, rel_tol=relative, abs_tol=absolute)
 
@@ -545,6 +731,7 @@ def _semantic_probe(
     factory: Any,
     *,
     symbol_limit: int,
+    pro_timeout_seconds: float,
 ) -> dict[str, Any]:
     """Cross-check venue candles against a complete public-trade minute.
 
@@ -554,7 +741,7 @@ def _semantic_probe(
     candle's trade-price OHLC and base-asset volume semantics.
     """
     from xret.data.models import Market
-    from xret.data.providers.ccxt import markets, pagination, semantics
+    from xret.data.providers.ccxt import compatibility, markets, semantics
 
     results: dict[str, Any] = {}
     for market_name, market_family in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL)):
@@ -563,12 +750,7 @@ def _semantic_probe(
             continue
         client_id = markets.scoped_client_id(exchange_id, market_family)
         exchange = factory(client_id)
-        if not exchange.has.get("fetchTrades"):
-            results[market_name] = {
-                "status": "unresolved",
-                "reason": f"{client_id} does not provide fetchTrades",
-            }
-            continue
+        candidates: list[Any] = []
         try:
             exchange.load_markets()
             attempted: list[dict[str, Any]] = []
@@ -578,6 +760,16 @@ def _semantic_probe(
                     definition.derivative is not None and not definition.derivative.linear
                 )
             )
+            if not exchange.has.get("fetchTrades"):
+                results[market_name] = _pro_semantic_probe(
+                    client_id,
+                    market_name,
+                    exchange,
+                    candidates,
+                    timeout_seconds=pro_timeout_seconds,
+                    rest_failure=f"{client_id} does not provide fetchTrades",
+                )
+                continue
             first_failure: dict[str, Any] | None = None
             for definition in candidates:
                 native = markets.resolve(definition.identity, exchange)
@@ -593,14 +785,19 @@ def _semantic_probe(
                     }
                 )
                 for start_ms, bucket_trades in buckets[:3]:
-                    profile = pagination._PROFILES[client_id]
+                    profile = compatibility.observation_profile(
+                        client_id,
+                        market_name,
+                        definition.identity.settle,
+                    )
                     until_ms = start_ms + 60_000 - (1 if profile.until_inclusive else 0)
+                    params = {"until": until_ms} if profile.send_unified_until else {}
                     candles = exchange.fetch_ohlcv(
                         native.native_symbol,
                         "1m",
                         start_ms,
                         2,
-                        {"until": until_ms},
+                        params,
                     )
                     matching = [row for row in candles if int(row[0]) == start_ms]
                     if len(matching) != 1:
@@ -638,22 +835,85 @@ def _semantic_probe(
                     first_failure["failed_probe_minutes"] = sum(
                         min(3, item["complete_trade_minutes"]) for item in attempted
                     )
-                    results[market_name] = first_failure
-                else:
-                    results[market_name] = {
-                        "status": "unresolved",
-                        "reason": (
-                            "no complete public-trade minute was available within the probe limit"
+                    pro_evidence = _pro_semantic_probe(
+                        client_id,
+                        market_name,
+                        exchange,
+                        candidates,
+                        timeout_seconds=pro_timeout_seconds,
+                        rest_failure=(
+                            "REST public-trade buckets disagreed with the candle; "
+                            "the bounded response may be truncated"
                         ),
-                        "attempted": attempted,
-                    }
+                    )
+                    pro_evidence["rest_evidence"] = first_failure
+                    results[market_name] = pro_evidence
+                else:
+                    pro_evidence = _pro_semantic_probe(
+                        client_id,
+                        market_name,
+                        exchange,
+                        candidates,
+                        timeout_seconds=pro_timeout_seconds,
+                        rest_failure=(
+                            "no complete public-trade minute was available within the REST "
+                            "probe limit"
+                        ),
+                    )
+                    pro_evidence["rest_evidence"] = {"attempted": attempted}
+                    results[market_name] = pro_evidence
         except Exception as exc:  # noqa: BLE001 - semantic evidence keeps attribution
-            results[market_name] = {
-                "status": "unresolved",
-                "error_type": type(exc).__name__,
-                "error": str(exc),
-            }
+            results[market_name] = _pro_semantic_probe(
+                client_id,
+                market_name,
+                exchange,
+                candidates,
+                timeout_seconds=pro_timeout_seconds,
+                rest_failure=f"{type(exc).__name__}: {exc}",
+            )
     return results
+
+
+def _scope_key(market_name: str, settle: str | None) -> str:
+    if market_name == "spot":
+        return market_name
+    return f"{market_name}/{settle or 'unsettled'}"
+
+
+def _expected_scope_keys(definitions: dict[str, tuple[Any, ...]]) -> set[str]:
+    keys: set[str] = set()
+    for market_name, available in definitions.items():
+        if market_name == "spot" and available:
+            keys.add(_scope_key(market_name, None))
+        else:
+            keys.update(_scope_key(market_name, item.identity.settle) for item in available)
+    return keys
+
+
+def _semantic_probes_by_scope(
+    exchange_id: str,
+    definitions: dict[str, tuple[Any, ...]],
+    factory: Any,
+    *,
+    symbol_limit: int,
+    pro_timeout_seconds: float,
+) -> dict[str, Any]:
+    evidence: dict[str, Any] = {}
+    for market_name, available in definitions.items():
+        grouped: dict[str | None, list[Any]] = {}
+        for definition in available:
+            settle = definition.identity.settle if market_name == "perpetual" else None
+            grouped.setdefault(settle, []).append(definition)
+        for settle, candidates in grouped.items():
+            result = _semantic_probe(
+                exchange_id,
+                {market_name: tuple(candidates)},
+                factory,
+                symbol_limit=symbol_limit,
+                pro_timeout_seconds=pro_timeout_seconds,
+            )
+            evidence[_scope_key(market_name, settle)] = result[market_name]
+    return evidence
 
 
 def _assert_frame_invariants(frame: Any, *, timeframe: str, start: datetime, end: datetime) -> None:
@@ -951,9 +1211,8 @@ def _run_case(
 def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> dict[str, Any]:
     import ccxt
     from xret.data.providers import Market
-    from xret.data.providers.ccxt import CcxtProvider
+    from xret.data.providers.ccxt import CcxtProvider, compatibility
     from xret.data.providers.ccxt.markets import scoped_client_id
-    from xret.data.providers.ccxt.pagination import _PROFILES, _PaginationProfile
 
     # Qualification must exercise an unapproved endpoint rather than confuse
     # the production allowlist with a venue failure. A small profile is
@@ -967,35 +1226,30 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         if not args.market or name in args.market
     )
     qualification_scopes = {
-        (scoped_client_id(exchange_id, market), name) for name, market in market_pairs
+        (scoped_client_id(exchange_id, market), name, settle)
+        for name, market in market_pairs
+        for settle in (args.settle if name == "perpetual" and args.settle else (None,))
     }
     assumed_profiles = sorted(
-        f"{client_id}/{family}"
-        for client_id, family in qualification_scopes
-        if client_id not in _PROFILES or family not in _PROFILES[client_id].market_families
+        f"{client_id}/{family}" + (f"/{settle}" if settle is not None else "")
+        for client_id, family, settle in qualification_scopes
+        if compatibility.EndpointScope(client_id, family, settle)
+        not in compatibility._OBSERVATION_PROFILES
     )
-    for client_id in {client_id for client_id, _ in qualification_scopes}:
-        requested_families = frozenset(
-            family for scoped_id, family in qualification_scopes if scoped_id == client_id
-        )
-        existing = _PROFILES.get(client_id)
-        if existing is not None and requested_families <= existing.market_families:
+    for client_id, family, settle in qualification_scopes:
+        scope = compatibility.EndpointScope(client_id, family, settle)
+        if scope in compatibility._OBSERVATION_PROFILES:
             continue
         qualification_max_spans = {
             "bitget": timedelta(days=90),
         }
-        if existing is None:
-            _PROFILES[client_id] = _PaginationProfile(
-                max_bars=args.qualification_page_bars,
-                max_span=qualification_max_spans.get(client_id),
-                until_inclusive=client_id != "bitvavo",
-                market_families=requested_families,
-            )
-        else:
-            _PROFILES[client_id] = replace(
-                existing,
-                market_families=existing.market_families | requested_families,
-            )
+        compatibility._OBSERVATION_PROFILES[scope] = compatibility.ObservationProfile(
+            max_bars=args.qualification_page_bars,
+            max_span=qualification_max_spans.get(client_id),
+            send_unified_until=client_id not in args.omit_until,
+            until_inclusive=client_id != "bitvavo",
+            accept_end_boundary=client_id in args.accept_end_boundary,
+        )
 
     metrics = RequestMetrics()
     metrics_lock = threading.Lock()
@@ -1065,15 +1319,23 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         errors: dict[str, str] = {}
         for name, market in market_pairs:
             try:
-                definitions[name] = provider.fetch_markets(exchange=exchange_id, market=market)
+                fetched_definitions = provider.fetch_markets(exchange=exchange_id, market=market)
+                definitions[name] = select_settlements(
+                    fetched_definitions,
+                    name,
+                    args.settle,
+                )
             except Exception as exc:  # noqa: BLE001 - persisted evidence
                 errors[name] = f"{type(exc).__name__}: {exc}"
         result["market_counts"] = {name: len(values) for name, values in definitions.items()}
         result["market_errors"] = errors
         profile_limits = [
-            _PROFILES[client_id].max_bars
+            profile.max_bars
             for _, market in market_pairs
-            if (client_id := scoped_client_id(exchange_id, market)) in _PROFILES
+            for profile in compatibility.observation_profiles(
+                scoped_client_id(exchange_id, market),
+                market.value,
+            )
         ]
         page_bars = min(args.page_limit, min(profile_limits))
         cases = plan_cases(
@@ -1095,74 +1357,77 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         }
         if args.plan_only:
             result["status"] = "planned"
-        else:
-            result["semantic_evidence"] = _semantic_probe(
+        elif args.semantic_only:
+            result["semantic_evidence"] = _semantic_probes_by_scope(
                 exchange_id,
                 definitions,
                 factory,
                 symbol_limit=args.semantic_symbols,
+                pro_timeout_seconds=args.semantic_pro_timeout,
             )
-            if args.semantic_only:
-                expected_markets = {name for name, values in definitions.items() if values}
-                semantic_markets = {
-                    name
-                    for name, evidence in result["semantic_evidence"].items()
-                    if evidence["status"] == "pass"
-                }
-                result["semantically_verified_markets"] = sorted(semantic_markets)
-                result["status"] = (
-                    "semantic_pass"
-                    if expected_markets and expected_markets <= semantic_markets
-                    else "candidate"
-                )
-            else:
-                state_root = Path(
-                    tempfile.mkdtemp(
-                        prefix=f"xret-qualification-{exchange_id}-", dir=args.temp_root
-                    )
-                )
-                try:
-                    now = datetime.now(UTC)
-                    for case in cases:
-                        case_result = _run_case(
-                            exchange_id, provider, case, state_root, now, page_bars
-                        )
-                        result["cases"].append(case_result)
-                        if (
-                            sum(item["status"] == "fail" for item in result["cases"])
-                            >= args.max_failures
-                        ):
-                            result["early_stop"] = {
-                                "reason": "maximum failure evidence reached",
-                                "max_failures": args.max_failures,
-                                "remaining_cases": len(cases) - len(result["cases"]),
-                            }
-                            break
-                finally:
-                    if not args.keep_state:
-                        shutil.rmtree(state_root, ignore_errors=True)
-                accepted_statuses = {"pass", "pass_expected_unavailability"}
-                witnessed_markets = {
-                    case["plan"]["market"]
-                    for case in result["cases"]
-                    if case.get("fetch_rows", case.get("scan_rows", 0)) > 0
-                }
-                expected_markets = {name for name, values in definitions.items() if values}
-                semantic_markets = {
-                    name
-                    for name, evidence in result["semantic_evidence"].items()
-                    if evidence["status"] == "pass"
-                }
-                result["nonempty_witnessed_markets"] = sorted(witnessed_markets)
-                result["semantically_verified_markets"] = sorted(semantic_markets)
-                result["status"] = (
-                    "pass"
-                    if result["cases"]
-                    and all(case["status"] in accepted_statuses for case in result["cases"])
-                    and expected_markets <= witnessed_markets
-                    and expected_markets <= semantic_markets
-                    else "candidate"
-                )
+            expected_scopes = _expected_scope_keys(definitions)
+            semantic_scopes = {
+                name
+                for name, evidence in result["semantic_evidence"].items()
+                if evidence["status"] == "pass"
+            }
+            result["semantically_verified_scopes"] = sorted(semantic_scopes)
+            result["status"] = (
+                "semantic_pass"
+                if expected_scopes and expected_scopes <= semantic_scopes
+                else "candidate"
+            )
+        else:
+            state_root = Path(
+                tempfile.mkdtemp(prefix=f"xret-qualification-{exchange_id}-", dir=args.temp_root)
+            )
+            try:
+                now = datetime.now(UTC)
+                for case in cases:
+                    case_result = _run_case(exchange_id, provider, case, state_root, now, page_bars)
+                    result["cases"].append(case_result)
+                    if (
+                        sum(item["status"] == "fail" for item in result["cases"])
+                        >= args.max_failures
+                    ):
+                        result["early_stop"] = {
+                            "reason": "maximum failure evidence reached",
+                            "max_failures": args.max_failures,
+                            "remaining_cases": len(cases) - len(result["cases"]),
+                        }
+                        break
+            finally:
+                if not args.keep_state:
+                    shutil.rmtree(state_root, ignore_errors=True)
+            result["semantic_evidence"] = _semantic_probes_by_scope(
+                exchange_id,
+                definitions,
+                factory,
+                symbol_limit=args.semantic_symbols,
+                pro_timeout_seconds=args.semantic_pro_timeout,
+            )
+            accepted_statuses = {"pass", "pass_expected_unavailability"}
+            witnessed_scopes = {
+                _scope_key(case["plan"]["market"], case["plan"].get("settle"))
+                for case in result["cases"]
+                if case.get("fetch_rows", case.get("scan_rows", 0)) > 0
+            }
+            expected_scopes = _expected_scope_keys(definitions)
+            semantic_scopes = {
+                name
+                for name, evidence in result["semantic_evidence"].items()
+                if evidence["status"] == "pass"
+            }
+            result["nonempty_witnessed_scopes"] = sorted(witnessed_scopes)
+            result["semantically_verified_scopes"] = sorted(semantic_scopes)
+            result["status"] = (
+                "pass"
+                if result["cases"]
+                and all(case["status"] in accepted_statuses for case in result["cases"])
+                and expected_scopes <= witnessed_scopes
+                and expected_scopes <= semantic_scopes
+                else "candidate"
+            )
     except Exception as exc:  # noqa: BLE001 - persisted evidence
         result.update(
             {
@@ -1213,10 +1478,21 @@ def main() -> None:
         help="Qualify only the selected market family; repeat to select both.",
     )
     parser.add_argument(
+        "--settle",
+        action="append",
+        help="Qualify only these perpetual settlement assets; repeat for multiple values.",
+    )
+    parser.add_argument(
         "--semantic-symbols",
         type=int,
         default=20,
         help="Maximum symbols tried per market family for trade-derived semantic evidence.",
+    )
+    parser.add_argument(
+        "--semantic-pro-timeout",
+        type=float,
+        default=150.0,
+        help="Maximum seconds per CCXT Pro symbol when REST public trades are unavailable.",
     )
     parser.add_argument(
         "--samples",
@@ -1233,6 +1509,24 @@ def main() -> None:
         type=int,
         default=100,
         help="Conservative temporary page width for endpoint families not yet promoted.",
+    )
+    parser.add_argument(
+        "--omit-until",
+        action="append",
+        default=[],
+        help=(
+            "Qualification-only CCXT client ID whose adapter derives its native end "
+            "from since+limit and must not receive the unified until parameter."
+        ),
+    )
+    parser.add_argument(
+        "--accept-end-boundary",
+        action="append",
+        default=[],
+        help=(
+            "Qualification-only CCXT client ID whose proven native closed window may "
+            "return the exact right-boundary candle; that witness is discarded."
+        ),
     )
     parser.add_argument("--retries", type=int, default=2)
     parser.add_argument("--backoff", type=float, default=0.5)
@@ -1262,6 +1556,7 @@ def main() -> None:
         args.workers < 1
         or args.symbols < 1
         or args.semantic_symbols < 1
+        or args.semantic_pro_timeout <= 0
         or args.samples < required_samples
         or args.qualification_page_bars < 1
         or args.max_failures < 1
@@ -1279,6 +1574,17 @@ def main() -> None:
     unknown = requested - known_venues
     if unknown:
         parser.error("unknown CCXT exchange(s): " + ", ".join(sorted(unknown)))
+    unknown_omit_until = set(args.omit_until) - known_venues
+    if unknown_omit_until:
+        parser.error(
+            "unknown --omit-until CCXT client(s): " + ", ".join(sorted(unknown_omit_until))
+        )
+    unknown_end_boundary = set(args.accept_end_boundary) - known_venues
+    if unknown_end_boundary:
+        parser.error(
+            "unknown --accept-end-boundary CCXT client(s): "
+            + ", ".join(sorted(unknown_end_boundary))
+        )
     if args.all_ccxt and requested:
         parser.error("--all-ccxt cannot be combined with --exchange")
     if args.plan_only and args.semantic_only:
@@ -1294,7 +1600,9 @@ def main() -> None:
             "workers": args.workers,
             "symbols": args.symbols,
             "markets": args.market or ["spot", "perpetual"],
+            "settlements": args.settle or [],
             "semantic_symbols": args.semantic_symbols,
+            "semantic_pro_timeout": args.semantic_pro_timeout,
             "samples": args.samples,
             "confidence": args.confidence,
             "target_failure_rate": args.target_failure_rate,
@@ -1302,6 +1610,8 @@ def main() -> None:
             "timeout_ms": args.timeout_ms,
             "page_limit": args.page_limit,
             "qualification_page_bars": args.qualification_page_bars,
+            "omit_until": sorted(set(args.omit_until)),
+            "accept_end_boundary": sorted(set(args.accept_end_boundary)),
             "retries": args.retries,
             "backoff": args.backoff,
             "max_failures": args.max_failures,

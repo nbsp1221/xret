@@ -3,62 +3,51 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Any, Final
+from typing import Any
 
 from xret.data.errors import UnsupportedMarketError
+from xret.data.providers.ccxt.compatibility import (
+    CompatibilityPolicy,
+    MarketFamily,
+    VolumeMode,
+    compatibility_policy,
+)
 
 RawOHLCVRow = Sequence[float]
 
-# These CCXT endpoint families expose derivative candle volume as contract
-# count even though Xret's canonical volume is base-asset quantity. Each entry
-# is backed by a live trade/candle cross-check and the venue's native contract
-# metadata. Spot rows are never transformed.
-_CONTRACT_COUNT_CANDLE_CLIENTS: Final[frozenset[str]] = frozenset(
-    {"apex", "gate", "hashkey", "kucoinfutures", "mexc", "toobit"}
-)
 
-# CCXT occasionally advertises a syntactically canonical interval that the
-# scoped endpoint rejects or anchors differently from Xret's canonical grid.
-_INCOMPATIBLE_TIMEFRAMES: Final[dict[str, frozenset[str]]] = {
-    "aster": frozenset({"3d"}),
-    "bingx": frozenset({"1M"}),
-    "binance": frozenset({"3d"}),
-    "binanceusdm": frozenset({"1s", "3d"}),
-    "deribit": frozenset({"3h", "6h", "12h", "1d"}),
-    "hyperliquid": frozenset({"1w", "1M"}),
-    "xt": frozenset({"3d"}),
-}
+def _market_family(market: Mapping[str, Any] | None) -> MarketFamily | None:
+    if market is None:
+        return None
+    if market.get("spot") is True:
+        return "spot"
+    if market.get("swap") is True:
+        return "perpetual"
+    return None
 
 
 def canonical_timeframes(
     client_id: str,
     advertised: set[str],
     market: Mapping[str, Any] | None = None,
+    *,
+    policy: CompatibilityPolicy | None = None,
 ) -> frozenset[str]:
     """Remove only endpoint/timeframe pairs proven incompatible with Xret."""
-    incompatible = set(_INCOMPATIBLE_TIMEFRAMES.get(client_id, frozenset()))
-    if client_id == "bitget" and market is not None and market.get("spot") is True:
-        incompatible.add("2h")
-    if client_id == "mexc" and market is not None and market.get("spot") is True:
-        # MEXC advertises 8h spot candles but rejects that interval. Its early
-        # 1M history is anchored to UTC+08 before switching to UTC, so there is
-        # no single lossless Xret time-bar interpretation for the full series.
-        incompatible.update({"8h", "1M"})
-    if client_id == "bingx" and market is not None and market.get("spot") is True:
-        # BingX's spot endpoint anchors six-hour-and-longer bars on a grid
-        # incompatible with Xret's UTC calendar contract. Shorter intervals
-        # remain canonical and are qualified independently from perpetuals.
-        incompatible.update({"6h", "12h", "1d", "3d", "1w", "1M"})
-    if client_id == "bitrue" and market is not None and market.get("spot") is True:
-        incompatible.update({"1d", "1w"})
-    return frozenset(advertised - incompatible)
+    effective = policy or compatibility_policy(client_id, _market_family(market))
+    return frozenset(advertised - effective.excluded_timeframes)
 
 
-def supports_canonical_volume(client_id: str, market: Mapping[str, Any]) -> bool:
+def supports_canonical_volume(
+    client_id: str,
+    market: Mapping[str, Any],
+    *,
+    policy: CompatibilityPolicy | None = None,
+) -> bool:
     """Whether one native market can express exact Xret base volume."""
+    effective = policy or compatibility_policy(client_id, _market_family(market))
     return not (
-        client_id in _CONTRACT_COUNT_CANDLE_CLIENTS
-        and market.get("swap") is True
+        effective.volume_mode is VolumeMode.LINEAR_CONTRACT_COUNT
         and market.get("linear") is not True
     )
 
@@ -67,11 +56,14 @@ def normalize_ohlcv(
     client_id: str,
     market: Mapping[str, Any],
     rows: tuple[tuple[float, ...], ...],
+    *,
+    policy: CompatibilityPolicy | None = None,
 ) -> tuple[tuple[float, ...], ...]:
     """Convert a qualified native candle volume unit to base quantity."""
-    if client_id not in _CONTRACT_COUNT_CANDLE_CLIENTS or market.get("swap") is not True:
+    effective = policy or compatibility_policy(client_id, _market_family(market))
+    if effective.volume_mode is VolumeMode.BASE_ASSET:
         return rows
-    if not supports_canonical_volume(client_id, market):
+    if not supports_canonical_volume(client_id, market, policy=effective):
         raise UnsupportedMarketError(
             f"{client_id} inverse perpetual candles do not expose exact base-asset volume"
         )

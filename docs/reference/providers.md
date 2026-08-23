@@ -18,9 +18,11 @@ xret/data/providers/
 └── ccxt/                # built-in crypto implementation
     ├── __init__.py      # CcxtProvider export
     ├── provider.py      # implementation orchestration
+    ├── compatibility.py # typed endpoint-scope semantics and qualified observation policy
     ├── live.py          # CCXT Pro live-bar session
     ├── client.py        # CCXT construction, retry, and transport
     ├── markets.py       # crypto market resolution and definition translation
+    ├── semantics.py     # generic lossless canonical-value translation
     └── pagination.py    # qualified exhaustive observation windows
 ```
 
@@ -150,6 +152,8 @@ This distinction prevents a temporary empty native page from turning an unquerie
 ```text
 no returned row != proof that the entire remaining range was observed empty
 ```
+
+The built-in CCXT adapter partitions a request into endpoint-qualified windows and sends the actual number of remaining bar boundaries on the final page, not the endpoint's maximum page size. A typed endpoint profile may omit CCXT's unified `until` when the adapter derives the native end from `since + limit`. A profile may also recognize a documented closed native window by accepting only the exact right-boundary candle as an observation witness and discarding it from Xret's half-open result. Unknown endpoints and every other out-of-range response fail closed.
 
 ## Direct injection
 
