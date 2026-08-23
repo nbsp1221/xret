@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 from xret.data.errors import UnsupportedMarketError
-from xret.data.providers.ccxt import semantics
+from xret.data.models import MarketIdentity
+from xret.data.providers import DerivativeInterpretation, ResolvedBarMarket
+from xret.data.providers.ccxt import compatibility, semantics
 
 
 @pytest.mark.parametrize(
@@ -47,6 +49,80 @@ def test_contract_count_inverse_market_is_excluded_instead_of_approximated() -> 
         )
 
 
+def test_kucoin_live_contract_count_is_converted_to_base_volume() -> None:
+    market = ResolvedBarMarket(
+        identity=MarketIdentity(
+            exchange="kucoin",
+            symbol="BTC/USDT",
+            market="perpetual",
+            settle="USDT",
+        ),
+        native_market_id="XBTUSDTM",
+        native_symbol="BTC/USDT:USDT",
+        timeframes=frozenset({"1m"}),
+        derivative=DerivativeInterpretation(
+            linear=True,
+            inverse=False,
+            contract_size="0.001",
+        ),
+    )
+
+    assert semantics.normalize_live_volume("kucoinfutures", market, 250.0) == 0.25
+
+
+def test_explicit_live_volume_policy_overrides_the_historical_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    market = ResolvedBarMarket(
+        identity=MarketIdentity(
+            exchange="example",
+            symbol="BTC/USDT",
+            market="perpetual",
+            settle="USDT",
+        ),
+        native_market_id="BTCUSDT",
+        native_symbol="BTC/USDT:USDT",
+        timeframes=frozenset({"1m"}),
+        derivative=DerivativeInterpretation(
+            linear=True,
+            inverse=False,
+            contract_size="0.001",
+        ),
+    )
+    monkeypatch.setattr(
+        semantics,
+        "compatibility_policy",
+        lambda *_args: compatibility.CompatibilityPolicy(
+            volume_mode=compatibility.VolumeMode.LINEAR_CONTRACT_COUNT,
+            live_volume_mode=compatibility.VolumeMode.BASE_ASSET,
+        ),
+    )
+
+    assert semantics.normalize_live_volume("example", market, 250.0) == 250.0
+
+
+def test_live_contract_count_requires_exact_linear_contract_metadata() -> None:
+    market = ResolvedBarMarket(
+        identity=MarketIdentity(
+            exchange="mexc",
+            symbol="BTC/USDT",
+            market="perpetual",
+            settle="USDT",
+        ),
+        native_market_id="BTC_USDT",
+        native_symbol="BTC/USDT:USDT",
+        timeframes=frozenset({"1m"}),
+        derivative=DerivativeInterpretation(
+            linear=False,
+            inverse=True,
+            contract_size="100",
+        ),
+    )
+
+    with pytest.raises(UnsupportedMarketError, match="do not expose exact base-asset volume"):
+        semantics.normalize_live_volume("mexc", market, 2.0)
+
+
 def test_proven_incompatible_endpoint_timeframes_are_removed_by_scope() -> None:
     advertised = {"1s", "1m", "3d", "1w"}
 
@@ -73,11 +149,20 @@ def test_market_specific_timeframe_mismatch_does_not_hide_valid_sibling_scope() 
 
 
 def test_mexc_historical_anchor_mismatch_is_limited_to_spot() -> None:
-    advertised = {"1m", "8h", "1M"}
+    advertised = {"1m", "8h", "1w", "1M"}
 
     assert semantics.canonical_timeframes("mexc", advertised, {"spot": True}) == frozenset({"1m"})
     assert semantics.canonical_timeframes("mexc", advertised, {"swap": True}) == frozenset(
         advertised
+    )
+
+
+def test_woo_spot_excludes_the_reproducibly_conflicting_hourly_endpoint() -> None:
+    advertised = {"1m", "1h", "4h"}
+
+    assert semantics.canonical_timeframes("woo", advertised, {"spot": True}) == frozenset({"1m"})
+    assert semantics.canonical_timeframes("woo", advertised, {"swap": True}) == frozenset(
+        {"1m", "1h"}
     )
 
 

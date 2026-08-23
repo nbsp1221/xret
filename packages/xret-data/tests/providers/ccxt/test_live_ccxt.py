@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 import pytest
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import MarketIdentity
-from xret.data.providers import ResolvedBarMarket
+from xret.data.providers import DerivativeInterpretation, ResolvedBarMarket
 from xret.data.providers.ccxt.live import CcxtLiveBarSession
 
 
@@ -68,6 +68,26 @@ def _market(symbol: str = "BTC/USDT") -> ResolvedBarMarket:
     )
 
 
+def _linear_perpetual_market(exchange: str, *, contract_size: str) -> ResolvedBarMarket:
+    identity = MarketIdentity(
+        exchange=exchange,
+        symbol="BTC/USDT",
+        market="perpetual",
+        settle="USDT",
+    )
+    return ResolvedBarMarket(
+        identity=identity,
+        native_market_id="BTCUSDT",
+        native_symbol="BTC/USDT:USDT",
+        timeframes=frozenset({"1m"}),
+        derivative=DerivativeInterpretation(
+            linear=True,
+            inverse=False,
+            contract_size=contract_size,
+        ),
+    )
+
+
 def test_ccxt_live_session_reuses_client_and_normalizes_rows() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 4]])
@@ -88,6 +108,42 @@ def test_ccxt_live_session_reuses_client_and_normalizes_rows() -> None:
         assert client.closed == 1
         assert update.timestamp == datetime(2026, 8, 7, 0, 0, tzinfo=UTC)
         assert update.close == 101.0
+
+    asyncio.run(scenario())
+
+
+def test_ccxt_live_session_normalizes_contract_count_with_qualified_live_policy() -> None:
+    async def scenario() -> None:
+        client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
+        client.id = "mexc"
+        session = CcxtLiveBarSession(exchange="mexc", exchange_factory=lambda _: client)
+
+        async with session:
+            await session.subscribe_bar_updates(
+                _linear_perpetual_market("mexc", contract_size="0.001"),
+                "1m",
+            )
+            update = await anext(session)
+
+        assert update.volume == 0.25
+
+    asyncio.run(scenario())
+
+
+def test_ccxt_live_session_normalizes_kucoin_futures_contract_count() -> None:
+    async def scenario() -> None:
+        client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
+        client.id = "kucoinfutures"
+        session = CcxtLiveBarSession(exchange="kucoin", exchange_factory=lambda _: client)
+
+        async with session:
+            await session.subscribe_bar_updates(
+                _linear_perpetual_market("kucoin", contract_size="0.001"),
+                "1m",
+            )
+            update = await anext(session)
+
+        assert update.volume == 0.25
 
     asyncio.run(scenario())
 

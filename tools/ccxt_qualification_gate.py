@@ -93,6 +93,22 @@ TIMEFRAME_DAYS = {
 
 
 @dataclass(frozen=True, slots=True)
+class PlanScope:
+    market: str
+    settle: str | None
+
+    @classmethod
+    def from_definition(cls, definition: Any) -> PlanScope:
+        identity = definition.identity
+        settle = identity.settle if identity.market.value == "perpetual" else None
+        return cls(identity.market.value, settle)
+
+    @property
+    def key(self) -> str:
+        return _scope_key(self.market, self.settle)
+
+
+@dataclass(frozen=True, slots=True)
 class PlanCase:
     market: str
     symbol: str
@@ -104,6 +120,7 @@ class PlanCase:
     end_offset_days: int
     stratum: str
     kind: str
+    page_bars: int
     lifecycle: str = "standard"
 
 
@@ -178,7 +195,7 @@ def plan_cases(
     target_samples: int,
     preferred: tuple[str, ...],
     seed: int,
-    page_bars: int,
+    page_bars_by_scope: dict[PlanScope, int],
 ) -> list[PlanCase]:
     """Build mandatory risk cases plus a separate statistical sample.
 
@@ -186,23 +203,27 @@ def plan_cases(
     timeframe advertised by each market family gets a structural case, and
     history-derived boundary cases exercise the failure-prone Xret lifecycle.
     A deterministic stratified pool then contributes exactly the requested
-    number of statistical cases.
+    number of statistical cases for every exact market-family/settlement scope.
     """
-    selected: list[tuple[Any, str]] = []
-    all_by_market_timeframe: dict[tuple[str, str], Any] = {}
-    for market, values in definitions.items():
-        chosen = choose_symbols(values, symbol_limit, preferred)
-        for definition in chosen:
-            for timeframe in definition.timeframes:
-                all_by_market_timeframe.setdefault((market, timeframe), definition)
+    selected_by_scope: dict[PlanScope, list[tuple[Any, str]]] = {}
+    all_by_scope_timeframe: dict[tuple[PlanScope, str], Any] = {}
+    for values in definitions.values():
+        grouped: dict[PlanScope, list[Any]] = {}
         for definition in values:
-            for timeframe in definition.timeframes:
-                all_by_market_timeframe.setdefault((market, timeframe), definition)
-        for definition in chosen:
-            for timeframe in definition.timeframes:
-                selected.append((definition, timeframe))
+            scope = PlanScope.from_definition(definition)
+            grouped.setdefault(scope, []).append(definition)
+        for scope, scoped_definitions in grouped.items():
+            chosen = choose_symbols(tuple(scoped_definitions), symbol_limit, preferred)
+            selected = selected_by_scope.setdefault(scope, [])
+            for definition in chosen:
+                for timeframe in definition.timeframes:
+                    all_by_scope_timeframe.setdefault((scope, timeframe), definition)
+                    selected.append((definition, timeframe))
+            for definition in scoped_definitions:
+                for timeframe in definition.timeframes:
+                    all_by_scope_timeframe.setdefault((scope, timeframe), definition)
     cases: list[PlanCase] = []
-    seen: set[tuple[str, str, str, str, str]] = set()
+    seen: set[tuple[str, str | None, str, str, str, str]] = set()
 
     def add(
         definition: Any,
@@ -213,10 +234,18 @@ def plan_cases(
         end_offset_days: int,
         stratum: str,
         kind: str,
+        page_bars: int,
         lifecycle: str = "standard",
     ) -> bool:
         identity = definition.identity
-        key = (identity.market.value, identity.symbol, timeframe, scenario, kind)
+        key = (
+            identity.market.value,
+            identity.settle,
+            identity.symbol,
+            timeframe,
+            scenario,
+            kind,
+        )
         if key not in seen:
             seen.add(key)
             cases.append(
@@ -231,15 +260,21 @@ def plan_cases(
                     end_offset_days,
                     stratum,
                     kind,
+                    page_bars,
                     lifecycle,
                 )
             )
             return True
         return False
 
-    for (_market, timeframe), definition in sorted(
-        all_by_market_timeframe.items(),
-        key=lambda item: (item[0][0], TIMEFRAME_DAYS.get(item[0][1], 999), item[0][1]),
+    for (scope, timeframe), definition in sorted(
+        all_by_scope_timeframe.items(),
+        key=lambda item: (
+            item[0][0].market,
+            item[0][0].settle or "",
+            TIMEFRAME_DAYS.get(item[0][1], 999),
+            item[0][1],
+        ),
     ):
         add(
             definition,
@@ -250,12 +285,14 @@ def plan_cases(
             0,
             "timeframe-complete",
             "mandatory",
+            page_bars_by_scope[scope],
         )
 
-    primary_by_market: dict[str, Any] = {}
-    for definition, _timeframe in selected:
-        primary_by_market.setdefault(definition.identity.market.value, definition)
-    for market, definition in primary_by_market.items():
+    primary_by_scope = {
+        scope: selected[0][0] for scope, selected in selected_by_scope.items() if selected
+    }
+    for scope, definition in primary_by_scope.items():
+        page_bars = page_bars_by_scope[scope]
         available = definition.timeframes
         fixed = sorted(
             (value for value in available if value[-1] in "smhd"),
@@ -270,8 +307,9 @@ def plan_cases(
             1,
             "recent",
             0,
-            f"{market}:minimal-range",
+            f"{scope.key}:minimal-range",
             "mandatory",
+            page_bars,
         )
         add(
             definition,
@@ -280,8 +318,9 @@ def plan_cases(
             2,
             "recent",
             0,
-            f"{market}:closed-bar-boundary",
+            f"{scope.key}:closed-bar-boundary",
             "mandatory",
+            page_bars,
         )
         for multiple, suffix in (
             (page_bars - 1, "n-minus-1"),
@@ -296,8 +335,9 @@ def plan_cases(
                 multiple,
                 "recent",
                 0,
-                f"{market}:pagination-boundary",
+                f"{scope.key}:pagination-boundary",
                 "mandatory",
+                page_bars,
             )
         add(
             definition,
@@ -306,8 +346,9 @@ def plan_cases(
             8,
             "month",
             0,
-            f"{market}:calendar-storage",
+            f"{scope.key}:calendar-storage",
             "mandatory",
+            page_bars,
         )
         add(
             definition,
@@ -316,8 +357,9 @@ def plan_cases(
             8,
             "year",
             0,
-            f"{market}:calendar-storage",
+            f"{scope.key}:calendar-storage",
             "mandatory",
+            page_bars,
         )
         add(
             definition,
@@ -326,8 +368,9 @@ def plan_cases(
             24,
             "recent",
             7,
-            f"{market}:incremental-sync",
+            f"{scope.key}:incremental-sync",
             "mandatory",
+            page_bars,
             "incremental",
         )
         add(
@@ -337,8 +380,9 @@ def plan_cases(
             12,
             "recent",
             14,
-            f"{market}:locking",
+            f"{scope.key}:locking",
             "mandatory",
+            page_bars,
             "concurrent",
         )
         add(
@@ -348,8 +392,9 @@ def plan_cases(
             1,
             "recent",
             0,
-            f"{market}:invalid-range",
+            f"{scope.key}:invalid-range",
             "mandatory",
+            page_bars,
             "invalid-zero",
         )
         add(
@@ -359,8 +404,9 @@ def plan_cases(
             2,
             "recent",
             0,
-            f"{market}:invalid-range",
+            f"{scope.key}:invalid-range",
             "mandatory",
+            page_bars,
             "invalid-misaligned",
         )
         if "1h" in available:
@@ -371,8 +417,9 @@ def plan_cases(
                 24 * 365,
                 "recent",
                 0,
-                f"{market}:deep-history",
+                f"{scope.key}:deep-history",
                 "mandatory",
+                page_bars,
             )
         if "1d" in available:
             add(
@@ -382,39 +429,44 @@ def plan_cases(
                 365 * 3,
                 "recent",
                 0,
-                f"{market}:deep-history",
+                f"{scope.key}:deep-history",
                 "mandatory",
+                page_bars,
             )
 
-    rng = random.Random(seed)
-    pool = [
-        (definition, timeframe, offset, bars)
-        for definition, timeframe in selected
-        for offset in _STATISTICAL_OFFSETS_DAYS
-        for bars in _STATISTICAL_WINDOW_BARS
-    ]
-    rng.shuffle(pool)
-    statistical_count = 0
-    for definition, timeframe, offset, bars in pool:
-        if statistical_count >= target_samples:
-            break
-        symbol_class = _symbol_stratum(definition.identity.symbol, preferred)
-        added = add(
-            definition,
-            timeframe,
-            f"sample-o{offset}-b{bars}",
-            bars,
-            "recent",
-            offset,
-            f"{symbol_class}:offset-{offset}",
-            "statistical",
-        )
-        statistical_count += int(added)
-    if statistical_count != target_samples:
-        raise ValueError(
-            f"statistical sample universe has {statistical_count} unique cases, "
-            f"fewer than requested {target_samples}"
-        )
+    for scope, selected in sorted(
+        selected_by_scope.items(), key=lambda item: (item[0].market, item[0].settle or "")
+    ):
+        rng = random.Random(f"{seed}:{scope.key}")
+        pool = [
+            (definition, timeframe, offset, bars)
+            for definition, timeframe in selected
+            for offset in _STATISTICAL_OFFSETS_DAYS
+            for bars in _STATISTICAL_WINDOW_BARS
+        ]
+        rng.shuffle(pool)
+        statistical_count = 0
+        for definition, timeframe, offset, bars in pool:
+            if statistical_count >= target_samples:
+                break
+            symbol_class = _symbol_stratum(definition.identity.symbol, preferred)
+            added = add(
+                definition,
+                timeframe,
+                f"sample-o{offset}-b{bars}",
+                bars,
+                "recent",
+                offset,
+                f"{scope.key}:{symbol_class}:offset-{offset}",
+                "statistical",
+                page_bars_by_scope[scope],
+            )
+            statistical_count += int(added)
+        if statistical_count != target_samples:
+            raise ValueError(
+                f"statistical sample universe for {scope.key} has "
+                f"{statistical_count} unique cases, fewer than requested {target_samples}"
+            )
     return cases
 
 
@@ -449,11 +501,11 @@ def _range(now: datetime, case: PlanCase) -> tuple[datetime, datetime]:
     return _retreat_bars(end, case.timeframe, case.bars), end
 
 
-def _estimated_pages(case: PlanCase, page_limit: int) -> int:
+def _estimated_pages(case: PlanCase) -> int:
     multiplier = 3 if case.lifecycle == "incremental" else 2
     if case.lifecycle.startswith("invalid-"):
         return 0
-    return multiplier * math.ceil(case.bars / page_limit)
+    return multiplier * math.ceil(case.bars / case.page_bars)
 
 
 def _prepare_directories(output: Path, temp_root: Path) -> None:
@@ -667,7 +719,7 @@ def _pro_semantic_probe(
     rest_failure: str,
 ) -> dict[str, Any]:
     """Use public CCXT Pro trades when the REST trade surface is unavailable."""
-    from xret.data.providers.ccxt import compatibility, markets, semantics
+    from xret.data.providers.ccxt import compatibility, markets, pagination, semantics
 
     attempted: list[dict[str, Any]] = []
     for definition in candidates[:3]:
@@ -691,12 +743,15 @@ def _pro_semantic_probe(
                 market_name,
                 definition.identity.settle,
             )
-            until_ms = start_ms + 60_000 - (1 if profile.until_inclusive else 0)
-            params = {"until": until_ms} if profile.send_unified_until else {}
+            since_ms, params = pagination._request_window(
+                profile,
+                start_ms=start_ms,
+                end_ms=start_ms + 60_000,
+            )
             candles = exchange.fetch_ohlcv(
                 native.native_symbol,
                 "1m",
-                start_ms,
+                since_ms,
                 2,
                 params,
             )
@@ -764,7 +819,7 @@ def _semantic_probe(
     candle's trade-price OHLC and base-asset volume semantics.
     """
     from xret.data.models import Market
-    from xret.data.providers.ccxt import compatibility, markets, semantics
+    from xret.data.providers.ccxt import compatibility, markets, pagination, semantics
 
     results: dict[str, Any] = {}
     for market_name, market_family in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL)):
@@ -813,12 +868,15 @@ def _semantic_probe(
                         market_name,
                         definition.identity.settle,
                     )
-                    until_ms = start_ms + 60_000 - (1 if profile.until_inclusive else 0)
-                    params = {"until": until_ms} if profile.send_unified_until else {}
+                    since_ms, params = pagination._request_window(
+                        profile,
+                        start_ms=start_ms,
+                        end_ms=start_ms + 60_000,
+                    )
                     candles = exchange.fetch_ohlcv(
                         native.native_symbol,
                         "1m",
-                        start_ms,
+                        since_ms,
                         2,
                         params,
                     )
@@ -911,6 +969,26 @@ def _expected_scope_keys(definitions: dict[str, tuple[Any, ...]]) -> set[str]:
         else:
             keys.update(_scope_key(market_name, item.identity.settle) for item in available)
     return keys
+
+
+def _full_gate_status(
+    *,
+    market_errors: dict[str, str],
+    cases: list[dict[str, Any]],
+    expected_scopes: set[str],
+    witnessed_scopes: set[str],
+    semantic_scopes: set[str],
+) -> str:
+    accepted = {"pass", "pass_expected_unavailability"}
+    return (
+        "pass"
+        if not market_errors
+        and cases
+        and all(case["status"] in accepted for case in cases)
+        and expected_scopes <= witnessed_scopes
+        and expected_scopes <= semantic_scopes
+        else "candidate"
+    )
 
 
 def _semantic_probes_by_scope(
@@ -1167,7 +1245,6 @@ def _run_case(
     case: PlanCase,
     state_root: Path,
     now: datetime,
-    page_limit: int,
 ) -> dict[str, Any]:
     start, end = _range(now, case)
     result: dict[str, Any] = {
@@ -1175,7 +1252,7 @@ def _run_case(
         "plan": asdict(case),
         "start": _iso(start),
         "end": _iso(end),
-        "estimated_pages": _estimated_pages(case, page_limit),
+        "estimated_pages": _estimated_pages(case),
     }
     try:
         directory = state_root / hashlib.sha256(result["key"].encode()).hexdigest()[:16]
@@ -1352,31 +1429,61 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
                 errors[name] = f"{type(exc).__name__}: {exc}"
         result["market_counts"] = {name: len(values) for name, values in definitions.items()}
         result["market_errors"] = errors
-        profile_limits = [
-            profile.max_bars
-            for _, market in market_pairs
-            for profile in compatibility.observation_profiles(
-                scoped_client_id(exchange_id, market),
-                market.value,
+        market_by_name = dict(market_pairs)
+        plan_scopes = {
+            PlanScope.from_definition(definition)
+            for available in definitions.values()
+            for definition in available
+        }
+        page_bars_by_scope = {
+            scope: min(
+                args.page_limit,
+                compatibility.observation_profile(
+                    scoped_client_id(exchange_id, market_by_name[scope.market]),
+                    scope.market,
+                    scope.settle,
+                ).max_bars,
             )
-        ]
-        page_bars = min(args.page_limit, min(profile_limits))
+            for scope in plan_scopes
+        }
         cases = plan_cases(
             definitions,
             symbol_limit=args.symbols,
             target_samples=args.samples,
             preferred=PREFERRED_SYMBOLS,
             seed=args.seed,
-            page_bars=page_bars,
+            page_bars_by_scope=page_bars_by_scope,
         )
         result["planned_cases"] = [
-            {**asdict(case), "estimated_pages": _estimated_pages(case, page_bars)} for case in cases
+            {**asdict(case), "estimated_pages": _estimated_pages(case)} for case in cases
         ]
-        result["effective_page_bars"] = page_bars
-        result["estimated_pages"] = sum(_estimated_pages(case, page_bars) for case in cases)
+        result["effective_page_bars_by_scope"] = {
+            scope.key: page_bars for scope, page_bars in page_bars_by_scope.items()
+        }
+        result["estimated_pages"] = sum(_estimated_pages(case) for case in cases)
+        statistical_by_scope = {
+            scope.key: sum(
+                case.kind == "statistical"
+                and PlanScope(case.market, case.settle if case.market == "perpetual" else None)
+                == scope
+                for case in cases
+            )
+            for scope in plan_scopes
+        }
+        mandatory_by_scope = {
+            scope.key: sum(
+                case.kind == "mandatory"
+                and PlanScope(case.market, case.settle if case.market == "perpetual" else None)
+                == scope
+                for case in cases
+            )
+            for scope in plan_scopes
+        }
         result["plan_counts"] = {
             "mandatory": sum(case.kind == "mandatory" for case in cases),
             "statistical": sum(case.kind == "statistical" for case in cases),
+            "mandatory_by_scope": mandatory_by_scope,
+            "statistical_by_scope": statistical_by_scope,
         }
         if args.plan_only:
             result["status"] = "planned"
@@ -1397,17 +1504,27 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             result["semantically_verified_scopes"] = sorted(semantic_scopes)
             result["status"] = (
                 "semantic_pass"
-                if expected_scopes and expected_scopes <= semantic_scopes
+                if not errors and expected_scopes and expected_scopes <= semantic_scopes
                 else "candidate"
             )
         else:
+            # Keep the independent trade/candle witness ahead of the bulk
+            # campaign so a new CCXT client does not inherit an exhausted
+            # venue-wide anonymous-IP budget from hundreds of prior requests.
+            result["semantic_evidence"] = _semantic_probes_by_scope(
+                exchange_id,
+                definitions,
+                factory,
+                symbol_limit=args.semantic_symbols,
+                pro_timeout_seconds=args.semantic_pro_timeout,
+            )
             state_root = Path(
                 tempfile.mkdtemp(prefix=f"xret-qualification-{exchange_id}-", dir=args.temp_root)
             )
             try:
                 now = datetime.now(UTC)
                 for case in cases:
-                    case_result = _run_case(exchange_id, provider, case, state_root, now, page_bars)
+                    case_result = _run_case(exchange_id, provider, case, state_root, now)
                     result["cases"].append(case_result)
                     if (
                         sum(item["status"] == "fail" for item in result["cases"])
@@ -1422,14 +1539,6 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             finally:
                 if not args.keep_state:
                     shutil.rmtree(state_root, ignore_errors=True)
-            result["semantic_evidence"] = _semantic_probes_by_scope(
-                exchange_id,
-                definitions,
-                factory,
-                symbol_limit=args.semantic_symbols,
-                pro_timeout_seconds=args.semantic_pro_timeout,
-            )
-            accepted_statuses = {"pass", "pass_expected_unavailability"}
             witnessed_scopes = {
                 _scope_key(case["plan"]["market"], case["plan"].get("settle"))
                 for case in result["cases"]
@@ -1443,13 +1552,12 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             }
             result["nonempty_witnessed_scopes"] = sorted(witnessed_scopes)
             result["semantically_verified_scopes"] = sorted(semantic_scopes)
-            result["status"] = (
-                "pass"
-                if result["cases"]
-                and all(case["status"] in accepted_statuses for case in result["cases"])
-                and expected_scopes <= witnessed_scopes
-                and expected_scopes <= semantic_scopes
-                else "candidate"
+            result["status"] = _full_gate_status(
+                market_errors=errors,
+                cases=result["cases"],
+                expected_scopes=expected_scopes,
+                witnessed_scopes=witnessed_scopes,
+                semantic_scopes=semantic_scopes,
             )
     except Exception as exc:  # noqa: BLE001 - persisted evidence
         result.update(
@@ -1520,7 +1628,10 @@ def main() -> None:
     parser.add_argument(
         "--samples",
         type=int,
-        help="Statistical cases per exchange; defaults to the configured confidence minimum.",
+        help=(
+            "Statistical cases per exact market-family/settlement scope; "
+            "defaults to the configured confidence minimum."
+        ),
     )
     parser.add_argument("--confidence", type=float, default=0.999)
     parser.add_argument("--target-failure-rate", type=float, default=0.05)
@@ -1659,7 +1770,7 @@ def main() -> None:
             "target_failure_rate": args.target_failure_rate,
             "level": args.confidence,
             "zero_failure_independent_samples": required_samples,
-            "actual_statistical_samples_per_venue": args.samples,
+            "actual_statistical_samples_per_scope": args.samples,
             "mandatory_cases_excluded_from_sample_count": True,
         },
         "elapsed_seconds": (datetime.now(UTC) - started_at).total_seconds(),

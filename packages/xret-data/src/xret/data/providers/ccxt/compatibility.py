@@ -49,6 +49,7 @@ class CompatibilityPolicy:
 
     excluded_timeframes: frozenset[str] = frozenset()
     volume_mode: VolumeMode = VolumeMode.BASE_ASSET
+    live_volume_mode: VolumeMode | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +127,7 @@ _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = 
         volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
     ),
     CompatibilityScope("mexc", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"8h", "1M"})
+        excluded_timeframes=frozenset({"8h", "1w", "1M"})
     ),
     CompatibilityScope("pacifica", "perpetual"): CompatibilityPolicy(
         excluded_timeframes=frozenset({"1h"})
@@ -135,9 +136,10 @@ _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = 
     CompatibilityScope("woo"): CompatibilityPolicy(
         excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
     ),
+    CompatibilityScope("woo", "spot"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h"})),
     **{
         CompatibilityScope(client_id, "perpetual"): CompatibilityPolicy(
-            volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT
+            volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
         )
         for client_id in ("apex", "gate", "hashkey", "mexc", "toobit", "xt")
     },
@@ -282,6 +284,7 @@ def compatibility_policy(
     return CompatibilityPolicy(
         excluded_timeframes=shared.excluded_timeframes | specific.excluded_timeframes,
         volume_mode=specific.volume_mode,
+        live_volume_mode=specific.live_volume_mode or shared.live_volume_mode,
     )
 
 

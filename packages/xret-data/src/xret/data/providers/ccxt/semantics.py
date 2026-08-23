@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from xret.data.errors import UnsupportedMarketError
@@ -12,6 +13,7 @@ from xret.data.providers.ccxt.compatibility import (
     VolumeMode,
     compatibility_policy,
 )
+from xret.data.providers.contracts import ResolvedBarMarket
 
 RawOHLCVRow = Sequence[float]
 
@@ -73,3 +75,36 @@ def normalize_ohlcv(
             f"{client_id} perpetual market has no positive CCXT contractSize"
         )
     return tuple((*row[:5], float(row[5]) * float(contract_size), *row[6:]) for row in rows)
+
+
+def normalize_live_volume(
+    client_id: str,
+    market: ResolvedBarMarket,
+    volume: float,
+) -> float:
+    """Convert a qualified CCXT Pro candle volume to base quantity.
+
+    Historical and WebSocket adapters can select different native fields. The
+    live channel inherits the historical representation unless qualification
+    records an explicit delivery-channel override.
+    """
+    policy = compatibility_policy(client_id, market.identity.market.value)
+    live_volume_mode = policy.live_volume_mode or policy.volume_mode
+    if live_volume_mode is VolumeMode.BASE_ASSET:
+        return volume
+    derivative = market.derivative
+    if derivative is None or derivative.linear is not True:
+        raise UnsupportedMarketError(
+            f"{client_id} live candles do not expose exact base-asset volume"
+        )
+    try:
+        contract_size = Decimal(derivative.contract_size or "")
+    except InvalidOperation as exc:
+        raise UnsupportedMarketError(
+            f"{client_id} live perpetual market has no valid contract size"
+        ) from exc
+    if not contract_size.is_finite() or contract_size <= 0:
+        raise UnsupportedMarketError(
+            f"{client_id} live perpetual market has no positive contract size"
+        )
+    return volume * float(contract_size)

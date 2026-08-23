@@ -52,7 +52,28 @@ def _definitions() -> dict[str, tuple[_Definition, ...]]:
                 True,
                 frozenset({"1m", "1h", "1d", "1M"}),
             ),
+            _Definition(
+                MarketIdentity(
+                    exchange="bybit",
+                    symbol="ETH/USDT",
+                    market="perpetual",
+                    settle="USDT",
+                ),
+                True,
+                frozenset({"1m", "1h", "1d", "1M"}),
+            ),
         ),
+    }
+
+
+def _page_bars_by_scope(
+    definitions: dict[str, tuple[_Definition, ...]],
+    page_bars: int = 300,
+) -> dict[gate.PlanScope, int]:
+    return {
+        gate.PlanScope.from_definition(definition): page_bars
+        for available in definitions.values()
+        for definition in available
     }
 
 
@@ -153,6 +174,24 @@ def test_expected_semantic_scopes_keep_derivative_settlements_separate() -> None
         "perpetual/USDT",
         "perpetual/BTC",
     }
+
+
+def test_requested_market_discovery_error_prevents_a_full_gate_pass() -> None:
+    arguments = {
+        "cases": [{"status": "pass"}],
+        "expected_scopes": {"perpetual/USDT"},
+        "witnessed_scopes": {"perpetual/USDT"},
+        "semantic_scopes": {"perpetual/USDT"},
+    }
+
+    assert gate._full_gate_status(market_errors={}, **arguments) == "pass"
+    assert (
+        gate._full_gate_status(
+            market_errors={"spot": "ProviderError: discovery failed"},
+            **arguments,
+        )
+        == "candidate"
+    )
 
 
 def test_semantic_trade_aggregate_converts_contracts_to_base_volume() -> None:
@@ -325,20 +364,95 @@ def test_missing_complete_rest_minute_is_adjudicated_by_pro(
     assert result["perpetual"]["rest_evidence"]["attempted"][0]["complete_trade_minutes"] == 0
 
 
+def test_semantic_probe_uses_the_qualified_native_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from xret.data.providers.ccxt import markets
+
+    definition = _Definition(
+        MarketIdentity(
+            exchange="dydx",
+            symbol="BTC/USDC",
+            market="perpetual",
+            settle="USDC",
+        ),
+        True,
+        frozenset({"1m"}),
+    )
+    trades = [
+        {"timestamp": 1, "price": 10.0, "amount": 1.0},
+        {"timestamp": 60_000, "price": 10.0, "amount": 1.0},
+        {"timestamp": 90_000, "price": 11.0, "amount": 2.0},
+        {"timestamp": 120_000, "price": 11.0, "amount": 1.0},
+    ]
+
+    class Exchange:
+        has = {"fetchTrades": True}
+
+        def load_markets(self) -> None:
+            return None
+
+        def market(self, _symbol: str) -> dict[str, object]:
+            return {"contract": False}
+
+        def fetch_trades(self, _symbol: str, _since: None, _limit: int) -> list[dict[str, object]]:
+            return trades
+
+        def fetch_ohlcv(
+            self,
+            _symbol: str,
+            _timeframe: str,
+            since: None,
+            _limit: int,
+            params: dict[str, str],
+        ) -> list[list[float]]:
+            assert since is None
+            assert params == {
+                "fromISO": "1970-01-01T00:01:00.000Z",
+                "toISO": "1970-01-01T00:01:59.999Z",
+            }
+            return [[60_000, 10.0, 11.0, 10.0, 11.0, 3.0]]
+
+    monkeypatch.setattr(
+        markets,
+        "resolve",
+        lambda _identity, _exchange: SimpleNamespace(native_symbol="BTC/USDC:USDC"),
+    )
+
+    result = gate._semantic_probe(
+        "dydx",
+        {"perpetual": (definition,)},
+        lambda _client_id: Exchange(),
+        symbol_limit=1,
+        pro_timeout_seconds=1.0,
+    )
+
+    assert result["perpetual"]["status"] == "pass"
+
+
 def test_mandatory_risk_cases_do_not_count_toward_statistical_sample() -> None:
+    definitions = _definitions()
     cases = gate.plan_cases(
-        _definitions(),
+        definitions,
         symbol_limit=2,
         target_samples=135,
         preferred=gate.PREFERRED_SYMBOLS,
         seed=20260823,
-        page_bars=300,
+        page_bars_by_scope=_page_bars_by_scope(definitions),
     )
 
     statistical = [case for case in cases if case.kind == "statistical"]
     mandatory = [case for case in cases if case.kind == "mandatory"]
 
-    assert len(statistical) == 135
+    statistical_by_scope = {
+        scope: sum(gate.PlanScope(case.market, case.settle) == scope for case in statistical)
+        for scope in _page_bars_by_scope(definitions)
+    }
+
+    assert statistical_by_scope == {
+        gate.PlanScope("spot", None): 135,
+        gate.PlanScope("perpetual", "USDT"): 135,
+    }
     assert mandatory
     assert {
         "one-bar",
@@ -360,18 +474,72 @@ def test_mandatory_risk_cases_do_not_count_toward_statistical_sample() -> None:
 
 
 def test_statistical_plan_is_reproducible_and_covers_time_strata() -> None:
+    definitions = _definitions()
     arguments = {
         "symbol_limit": 2,
         "target_samples": 135,
         "preferred": gate.PREFERRED_SYMBOLS,
         "seed": 20260823,
-        "page_bars": 300,
+        "page_bars_by_scope": _page_bars_by_scope(definitions),
     }
 
-    first = gate.plan_cases(_definitions(), **arguments)
-    second = gate.plan_cases(_definitions(), **arguments)
+    first = gate.plan_cases(definitions, **arguments)
+    second = gate.plan_cases(definitions, **arguments)
 
     assert first == second
     statistical = [case for case in first if case.kind == "statistical"]
     assert {case.end_offset_days for case in statistical} == set(gate._STATISTICAL_OFFSETS_DAYS)
     assert {case.bars for case in statistical} == set(gate._STATISTICAL_WINDOW_BARS)
+
+
+def test_each_settlement_receives_its_own_mandatory_edge_suite() -> None:
+    definitions = _definitions()
+    definitions["perpetual"] += (
+        _Definition(
+            MarketIdentity(
+                exchange="bybit",
+                symbol="BTC/USDC",
+                market="perpetual",
+                settle="USDC",
+            ),
+            True,
+            frozenset({"1m", "1h", "1d", "1M"}),
+        ),
+        _Definition(
+            MarketIdentity(
+                exchange="bybit",
+                symbol="ETH/USDC",
+                market="perpetual",
+                settle="USDC",
+            ),
+            True,
+            frozenset({"1m", "1h", "1d", "1M"}),
+        ),
+    )
+
+    cases = gate.plan_cases(
+        definitions,
+        symbol_limit=2,
+        target_samples=135,
+        preferred=gate.PREFERRED_SYMBOLS,
+        seed=20260823,
+        page_bars_by_scope=_page_bars_by_scope(definitions),
+    )
+
+    required = {
+        "pagination-n-minus-1",
+        "pagination-n",
+        "pagination-n-plus-1",
+        "pagination-two-n-plus-1",
+        "incremental-left-right",
+        "concurrent-same-dataset",
+        "long-history-1y",
+        "long-history-3y",
+    }
+    for settle in ("USDT", "USDC"):
+        scenarios = {
+            case.scenario
+            for case in cases
+            if case.kind == "mandatory" and case.market == "perpetual" and case.settle == settle
+        }
+        assert required <= scenarios
