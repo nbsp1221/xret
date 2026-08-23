@@ -95,12 +95,18 @@ def test_native_data_violations_exclude_the_entire_affected_timeframe() -> None:
 
 def test_qualified_closed_window_and_derived_end_profiles_are_explicit() -> None:
     kucoin = compatibility.observation_profile("kucoinfutures", "perpetual", "USDT")
-    htx = compatibility.observation_profile("htx", "spot")
+    htx_spot = compatibility.observation_profile("htx", "spot")
+    htx_perpetual = compatibility.observation_profile("htx", "perpetual", "USDT")
+    bitso = compatibility.observation_profile("bitso", "spot")
 
     assert kucoin.send_unified_until is False
     assert kucoin.accept_end_boundary is True
-    assert htx.send_unified_until is True
-    assert htx.accept_end_boundary is True
+    assert htx_spot.send_unified_until is True
+    assert htx_spot.accept_end_boundary is True
+    assert htx_perpetual.send_page_limit is False
+    assert htx_perpetual.accept_end_boundary is True
+    assert bitso.max_bars == 1000
+    assert bitso.accept_end_boundary is True
 
     xt = compatibility.observation_profile("xt", "perpetual", "USDT")
     assert xt.until_inclusive is False

@@ -22,7 +22,7 @@ from xret.data.timeframe import TimeBar
 
 RawOHLCVRow = Sequence[float]
 WindowParameter = int | str
-PageFetcher = Callable[[int | None, int, dict[str, WindowParameter]], list[list[float]]]
+PageFetcher = Callable[[int | None, int | None, dict[str, WindowParameter]], list[list[float]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +192,8 @@ def paginate_ohlcv(
         # half-open page using the qualified endpoint contract so a full page
         # contains at most `effective_limit` candle boundaries.
         request_since, params = _request_window(profile, start_ms=start_ms, end_ms=end_ms)
-        batch = fetch_page(request_since, page_bars, params)
+        request_limit = page_bars if profile.send_page_limit else None
+        batch = fetch_page(request_since, request_limit, params)
         _validate_page(
             batch,
             native_symbol=native_symbol,

@@ -66,6 +66,7 @@ class ObservationProfile:
 
     max_bars: int
     max_span: timedelta | None = None
+    send_page_limit: bool = True
     send_unified_until: bool = True
     until_inclusive: bool = True
     accept_end_boundary: bool = False
@@ -147,6 +148,7 @@ def _profile(
     max_bars: int,
     *,
     max_span: timedelta | None = None,
+    send_page_limit: bool = True,
     send_unified_until: bool = True,
     until_inclusive: bool = True,
     accept_end_boundary: bool = False,
@@ -155,6 +157,7 @@ def _profile(
     return ObservationProfile(
         max_bars=max_bars,
         max_span=max_span,
+        send_page_limit=send_page_limit,
         send_unified_until=send_unified_until,
         until_inclusive=until_inclusive,
         accept_end_boundary=accept_end_boundary,
@@ -178,6 +181,7 @@ _OBSERVATION_PROFILES: Final[dict[EndpointScope, ObservationProfile]] = {
     EndpointScope("bitget", "perpetual", "USDT"): _profile(100, max_span=timedelta(days=90)),
     EndpointScope("bitrue", "spot"): _profile(1000),
     EndpointScope("bitstamp", "spot"): _profile(100),
+    EndpointScope("bitso", "spot"): _profile(1000, accept_end_boundary=True),
     EndpointScope("bitvavo", "spot"): _profile(100, until_inclusive=False),
     EndpointScope("btcturk", "spot"): _profile(100, accept_end_boundary=True),
     EndpointScope("bybit", "spot"): _profile(1000),
@@ -201,6 +205,11 @@ _OBSERVATION_PROFILES: Final[dict[EndpointScope, ObservationProfile]] = {
     EndpointScope("hyperliquid", "spot"): _profile(1000),
     EndpointScope("hyperliquid", "perpetual", "USDC"): _profile(1000),
     EndpointScope("htx", "spot"): _profile(100, accept_end_boundary=True),
+    EndpointScope("htx", "perpetual", "USDT"): _profile(
+        100,
+        send_page_limit=False,
+        accept_end_boundary=True,
+    ),
     EndpointScope("krakenfutures", "perpetual", "USD"): _profile(
         100,
         send_unified_until=False,

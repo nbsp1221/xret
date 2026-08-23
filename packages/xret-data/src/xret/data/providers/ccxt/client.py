@@ -125,7 +125,7 @@ def fetch_page(
     native_symbol: str,
     timeframe: str,
     since_ms: int | None,
-    page_limit: int,
+    page_limit: int | None,
     params: dict[str, int | str],
     retry: RetryPolicy,
     pacer: RequestPacer,

@@ -1356,6 +1356,39 @@ def test_endpoint_that_derives_bounds_from_since_and_limit_omits_until(monkeypat
     assert received == [(_BASE_MS, 1, {})]
 
 
+def test_endpoint_that_ignores_bounds_when_limit_is_present_omits_limit(monkeypatch) -> None:
+    received: list[tuple[int, int | None, dict[str, int]]] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        limit: int | None,
+        params: dict[str, int],
+    ) -> list[list[float]]:
+        received.append((since, limit, params))
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, send_page_limit=False),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received == [(_BASE_MS, None, {"until": _BASE_MS + 60_000 - 1})]
+
+
 def test_native_iso_window_uses_exact_names_and_omits_unified_since(monkeypatch) -> None:
     received: list[tuple[int | None, int, dict[str, int | str]]] = []
 
