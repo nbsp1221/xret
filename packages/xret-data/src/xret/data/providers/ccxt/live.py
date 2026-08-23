@@ -10,7 +10,7 @@ from typing import Any, Protocol, Self, cast
 
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.providers import ProviderBarUpdate, ResolvedBarMarket
-from xret.data.providers.ccxt import markets, semantics
+from xret.data.providers.ccxt import compatibility, markets, semantics
 
 DEFAULT_LIVE_QUEUE_SIZE = 1024
 
@@ -128,6 +128,12 @@ class CcxtLiveBarSession:
         if key in self._subscriptions:
             raise ProviderError(f"duplicate CCXT live subscription: {key!r}")
         client_id = markets.client_id(market.identity)
+        compatibility.require_live_endpoint(
+            client_id,
+            market.identity.market.value,
+            market.identity.settle,
+            timeframe,
+        )
         client = self._clients.get(client_id)
         if client is None:
             client = self._exchange_factory(client_id)

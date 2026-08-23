@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -48,9 +49,14 @@ def supports_canonical_volume(
 ) -> bool:
     """Whether one native market can express exact Xret base volume."""
     effective = policy or compatibility_policy(client_id, _market_family(market))
-    return not (
-        effective.volume_mode is VolumeMode.LINEAR_CONTRACT_COUNT
-        and market.get("linear") is not True
+    if effective.volume_mode is VolumeMode.BASE_ASSET:
+        return True
+    contract_size = market.get("contractSize")
+    return (
+        market.get("linear") is True
+        and isinstance(contract_size, int | float)
+        and math.isfinite(contract_size)
+        and contract_size > 0
     )
 
 

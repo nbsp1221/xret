@@ -16,7 +16,7 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import BarRequest, MarketIdentity
+from xret.data.models import BarRequest, Market, MarketIdentity
 from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.ccxt import CcxtProvider, client, compatibility, markets
@@ -383,6 +383,45 @@ def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
     definitions = _market_data().fetch_markets(exchange="binance", market="spot")
 
     assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
+    btc = _default_markets()["BTC/USDT"]
+    eth = {
+        **btc,
+        "id": "ETHUSDT",
+        "symbol": "ETH/USDT",
+        "base": "ETH",
+    }
+
+    class ReloadingExchange(FakeExchange):
+        def __init__(self) -> None:
+            super().__init__(client_id="binance", markets={})
+            self.remote_markets = {"BTC/USDT": btc}
+
+        def load_markets(self, reload: bool = False) -> dict:
+            self.load_markets_calls += 1
+            if reload or not self.markets:
+                self.markets = dict(self.remote_markets)
+            return self.markets
+
+    exchange = ReloadingExchange()
+    provider = CcxtProvider(
+        exchange_factory=lambda _client_id: exchange,
+        version_provider=lambda: "test",
+        tick_size_precision_mode_provider=lambda: 4,
+    )
+
+    first = provider.fetch_markets(exchange="binance", market=Market.SPOT)
+    exchange.remote_markets["ETH/USDT"] = eth
+    second = provider.fetch_markets(exchange="binance", market=Market.SPOT)
+    resolved = provider.resolve_market(
+        MarketIdentity(exchange="binance", symbol="ETH/USDT", market=Market.SPOT)
+    )
+
+    assert [item.identity.symbol for item in first] == ["BTC/USDT"]
+    assert {item.identity.symbol for item in second} == {"BTC/USDT", "ETH/USDT"}
+    assert resolved.identity.symbol == "ETH/USDT"
 
 
 def test_fetch_markets_preserves_unknown_active_and_unknown_fixed_increments() -> None:
@@ -1467,6 +1506,7 @@ def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypat
     )
 
     assert frame["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+    assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 2)]
 
 
 def test_unqualified_exchange_pagination_fails_closed() -> None:

@@ -44,6 +44,16 @@ class EndpointScope:
 
 
 @dataclass(frozen=True, slots=True)
+class LiveEndpointScope:
+    """An exact CCXT Pro scope whose canonical trade updates are qualified."""
+
+    client_id: str
+    market_family: MarketFamily
+    settle: str | None
+    timeframe: str
+
+
+@dataclass(frozen=True, slots=True)
 class CompatibilityPolicy:
     """Lossless semantic corrections known for one effective endpoint scope."""
 
@@ -258,6 +268,18 @@ _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
 }
 
 
+_LIVE_ENDPOINT_SCOPES: Final[frozenset[LiveEndpointScope]] = frozenset(
+    {
+        LiveEndpointScope("binance", "spot", None, "1m"),
+        LiveEndpointScope("binanceusdm", "perpetual", "USDT", "1m"),
+        LiveEndpointScope("bybit", "spot", None, "1m"),
+        LiveEndpointScope("bybit", "perpetual", "USDT", "1m"),
+        LiveEndpointScope("okx", "spot", None, "1m"),
+        LiveEndpointScope("okx", "perpetual", "USDT", "1m"),
+    }
+)
+
+
 def _validated_market_family(value: str) -> MarketFamily:
     if value == "spot":
         return "spot"
@@ -288,6 +310,15 @@ def compatibility_policy(
     )
 
 
+def has_explicit_compatibility_policy(client_id: str, market_family: str) -> bool:
+    """Whether semantic facts were deliberately recorded for one family."""
+    family = _validated_market_family(market_family)
+    return (
+        CompatibilityScope(client_id) in _COMPATIBILITY_POLICIES
+        or CompatibilityScope(client_id, family) in _COMPATIBILITY_POLICIES
+    )
+
+
 def observation_profile(
     client_id: str,
     market_family: str,
@@ -297,8 +328,6 @@ def observation_profile(
     family = _validated_market_family(market_family)
     exact = EndpointScope(client_id, family, settle)
     profile = _OBSERVATION_PROFILES.get(exact)
-    if profile is None and settle is not None:
-        profile = _OBSERVATION_PROFILES.get(EndpointScope(client_id, family))
     if profile is None:
         suffix = f"/{settle}" if settle is not None else ""
         raise UnsupportedMarketError(
@@ -338,6 +367,23 @@ def transport_policy(client_id: str) -> TransportPolicy:
     return _TRANSPORT_POLICIES.get(client_id, TransportPolicy())
 
 
+def require_live_endpoint(
+    client_id: str,
+    market_family: str,
+    settle: str | None,
+    timeframe: str,
+) -> None:
+    """Fail closed unless one exact CCXT Pro trade-bar scope is qualified."""
+    family = _validated_market_family(market_family)
+    scope = LiveEndpointScope(client_id, family, settle, timeframe)
+    if scope not in _LIVE_ENDPOINT_SCOPES:
+        suffix = f"/{settle}" if settle is not None else ""
+        raise UnsupportedMarketError(
+            f"{client_id}/{family}{suffix}/{timeframe} has no qualified canonical "
+            "CCXT Pro trade-bar contract"
+        )
+
+
 def validate_registries() -> None:
     """Reject malformed compatibility facts before they reach live I/O."""
     for scope, policy in _COMPATIBILITY_POLICIES.items():
@@ -348,6 +394,12 @@ def validate_registries() -> None:
     for scope, profile in _OBSERVATION_PROFILES.items():
         if not scope.client_id:
             raise ProviderError("CCXT observation client ID must not be empty")
+        if scope.market_family == "spot" and scope.settle is not None:
+            raise ProviderError(f"CCXT spot observation scope cannot settle for {scope!r}")
+        if scope.market_family == "perpetual" and scope.settle is None:
+            raise ProviderError(
+                f"CCXT perpetual observation scope must settle exactly for {scope!r}"
+            )
         if profile.max_bars <= 0:
             raise ProviderError(f"CCXT observation max_bars must be positive for {scope!r}")
         if profile.max_span is not None and profile.max_span <= timedelta(0):
@@ -364,3 +416,12 @@ def validate_registries() -> None:
             raise ProviderError("CCXT transport client ID must not be empty")
         if policy.minimum_ohlcv_interval_seconds < 0:
             raise ProviderError(f"CCXT OHLCV interval must not be negative for {client_id!r}")
+    for scope in _LIVE_ENDPOINT_SCOPES:
+        if scope.market_family == "spot" and scope.settle is not None:
+            raise ProviderError(f"CCXT live spot scope cannot settle for {scope!r}")
+        if scope.market_family == "perpetual" and scope.settle is None:
+            raise ProviderError(f"CCXT live perpetual scope must settle exactly for {scope!r}")
+        TimeBar.parse(scope.timeframe)
+
+
+validate_registries()

@@ -133,10 +133,15 @@ def _perpetual(identity: MarketIdentity, markets: dict[str, Any]) -> CcxtMarket:
     return _resolved_market(symbol, settlement, market)
 
 
-def resolve(identity: MarketIdentity, exchange: CCXTExchange) -> CcxtMarket:
+def resolve(
+    identity: MarketIdentity,
+    exchange: CCXTExchange,
+    *,
+    reload: bool = False,
+) -> CcxtMarket:
     if not exchange.has.get("fetchOHLCV"):
         raise UnsupportedMarketError(f"{exchange.id} does not support fetchOHLCV")
-    native_markets = exchange.load_markets()
+    native_markets = exchange.load_markets(reload=reload)
     return (
         _spot(identity, native_markets)
         if identity.market is Market.SPOT

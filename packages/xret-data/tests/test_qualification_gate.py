@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import threading
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -144,6 +146,17 @@ def test_semantic_probe_uses_only_complete_middle_trade_minutes() -> None:
     assert gate._complete_trade_buckets(trades, step_ms=60_000) == [(60_000, trades[1:3])]
 
 
+def test_semantic_probe_excludes_zero_quantity_non_executions() -> None:
+    trades = [
+        {"timestamp": 1, "price": 10.0, "amount": 1.0},
+        {"timestamp": 60_000, "price": 0.0, "amount": 0.0},
+        {"timestamp": 60_001, "price": 11.0, "amount": 2.0},
+        {"timestamp": 120_000, "price": 12.0, "amount": 1.0},
+    ]
+
+    assert gate._complete_trade_buckets(trades, step_ms=60_000) == [(60_000, [trades[2]])]
+
+
 def test_settlement_filter_applies_only_to_perpetual_definitions() -> None:
     definitions = _definitions()
 
@@ -185,6 +198,14 @@ def test_requested_market_discovery_error_prevents_a_full_gate_pass() -> None:
     }
 
     assert gate._full_gate_status(market_errors={}, **arguments) == "pass"
+    assert (
+        gate._full_gate_status(
+            market_errors={},
+            unresolved_assumptions={"perpetual/USDT"},
+            **arguments,
+        )
+        == "candidate"
+    )
     assert (
         gate._full_gate_status(
             market_errors={"spot": "ProviderError: discovery failed"},
@@ -490,6 +511,94 @@ def test_statistical_plan_is_reproducible_and_covers_time_strata() -> None:
     statistical = [case for case in first if case.kind == "statistical"]
     assert {case.end_offset_days for case in statistical} == set(gate._STATISTICAL_OFFSETS_DAYS)
     assert {case.bars for case in statistical} == set(gate._STATISTICAL_WINDOW_BARS)
+    assert {case.stratum.split(":")[1] for case in statistical} == {"major", "secondary"}
+
+
+def test_plan_ignores_inactive_market_for_mandatory_timeframe_coverage() -> None:
+    definitions = _definitions()
+    inactive = _Definition(
+        MarketIdentity(exchange="bybit", symbol="OLD/USDT", market="spot"),
+        False,
+        frozenset({"12h"}),
+    )
+    definitions["spot"] += (inactive,)
+
+    cases = gate.plan_cases(
+        definitions,
+        symbol_limit=2,
+        target_samples=20,
+        preferred=gate.PREFERRED_SYMBOLS,
+        seed=20260823,
+        page_bars_by_scope=_page_bars_by_scope(definitions),
+    )
+
+    assert not any(case.symbol == "OLD/USDT" for case in cases)
+
+
+def test_page_estimate_accounts_for_profile_span_limit() -> None:
+    case = gate.PlanCase(
+        market="spot",
+        symbol="BTC/USDT",
+        settle=None,
+        timeframe="1d",
+        scenario="long",
+        bars=257,
+        end_anchor="recent",
+        end_offset_days=0,
+        stratum="mandatory",
+        kind="mandatory",
+        page_bars=100,
+        max_span_seconds=90 * 86_400,
+    )
+
+    assert gate._estimated_pages(case) == 6
+
+
+def test_concurrent_case_rejects_divergent_completion_results() -> None:
+    outcomes = iter(
+        (
+            SimpleNamespace(is_complete=False, changed=True, fetched_rows=1, gaps=("gap",)),
+            SimpleNamespace(is_complete=True, changed=False, fetched_rows=0, gaps=()),
+        )
+    )
+    lock = threading.Lock()
+
+    class Bars:
+        def sync(self, _start: object, _end: object) -> object:
+            with lock:
+                return next(outcomes)
+
+    case = SimpleNamespace(timeframe="1m")
+
+    with pytest.raises(AssertionError, match="divergent completion or gap"):
+        gate._run_concurrent_case(object(), Bars(), case, object(), object())
+
+
+def test_calendar_misalignment_case_reaches_both_public_operations() -> None:
+    from xret.data.errors import InvalidRequestError
+
+    calls: list[tuple[datetime, datetime]] = []
+
+    class Bars:
+        def fetch(self, start: datetime, end: datetime) -> None:
+            calls.append((start, end))
+            raise InvalidRequestError("misaligned")
+
+        def sync(self, start: datetime, end: datetime) -> None:
+            calls.append((start, end))
+            raise InvalidRequestError("misaligned")
+
+    gate._assert_invalid_case(
+        Bars(),
+        SimpleNamespace(lifecycle="invalid-misaligned", timeframe="1M"),
+        datetime(2026, 1, 1, tzinfo=UTC),
+        datetime(2026, 2, 1, tzinfo=UTC),
+    )
+
+    assert calls == [
+        (datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)),
+        (datetime(2026, 1, 2, tzinfo=UTC), datetime(2026, 2, 1, tzinfo=UTC)),
+    ]
 
 
 def test_each_settlement_receives_its_own_mandatory_edge_suite() -> None:

@@ -49,6 +49,20 @@ def test_contract_count_inverse_market_is_excluded_instead_of_approximated() -> 
         )
 
 
+@pytest.mark.parametrize("contract_size", [None, 0.0, -1.0, float("nan"), float("inf")])
+def test_contract_count_market_requires_finite_positive_contract_size(
+    contract_size: float | None,
+) -> None:
+    market = {
+        "swap": True,
+        "linear": True,
+        "inverse": False,
+        "contractSize": contract_size,
+    }
+
+    assert not semantics.supports_canonical_volume("mexc", market)
+
+
 def test_kucoin_live_contract_count_is_converted_to_base_volume() -> None:
     market = ResolvedBarMarket(
         identity=MarketIdentity(

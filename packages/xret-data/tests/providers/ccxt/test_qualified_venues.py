@@ -9,7 +9,7 @@ entire advertised catalog instead of the timeframe the caller asked for.
 These tests read `ccxt.<id>().timeframes`, a static class attribute that
 needs no network, and assert the boundary contract for every venue Xret
 claims a qualified pagination profile for. Deriving the venue list from
-`pagination._PROFILES` rather than restating it keeps a newly qualified
+`compatibility._OBSERVATION_PROFILES` rather than restating it keeps a newly qualified
 venue covered automatically; a hardcoded copy would silently miss it.
 """
 

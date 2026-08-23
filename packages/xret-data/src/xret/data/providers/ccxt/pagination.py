@@ -192,7 +192,11 @@ def paginate_ohlcv(
         # half-open page using the qualified endpoint contract so a full page
         # contains at most `effective_limit` candle boundaries.
         request_since, params = _request_window(profile, start_ms=start_ms, end_ms=end_ms)
-        request_limit = page_bars if profile.send_page_limit else None
+        request_limit = (
+            min(profile.max_bars, page_bars + int(profile.accept_end_boundary))
+            if profile.send_page_limit
+            else None
+        )
         batch = fetch_page(request_since, request_limit, params)
         _validate_page(
             batch,

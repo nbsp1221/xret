@@ -121,6 +121,7 @@ class PlanCase:
     stratum: str
     kind: str
     page_bars: int
+    max_span_seconds: float | None = None
     lifecycle: str = "standard"
 
 
@@ -196,6 +197,7 @@ def plan_cases(
     preferred: tuple[str, ...],
     seed: int,
     page_bars_by_scope: dict[PlanScope, int],
+    max_span_seconds_by_scope: dict[PlanScope, float | None] | None = None,
 ) -> list[PlanCase]:
     """Build mandatory risk cases plus a separate statistical sample.
 
@@ -205,6 +207,7 @@ def plan_cases(
     A deterministic stratified pool then contributes exactly the requested
     number of statistical cases for every exact market-family/settlement scope.
     """
+    max_span_seconds_by_scope = max_span_seconds_by_scope or {}
     selected_by_scope: dict[PlanScope, list[tuple[Any, str]]] = {}
     all_by_scope_timeframe: dict[tuple[PlanScope, str], Any] = {}
     for values in definitions.values():
@@ -220,6 +223,8 @@ def plan_cases(
                     all_by_scope_timeframe.setdefault((scope, timeframe), definition)
                     selected.append((definition, timeframe))
             for definition in scoped_definitions:
+                if definition.active is False:
+                    continue
                 for timeframe in definition.timeframes:
                     all_by_scope_timeframe.setdefault((scope, timeframe), definition)
     cases: list[PlanCase] = []
@@ -261,6 +266,7 @@ def plan_cases(
                     stratum,
                     kind,
                     page_bars,
+                    max_span_seconds_by_scope.get(PlanScope.from_definition(definition)),
                     lifecycle,
                 )
             )
@@ -444,9 +450,22 @@ def plan_cases(
             for offset in _STATISTICAL_OFFSETS_DAYS
             for bars in _STATISTICAL_WINDOW_BARS
         ]
-        rng.shuffle(pool)
+        by_stratum: dict[str, list[tuple[Any, str, int, int]]] = {}
+        for item in pool:
+            by_stratum.setdefault(_symbol_stratum(item[0].identity.symbol, preferred), []).append(
+                item
+            )
+        for values in by_stratum.values():
+            rng.shuffle(values)
+        ordered_pool: list[tuple[Any, str, int, int]] = []
+        strata = sorted(by_stratum)
+        while any(by_stratum.values()):
+            for stratum in strata:
+                values = by_stratum[stratum]
+                if values:
+                    ordered_pool.append(values.pop())
         statistical_count = 0
-        for definition, timeframe, offset, bars in pool:
+        for definition, timeframe, offset, bars in ordered_pool:
             if statistical_count >= target_samples:
                 break
             symbol_class = _symbol_stratum(definition.identity.symbol, preferred)
@@ -505,7 +524,12 @@ def _estimated_pages(case: PlanCase) -> int:
     multiplier = 3 if case.lifecycle == "incremental" else 2
     if case.lifecycle.startswith("invalid-"):
         return 0
-    return multiplier * math.ceil(case.bars / case.page_bars)
+    effective_page_bars = case.page_bars
+    if case.max_span_seconds is not None:
+        timeframe_seconds = _timeframe_days(case.timeframe) * 86_400
+        span_bars = max(1, math.floor(case.max_span_seconds / timeframe_seconds))
+        effective_page_bars = min(effective_page_bars, span_bars)
+    return multiplier * math.ceil(case.bars / effective_page_bars)
 
 
 def _prepare_directories(output: Path, temp_root: Path) -> None:
@@ -585,6 +609,17 @@ def _semantic_field_matches(
     tick = (
         float(raw_tick) * 1.000001 if isinstance(raw_tick, int | float) and raw_tick > 0 else 1e-12
     )
+    raw_amount_precision = precision.get("amount") if isinstance(precision, dict) else None
+    if isinstance(raw_amount_precision, int) and raw_amount_precision >= 0:
+        volume_tolerance = 10.0 ** (-raw_amount_precision)
+    elif (
+        isinstance(raw_amount_precision, float)
+        and math.isfinite(raw_amount_precision)
+        and raw_amount_precision > 0
+    ):
+        volume_tolerance = raw_amount_precision
+    else:
+        volume_tolerance = 1e-12
     return {
         # Millisecond timestamps lose execution order among trades sharing a
         # boundary millisecond. Membership is the strongest lossless check.
@@ -596,10 +631,14 @@ def _semantic_field_matches(
         "close": any(
             _numbers_close(actual[3], price, relative=1e-9, absolute=tick) for price in last_prices
         ),
-        # Official derivative candle endpoints sometimes round base volume
-        # below the public trade feed's precision. This still rejects unit
-        # confusion by orders of magnitude.
-        "volume": _numbers_close(actual[4], expected[4], relative=0.001, absolute=1e-12),
+        # The endpoint may round its aggregate to the declared amount
+        # precision. No broader relative approximation is accepted.
+        "volume": _numbers_close(
+            actual[4],
+            expected[4],
+            relative=1e-9,
+            absolute=volume_tolerance,
+        ),
     }
 
 
@@ -612,6 +651,8 @@ def _complete_trade_buckets(
         if trade.get("timestamp") is not None
         and trade.get("price") is not None
         and trade.get("amount") is not None
+        and float(trade["price"]) > 0
+        and float(trade["amount"]) > 0
     ]
     if not valid:
         return []
@@ -649,7 +690,8 @@ def _watch_complete_trade_minute(
         exchange = exchange_class({"enableRateLimit": True, "newUpdates": True})
         started = time.monotonic()
         target_start_ms: int | None = None
-        collected: dict[tuple[object, ...], dict[str, Any]] = {}
+        collected_by_id: dict[object, dict[str, Any]] = {}
+        idless: list[dict[str, Any]] = []
         try:
             await exchange.load_markets()
             if not exchange.has.get("watchTrades"):
@@ -663,8 +705,8 @@ def _watch_complete_trade_minute(
                 now_ms = int(time.time() * 1000)
                 if target_start_ms is not None:
                     target_end_ms = target_start_ms + 60_000
-                    if now_ms >= target_end_ms + 2_000 and collected:
-                        return target_start_ms, list(collected.values())
+                    if now_ms >= target_end_ms + 2_000 and (collected_by_id or idless):
+                        return target_start_ms, [*collected_by_id.values(), *idless]
                     until_closed = max(0.1, (target_end_ms + 2_000 - now_ms) / 1000)
                     wait_seconds = min(remaining, until_closed)
                 else:
@@ -678,9 +720,9 @@ def _watch_complete_trade_minute(
                     if (
                         target_start_ms is not None
                         and int(time.time() * 1000) >= target_start_ms + 62_000
-                        and collected
+                        and (collected_by_id or idless)
                     ):
-                        return target_start_ms, list(collected.values())
+                        return target_start_ms, [*collected_by_id.values(), *idless]
                     continue
                 if target_start_ms is None:
                     observed_ms = int(time.time() * 1000)
@@ -692,17 +734,16 @@ def _watch_complete_trade_minute(
                         timestamp is None
                         or trade.get("price") is None
                         or trade.get("amount") is None
+                        or float(trade["price"]) <= 0
+                        or float(trade["amount"]) <= 0
                         or not target_start_ms <= int(timestamp) < target_end_ms
                     ):
                         continue
-                    key = (
-                        trade.get("id"),
-                        timestamp,
-                        trade.get("price"),
-                        trade.get("amount"),
-                        trade.get("side"),
-                    )
-                    collected[key] = trade
+                    trade_id = trade.get("id")
+                    if trade_id is None:
+                        idless.append(trade)
+                    else:
+                        collected_by_id[trade_id] = trade
         finally:
             await exchange.close()
 
@@ -717,9 +758,11 @@ def _pro_semantic_probe(
     *,
     timeout_seconds: float,
     rest_failure: str,
+    pacer: Any,
+    retry: Any,
 ) -> dict[str, Any]:
     """Use public CCXT Pro trades when the REST trade surface is unavailable."""
-    from xret.data.providers.ccxt import compatibility, markets, pagination, semantics
+    from xret.data.providers.ccxt import client, compatibility, markets, pagination, semantics
 
     attempted: list[dict[str, Any]] = []
     for definition in candidates[:3]:
@@ -748,12 +791,15 @@ def _pro_semantic_probe(
                 start_ms=start_ms,
                 end_ms=start_ms + 60_000,
             )
-            candles = exchange.fetch_ohlcv(
+            candles = client.fetch_page(
+                exchange,
                 native.native_symbol,
                 "1m",
                 since_ms,
-                2,
+                2 if profile.send_page_limit else None,
                 params,
+                retry,
+                pacer,
             )
             matching = [row for row in candles if int(row[0]) == start_ms]
             if len(matching) != 1:
@@ -819,7 +865,7 @@ def _semantic_probe(
     candle's trade-price OHLC and base-asset volume semantics.
     """
     from xret.data.models import Market
-    from xret.data.providers.ccxt import compatibility, markets, pagination, semantics
+    from xret.data.providers.ccxt import client, compatibility, markets, pagination, semantics
 
     results: dict[str, Any] = {}
     for market_name, market_family in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL)):
@@ -828,6 +874,14 @@ def _semantic_probe(
             continue
         client_id = markets.scoped_client_id(exchange_id, market_family)
         exchange = factory(client_id)
+        pacer = client.RequestPacer(
+            compatibility.transport_policy(client_id).minimum_ohlcv_interval_seconds
+        )
+        retry = client.RetryPolicy(
+            max_retries=2,
+            backoff=lambda attempt: client.exponential_backoff(attempt, base=0.5),
+            sleep=time.sleep,
+        )
         candidates: list[Any] = []
         try:
             exchange.load_markets()
@@ -846,6 +900,8 @@ def _semantic_probe(
                     candidates,
                     timeout_seconds=pro_timeout_seconds,
                     rest_failure=f"{client_id} does not provide fetchTrades",
+                    pacer=pacer,
+                    retry=retry,
                 )
                 continue
             first_failure: dict[str, Any] | None = None
@@ -873,12 +929,15 @@ def _semantic_probe(
                         start_ms=start_ms,
                         end_ms=start_ms + 60_000,
                     )
-                    candles = exchange.fetch_ohlcv(
+                    candles = client.fetch_page(
+                        exchange,
                         native.native_symbol,
                         "1m",
                         since_ms,
-                        2,
+                        2 if profile.send_page_limit else None,
                         params,
+                        retry,
+                        pacer,
                     )
                     matching = [row for row in candles if int(row[0]) == start_ms]
                     if len(matching) != 1:
@@ -926,6 +985,8 @@ def _semantic_probe(
                             "REST public-trade buckets disagreed with the candle; "
                             "the bounded response may be truncated"
                         ),
+                        pacer=pacer,
+                        retry=retry,
                     )
                     pro_evidence["rest_evidence"] = first_failure
                     results[market_name] = pro_evidence
@@ -940,6 +1001,8 @@ def _semantic_probe(
                             "no complete public-trade minute was available within the REST "
                             "probe limit"
                         ),
+                        pacer=pacer,
+                        retry=retry,
                     )
                     pro_evidence["rest_evidence"] = {"attempted": attempted}
                     results[market_name] = pro_evidence
@@ -951,6 +1014,8 @@ def _semantic_probe(
                 candidates,
                 timeout_seconds=pro_timeout_seconds,
                 rest_failure=f"{type(exc).__name__}: {exc}",
+                pacer=pacer,
+                retry=retry,
             )
     return results
 
@@ -978,11 +1043,13 @@ def _full_gate_status(
     expected_scopes: set[str],
     witnessed_scopes: set[str],
     semantic_scopes: set[str],
+    unresolved_assumptions: set[str] | None = None,
 ) -> str:
     accepted = {"pass", "pass_expected_unavailability"}
     return (
         "pass"
         if not market_errors
+        and not unresolved_assumptions
         and cases
         and all(case["status"] in accepted for case in cases)
         and expected_scopes <= witnessed_scopes
@@ -1071,9 +1138,11 @@ def _assert_invalid_case(bars: Any, case: PlanCase, start: datetime, end: dateti
     else:
         bar = TimeBar.parse(case.timeframe)
         fixed_step_ms = bar.fixed_step_ms
-        if fixed_step_ms is None:
-            raise AssertionError("misalignment probe requires a fixed-duration timeframe")
-        invalid_start = start + timedelta(milliseconds=max(1, fixed_step_ms // 2))
+        invalid_start = (
+            start + timedelta(days=1)
+            if fixed_step_ms is None
+            else start + timedelta(milliseconds=max(1, fixed_step_ms // 2))
+        )
         invalid_end = end
     for operation in (bars.fetch, bars.sync):
         try:
@@ -1209,6 +1278,10 @@ def _run_concurrent_case(
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         syncs = list(pool.map(lambda _index: bars.sync(start, end), range(2)))
     if any(not sync.is_complete for sync in syncs):
+        if any(sync.is_complete for sync in syncs) or syncs[0].gaps != syncs[1].gaps:
+            raise AssertionError(
+                "concurrent synchronization produced divergent completion or gap results"
+            )
         _assert_explicit_incomplete_coverage(
             bars,
             start=start,
@@ -1325,31 +1398,8 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
         for name, market in (("spot", Market.SPOT), ("perpetual", Market.PERPETUAL))
         if not args.market or name in args.market
     )
-    qualification_scopes = {
-        (scoped_client_id(exchange_id, market), name, settle)
-        for name, market in market_pairs
-        for settle in (args.settle if name == "perpetual" and args.settle else (None,))
-    }
-    assumed_profiles = sorted(
-        f"{client_id}/{family}" + (f"/{settle}" if settle is not None else "")
-        for client_id, family, settle in qualification_scopes
-        if compatibility.EndpointScope(client_id, family, settle)
-        not in compatibility._OBSERVATION_PROFILES
-    )
-    for client_id, family, settle in qualification_scopes:
-        scope = compatibility.EndpointScope(client_id, family, settle)
-        if scope in compatibility._OBSERVATION_PROFILES:
-            continue
-        qualification_max_spans = {
-            "bitget": timedelta(days=90),
-        }
-        compatibility._OBSERVATION_PROFILES[scope] = compatibility.ObservationProfile(
-            max_bars=args.qualification_page_bars,
-            max_span=qualification_max_spans.get(client_id),
-            send_unified_until=client_id not in args.omit_until,
-            until_inclusive=client_id != "bitvavo",
-            accept_end_boundary=client_id in args.accept_end_boundary,
-        )
+    assumed_profiles: list[str] = []
+    added_profile_scopes: list[Any] = []
 
     metrics = RequestMetrics()
     metrics_lock = threading.Lock()
@@ -1435,16 +1485,58 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             for available in definitions.values()
             for definition in available
         }
-        page_bars_by_scope = {
-            scope: min(
-                args.page_limit,
-                compatibility.observation_profile(
-                    scoped_client_id(exchange_id, market_by_name[scope.market]),
-                    scope.market,
-                    scope.settle,
-                ).max_bars,
+        qualification_max_spans = {"bitget": timedelta(days=90)}
+        for plan_scope in plan_scopes:
+            client_id = scoped_client_id(exchange_id, market_by_name[plan_scope.market])
+            scope = compatibility.EndpointScope(
+                client_id,
+                plan_scope.market,
+                plan_scope.settle,
+            )
+            if scope in compatibility._OBSERVATION_PROFILES:
+                continue
+            compatibility._OBSERVATION_PROFILES[scope] = compatibility.ObservationProfile(
+                max_bars=args.qualification_page_bars,
+                max_span=qualification_max_spans.get(client_id),
+                send_unified_until=client_id not in args.omit_until,
+                until_inclusive=client_id != "bitvavo",
+                accept_end_boundary=client_id in args.accept_end_boundary,
+            )
+            added_profile_scopes.append(scope)
+            assumed_profiles.append(
+                f"{client_id}/{plan_scope.market}"
+                + (f"/{plan_scope.settle}" if plan_scope.settle is not None else "")
+            )
+        unresolved_assumptions = {
+            scope.key
+            for scope in plan_scopes
+            if scope.market == "perpetual"
+            and compatibility.EndpointScope(
+                scoped_client_id(exchange_id, market_by_name[scope.market]),
+                scope.market,
+                scope.settle,
+            )
+            in added_profile_scopes
+            and not compatibility.has_explicit_compatibility_policy(
+                scoped_client_id(exchange_id, market_by_name[scope.market]),
+                scope.market,
+            )
+        }
+        assumed_profiles.sort()
+        compatibility.validate_registries()
+        result["qualification_only_profiles"] = assumed_profiles
+        result["unresolved_qualification_assumptions"] = sorted(unresolved_assumptions)
+        profiles_by_scope = {
+            scope: compatibility.observation_profile(
+                scoped_client_id(exchange_id, market_by_name[scope.market]),
+                scope.market,
+                scope.settle,
             )
             for scope in plan_scopes
+        }
+        page_bars_by_scope = {
+            scope: min(args.page_limit, profile.max_bars)
+            for scope, profile in profiles_by_scope.items()
         }
         cases = plan_cases(
             definitions,
@@ -1453,6 +1545,10 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             preferred=PREFERRED_SYMBOLS,
             seed=args.seed,
             page_bars_by_scope=page_bars_by_scope,
+            max_span_seconds_by_scope={
+                scope: profile.max_span.total_seconds() if profile.max_span is not None else None
+                for scope, profile in profiles_by_scope.items()
+            },
         )
         result["planned_cases"] = [
             {**asdict(case), "estimated_pages": _estimated_pages(case)} for case in cases
@@ -1504,7 +1600,10 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             result["semantically_verified_scopes"] = sorted(semantic_scopes)
             result["status"] = (
                 "semantic_pass"
-                if not errors and expected_scopes and expected_scopes <= semantic_scopes
+                if not errors
+                and not unresolved_assumptions
+                and expected_scopes
+                and expected_scopes <= semantic_scopes
                 else "candidate"
             )
         else:
@@ -1558,6 +1657,7 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
                 expected_scopes=expected_scopes,
                 witnessed_scopes=witnessed_scopes,
                 semantic_scopes=semantic_scopes,
+                unresolved_assumptions=unresolved_assumptions,
             )
     except Exception as exc:  # noqa: BLE001 - persisted evidence
         result.update(
@@ -1568,6 +1668,8 @@ def _run_exchange(exchange_id: str, output: Path, args: argparse.Namespace) -> d
             }
         )
     finally:
+        for scope in added_profile_scopes:
+            compatibility._OBSERVATION_PROFILES.pop(scope, None)
         result["started_at"] = exchange_started.isoformat()
         result["finished_at"] = datetime.now(UTC).isoformat()
         result["elapsed_seconds"] = (

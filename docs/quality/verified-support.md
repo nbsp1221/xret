@@ -108,7 +108,7 @@ Bitrue perpetuals were not promoted by the current gate; that missing futures sc
 
 ## Currently verified live bars
 
-The live-bar matrix below was requalified on 2026-08-11 from the built `xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each combination opened through the public API, completed an initial bootstrap with two recent closed bars followed by the current forming bar in ascending, duplicate-free timestamp order, and closed cleanly without creating canonical state or catalog paths.
+The live-bar matrix below was structurally requalified on 2026-08-11 from the built `xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each combination opened through the public API, completed an initial bootstrap with two recent closed bars followed by the current forming bar in ascending, duplicate-free timestamp order, and closed cleanly without creating canonical state or catalog paths. On 2026-08-24, CCXT Pro 4.5.75 independently observed complete public-trade minutes and matching `watchOHLCV` updates for all six exact scopes. Across 16,403 eligible executions, every scope reproduced trade-derived OHLC and base-asset volume exactly under the declared numeric representation. Zero-price, zero-quantity Binance USD-M stream records were excluded because they are not executed trades.
 
 | Provider | Venue | Market family | Bar type | Timeframe | Representative symbol |
 |---|---|---|---|---|---|
@@ -121,7 +121,7 @@ The live-bar matrix below was requalified on 2026-08-11 from the built `xret-dat
 
 The Binance USD-M qualification additionally exercised the handoff immediately after a one-minute boundary, while the just-closed bar remained provisional under the finality grace period. It produced consecutive `FINAL`, `PROVISIONAL`, and `FORMING` observations without touching canonical storage.
 
-This is a connectivity, structural normalization, initial-handoff, multiplexing, and lifecycle claim. It does not independently prove the executed-trade event universe or base-asset volume unit, and it does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
+CCXT Pro subscriptions fail closed outside these exact market-family, settlement, and timeframe scopes. This is a connectivity, canonical semantic normalization, initial-handoff, multiplexing, and lifecycle claim. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
 
 ## Re-verification
 

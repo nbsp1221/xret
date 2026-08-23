@@ -112,38 +112,34 @@ def test_ccxt_live_session_reuses_client_and_normalizes_rows() -> None:
     asyncio.run(scenario())
 
 
-def test_ccxt_live_session_normalizes_contract_count_with_qualified_live_policy() -> None:
+def test_ccxt_live_session_rejects_unqualified_mexc_scope() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
         client.id = "mexc"
         session = CcxtLiveBarSession(exchange="mexc", exchange_factory=lambda _: client)
 
         async with session:
-            await session.subscribe_bar_updates(
-                _linear_perpetual_market("mexc", contract_size="0.001"),
-                "1m",
-            )
-            update = await anext(session)
-
-        assert update.volume == 0.25
+            with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
+                await session.subscribe_bar_updates(
+                    _linear_perpetual_market("mexc", contract_size="0.001"),
+                    "1m",
+                )
 
     asyncio.run(scenario())
 
 
-def test_ccxt_live_session_normalizes_kucoin_futures_contract_count() -> None:
+def test_ccxt_live_session_rejects_unqualified_kucoin_futures_scope() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
         client.id = "kucoinfutures"
         session = CcxtLiveBarSession(exchange="kucoin", exchange_factory=lambda _: client)
 
         async with session:
-            await session.subscribe_bar_updates(
-                _linear_perpetual_market("kucoin", contract_size="0.001"),
-                "1m",
-            )
-            update = await anext(session)
-
-        assert update.volume == 0.25
+            with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
+                await session.subscribe_bar_updates(
+                    _linear_perpetual_market("kucoin", contract_size="0.001"),
+                    "1m",
+                )
 
     asyncio.run(scenario())
 

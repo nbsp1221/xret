@@ -15,9 +15,11 @@ def test_client_wide_and_market_specific_semantics_are_merged() -> None:
 
     assert spot.excluded_timeframes == frozenset({"6h", "12h", "1d", "3d", "1w", "1M"})
     assert perpetual.excluded_timeframes == frozenset({"1M"})
+    assert compatibility.has_explicit_compatibility_policy("bingx", "perpetual")
+    assert not compatibility.has_explicit_compatibility_policy("unknown", "perpetual")
 
 
-def test_temporary_family_profile_can_qualify_a_settlement(
+def test_family_profile_cannot_qualify_an_exact_settlement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setitem(
@@ -26,7 +28,8 @@ def test_temporary_family_profile_can_qualify_a_settlement(
         compatibility.ObservationProfile(max_bars=1000),
     )
 
-    assert compatibility.observation_profile("candidate", "perpetual", "USDT").max_bars == 1000
+    with pytest.raises(UnsupportedMarketError, match="candidate/perpetual/USDT"):
+        compatibility.observation_profile("candidate", "perpetual", "USDT")
 
 
 def test_exact_settlement_profile_does_not_enable_a_sibling_settlement() -> None:
@@ -164,8 +167,31 @@ def test_registry_validation_rejects_nonpositive_observation_limits(
         compatibility.validate_registries()
 
 
+def test_registry_validation_rejects_family_wide_perpetual_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("broken", "perpetual"),
+        compatibility.ObservationProfile(max_bars=100),
+    )
+
+    with pytest.raises(ProviderError, match="must settle exactly"):
+        compatibility.validate_registries()
+
+
 def test_current_registry_is_self_consistent() -> None:
     compatibility.validate_registries()
+
+
+def test_live_endpoint_qualification_is_exact_and_fail_closed() -> None:
+    compatibility.require_live_endpoint("binance", "spot", None, "1m")
+    compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDT", "1m")
+
+    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
+        compatibility.require_live_endpoint("binance", "spot", None, "5m")
+    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
+        compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDC", "1m")
 
 
 def test_documented_candle_rate_limit_overrides_optimistic_client_default() -> None:

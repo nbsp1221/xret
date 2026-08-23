@@ -114,7 +114,7 @@ class CcxtProvider:
             native_client_id = markets.client_id(identity)
             try:
                 exchange = self._client(native_client_id)
-                native_market = markets.resolve(identity, exchange)
+                native_market = markets.resolve(identity, exchange, reload=True)
             except (ProviderError, UnsupportedMarketError):
                 raise
             except Exception as exc:
@@ -171,7 +171,7 @@ class CcxtProvider:
         native_client_id = markets.scoped_client_id(exchange, market)
         try:
             ccxt_exchange = self._client(native_client_id)
-            native_markets = ccxt_exchange.load_markets()
+            native_markets = ccxt_exchange.load_markets(reload=True)
             if not isinstance(native_markets, dict):
                 raise ProviderError("CCXT load_markets() must return a dict")
             compatible_markets = {
