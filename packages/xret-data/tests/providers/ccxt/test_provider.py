@@ -1356,6 +1356,55 @@ def test_endpoint_that_derives_bounds_from_since_and_limit_omits_until(monkeypat
     assert received == [(_BASE_MS, 1, {})]
 
 
+def test_native_iso_window_uses_exact_names_and_omits_unified_since(monkeypatch) -> None:
+    received: list[tuple[int | None, int, dict[str, int | str]]] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        limit: int,
+        params: dict[str, int | str],
+    ) -> list[list[float]]:
+        received.append((since, limit, params))
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(
+            max_bars=100,
+            native_window_parameters=compatibility.NativeWindowParameters(
+                start="fromISO",
+                end="toISO",
+                format=compatibility.WindowParameterFormat.RFC3339_MILLISECONDS,
+            ),
+        ),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received == [
+        (
+            None,
+            1,
+            {
+                "fromISO": "2024-01-01T00:00:00.000Z",
+                "toISO": "2024-01-01T00:00:59.999Z",
+            },
+        )
+    ]
+
+
 def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypatch) -> None:
     minute = 60_000
 

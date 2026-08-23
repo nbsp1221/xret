@@ -29,10 +29,6 @@ from xret.data.timeframe import TimeBar
 
 _QUALIFIED_CLIENT_IDS = qualified_client_ids()
 
-#: Every qualified venue offers hourly bars, and `verified-support.md` claims
-#: `1h` for each venue it lists. Filtering must never drop it.
-_BASELINE_TIMEFRAME = "1h"
-
 
 def _inexpressible(timeframes: Mapping[str, object]) -> list[str]:
     """Advertised entries Xret's canonical grammar cannot represent."""
@@ -67,13 +63,6 @@ def test_advertised_metadata_satisfies_the_resolved_market_contract(client_id: s
     )
 
     assert resolved.timeframes
-
-
-@pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)
-def test_qualified_venue_still_offers_the_baseline_timeframe(client_id: str) -> None:
-    exchange = getattr(ccxt, client_id)()
-
-    assert _BASELINE_TIMEFRAME in supported_timeframes(exchange)
 
 
 @pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)

@@ -20,6 +20,12 @@ class VolumeMode(enum.Enum):
     LINEAR_CONTRACT_COUNT = "linear_contract_count"
 
 
+class WindowParameterFormat(enum.Enum):
+    """Native bounded-window value representation accepted by CCXT params."""
+
+    RFC3339_MILLISECONDS = "rfc3339_milliseconds"
+
+
 @dataclass(frozen=True, slots=True)
 class CompatibilityScope:
     """A client-wide or market-family-specific semantic rule key."""
@@ -46,6 +52,15 @@ class CompatibilityPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeWindowParameters:
+    """Exact native parameter names for an adapter with broken unified bounds."""
+
+    start: str
+    end: str
+    format: WindowParameterFormat
+
+
+@dataclass(frozen=True, slots=True)
 class ObservationProfile:
     """Qualified bounded-window behavior for one historical endpoint scope."""
 
@@ -54,6 +69,7 @@ class ObservationProfile:
     send_unified_until: bool = True
     until_inclusive: bool = True
     accept_end_boundary: bool = False
+    native_window_parameters: NativeWindowParameters | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +80,7 @@ class TransportPolicy:
 
 
 _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = {
-    CompatibilityScope("aster"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("aster"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h", "3d"})),
     CompatibilityScope("bingx"): CompatibilityPolicy(excluded_timeframes=frozenset({"1M"})),
     CompatibilityScope("bingx", "spot"): CompatibilityPolicy(
         excluded_timeframes=frozenset({"6h", "12h", "1d", "3d", "1w"})
@@ -111,12 +127,18 @@ _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = 
     CompatibilityScope("mexc", "spot"): CompatibilityPolicy(
         excluded_timeframes=frozenset({"8h", "1M"})
     ),
+    CompatibilityScope("pacifica", "perpetual"): CompatibilityPolicy(
+        excluded_timeframes=frozenset({"1h"})
+    ),
     CompatibilityScope("xt"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("woo"): CompatibilityPolicy(
+        excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
+    ),
     **{
         CompatibilityScope(client_id, "perpetual"): CompatibilityPolicy(
             volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT
         )
-        for client_id in ("apex", "gate", "hashkey", "mexc", "toobit")
+        for client_id in ("apex", "gate", "hashkey", "mexc", "toobit", "xt")
     },
 }
 
@@ -128,6 +150,7 @@ def _profile(
     send_unified_until: bool = True,
     until_inclusive: bool = True,
     accept_end_boundary: bool = False,
+    native_window_parameters: NativeWindowParameters | None = None,
 ) -> ObservationProfile:
     return ObservationProfile(
         max_bars=max_bars,
@@ -135,14 +158,22 @@ def _profile(
         send_unified_until=send_unified_until,
         until_inclusive=until_inclusive,
         accept_end_boundary=accept_end_boundary,
+        native_window_parameters=native_window_parameters,
     )
 
 
 _OBSERVATION_PROFILES: Final[dict[EndpointScope, ObservationProfile]] = {
     EndpointScope("apex", "perpetual", "USDT"): _profile(100),
+    EndpointScope("aster", "spot"): _profile(100),
+    EndpointScope("aster", "perpetual", "USDT"): _profile(100),
     EndpointScope("binance", "spot"): _profile(1000),
     EndpointScope("binanceusdm", "perpetual", "USDT"): _profile(1000),
     EndpointScope("bingx", "perpetual", "USDT"): _profile(100),
+    EndpointScope("bitfinex", "spot"): _profile(1000, accept_end_boundary=True),
+    EndpointScope("bitfinex", "perpetual", "USDT"): _profile(
+        1000,
+        accept_end_boundary=True,
+    ),
     EndpointScope("bitget", "spot"): _profile(100, max_span=timedelta(days=90)),
     EndpointScope("bitget", "perpetual", "USDT"): _profile(100, max_span=timedelta(days=90)),
     EndpointScope("bitrue", "spot"): _profile(1000),
@@ -157,6 +188,14 @@ _OBSERVATION_PROFILES: Final[dict[EndpointScope, ObservationProfile]] = {
     EndpointScope("cryptocom", "perpetual", "USD"): _profile(100),
     EndpointScope("deribit", "spot"): _profile(100),
     EndpointScope("deribit", "perpetual", "USDC"): _profile(100),
+    EndpointScope("dydx", "perpetual", "USDC"): _profile(
+        1000,
+        native_window_parameters=NativeWindowParameters(
+            start="fromISO",
+            end="toISO",
+            format=WindowParameterFormat.RFC3339_MILLISECONDS,
+        ),
+    ),
     EndpointScope("hashkey", "spot"): _profile(1000),
     EndpointScope("hashkey", "perpetual", "USDT"): _profile(1000),
     EndpointScope("hyperliquid", "spot"): _profile(1000),
@@ -176,17 +215,35 @@ _OBSERVATION_PROFILES: Final[dict[EndpointScope, ObservationProfile]] = {
     EndpointScope("mexc", "perpetual", "USDT"): _profile(100),
     EndpointScope("okx", "spot"): _profile(100),
     EndpointScope("okx", "perpetual", "USDT"): _profile(100),
+    EndpointScope("pacifica", "perpetual", "USDC"): _profile(1000),
     EndpointScope("phemex", "perpetual", "USDT"): _profile(100),
     EndpointScope("toobit", "spot"): _profile(100),
     EndpointScope("upbit", "spot"): _profile(100, send_unified_until=False),
+    EndpointScope("woo", "spot"): _profile(100),
+    EndpointScope("woo", "perpetual", "USDT"): _profile(100),
+    EndpointScope("xt", "spot"): _profile(100, until_inclusive=False),
+    EndpointScope("xt", "perpetual", "USDT"): _profile(
+        100,
+        until_inclusive=False,
+        accept_end_boundary=True,
+    ),
 }
 
 
 _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
+    # Bitfinex documents 30 public candle requests per minute. The small
+    # margin avoids boundary bursts in its rolling limiter.
+    "bitfinex": TransportPolicy(minimum_ohlcv_interval_seconds=2.2),
+    # The public indexer returns sustained 429 responses at CCXT's current
+    # cadence. A one-second interval completed the qualification campaign.
+    "dydx": TransportPolicy(minimum_ohlcv_interval_seconds=1.0),
     # Hyperliquid assigns candleSnapshot a base weight of 20 plus one unit per
     # 60 returned rows. CCXT 4.5.65 prices it as four base units, so its
     # built-in limiter can exceed the venue's 1,200-weight/minute IP limit.
     "hyperliquid": TransportPolicy(minimum_ohlcv_interval_seconds=2.0),
+    # Pacifica charges 12 of an anonymous IP's 100 credits per 60-second
+    # rolling window for each kline request.
+    "pacifica": TransportPolicy(minimum_ohlcv_interval_seconds=8.0),
 }
 
 
@@ -283,6 +340,13 @@ def validate_registries() -> None:
             raise ProviderError(f"CCXT observation max_bars must be positive for {scope!r}")
         if profile.max_span is not None and profile.max_span <= timedelta(0):
             raise ProviderError(f"CCXT observation max_span must be positive for {scope!r}")
+        native_window = profile.native_window_parameters
+        if native_window is not None and (
+            not native_window.start
+            or not native_window.end
+            or native_window.start == native_window.end
+        ):
+            raise ProviderError(f"CCXT native window parameters are invalid for {scope!r}")
     for client_id, policy in _TRANSPORT_POLICIES.items():
         if not client_id:
             raise ProviderError("CCXT transport client ID must not be empty")

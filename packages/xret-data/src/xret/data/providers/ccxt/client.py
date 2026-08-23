@@ -28,7 +28,7 @@ class CCXTExchange(Protocol):
         timeframe: str,
         since: int | None = None,
         limit: int | None = None,
-        params: dict[str, int] | None = None,
+        params: dict[str, int | str] | None = None,
     ) -> list[list[float]]: ...
 
 
@@ -124,9 +124,9 @@ def fetch_page(
     exchange: CCXTExchange,
     native_symbol: str,
     timeframe: str,
-    since_ms: int,
+    since_ms: int | None,
     page_limit: int,
-    params: dict[str, int],
+    params: dict[str, int | str],
     retry: RetryPolicy,
     pacer: RequestPacer,
 ) -> list[list[float]]:

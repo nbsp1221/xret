@@ -40,20 +40,26 @@ def test_exact_settlement_profile_does_not_enable_a_sibling_settlement() -> None
     ("client_id", "settle"),
     [
         ("apex", "USDT"),
+        ("aster", "USDT"),
         ("binanceusdm", "USDT"),
         ("bingx", "USDT"),
         ("bitget", "USDT"),
+        ("bitfinex", "USDT"),
         ("bybit", "USDT"),
         ("coinbase", "USDC"),
         ("cryptocom", "USD"),
         ("deribit", "USDC"),
+        ("dydx", "USDC"),
         ("hashkey", "USDT"),
         ("hyperliquid", "USDC"),
         ("krakenfutures", "USD"),
         ("kucoinfutures", "USDT"),
         ("mexc", "USDT"),
         ("okx", "USDT"),
+        ("pacifica", "USDC"),
         ("phemex", "USDT"),
+        ("woo", "USDT"),
+        ("xt", "USDT"),
     ],
 )
 def test_verified_derivative_scope_does_not_enable_an_unverified_settlement(
@@ -73,6 +79,20 @@ def test_failed_semantic_scope_is_not_enabled_by_its_spot_sibling() -> None:
         compatibility.observation_profile("toobit", "perpetual", "USDT")
 
 
+def test_native_data_violations_exclude_the_entire_affected_timeframe() -> None:
+    assert compatibility.compatibility_policy("aster", "spot").excluded_timeframes == {
+        "1h",
+        "3d",
+    }
+    assert compatibility.compatibility_policy("woo", "perpetual").excluded_timeframes == {
+        "4h",
+        "12h",
+        "1d",
+        "1w",
+        "1M",
+    }
+
+
 def test_qualified_closed_window_and_derived_end_profiles_are_explicit() -> None:
     kucoin = compatibility.observation_profile("kucoinfutures", "perpetual", "USDT")
     htx = compatibility.observation_profile("htx", "spot")
@@ -81,6 +101,32 @@ def test_qualified_closed_window_and_derived_end_profiles_are_explicit() -> None
     assert kucoin.accept_end_boundary is True
     assert htx.send_unified_until is True
     assert htx.accept_end_boundary is True
+
+    xt = compatibility.observation_profile("xt", "perpetual", "USDT")
+    assert xt.until_inclusive is False
+    assert xt.accept_end_boundary is True
+
+
+def test_xt_perpetual_contract_count_is_converted_to_base_volume() -> None:
+    policy = compatibility.compatibility_policy("xt", "perpetual")
+
+    assert policy.volume_mode is compatibility.VolumeMode.LINEAR_CONTRACT_COUNT
+
+
+def test_dydx_uses_the_exact_official_iso_window_parameter_names() -> None:
+    profile = compatibility.observation_profile("dydx", "perpetual", "USDC")
+
+    assert profile.native_window_parameters == compatibility.NativeWindowParameters(
+        start="fromISO",
+        end="toISO",
+        format=compatibility.WindowParameterFormat.RFC3339_MILLISECONDS,
+    )
+
+
+def test_pacifica_excludes_the_reproducibly_malformed_hourly_endpoint() -> None:
+    policy = compatibility.compatibility_policy("pacifica", "perpetual")
+
+    assert policy.excluded_timeframes == frozenset({"1h"})
 
 
 def test_unknown_market_family_fails_before_policy_lookup() -> None:
@@ -117,4 +163,7 @@ def test_current_registry_is_self_consistent() -> None:
 
 
 def test_documented_candle_rate_limit_overrides_optimistic_client_default() -> None:
+    assert compatibility.transport_policy("bitfinex").minimum_ohlcv_interval_seconds == 2.2
+    assert compatibility.transport_policy("dydx").minimum_ohlcv_interval_seconds == 1.0
     assert compatibility.transport_policy("hyperliquid").minimum_ohlcv_interval_seconds == 2.0
+    assert compatibility.transport_policy("pacifica").minimum_ohlcv_interval_seconds == 8.0

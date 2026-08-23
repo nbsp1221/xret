@@ -60,6 +60,16 @@ def test_999_confidence_requires_135_zero_failure_samples() -> None:
     assert gate.required_zero_failure_samples(0.05, 0.999) == 135
 
 
+def test_gate_creates_output_and_state_roots(tmp_path: Path) -> None:
+    output = tmp_path / "nested" / "results"
+    state = tmp_path / "other" / "state"
+
+    gate._prepare_directories(output, state)
+
+    assert output.is_dir()
+    assert state.is_dir()
+
+
 def test_default_candidate_universe_matches_the_approved_priority_list() -> None:
     assert len(gate.VENUES) == 36
     assert set(gate.VENUES) == {
@@ -169,6 +179,20 @@ def test_semantic_trade_aggregate_converts_contracts_to_base_volume() -> None:
         {"contract": True, "contractSize": 0.001, "inverse": False},
     )
     assert already_base[4] == 0.2
+
+    adapter_converted = gate._aggregate_trades(
+        [
+            {
+                "timestamp": 1,
+                "price": 100.0,
+                "amount": 0.2,
+                "cost": 0.2,
+                "info": {"a": "20"},
+            }
+        ],
+        {"contract": True, "contractSize": 0.01, "inverse": False},
+    )
+    assert adapter_converted[4] == 0.2
 
 
 def test_semantic_open_and_close_accept_timestamp_ties_without_inventing_order() -> None:

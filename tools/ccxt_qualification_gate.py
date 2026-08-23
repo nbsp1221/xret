@@ -456,6 +456,11 @@ def _estimated_pages(case: PlanCase, page_limit: int) -> int:
     return multiplier * math.ceil(case.bars / page_limit)
 
 
+def _prepare_directories(output: Path, temp_root: Path) -> None:
+    output.mkdir(parents=True, exist_ok=True)
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+
 def _frame_rows(frame: Any) -> list[tuple[Any, ...]]:
     return [
         tuple(row)
@@ -471,6 +476,24 @@ def _trade_base_amount(trade: dict[str, Any], market: dict[str, Any]) -> float:
     contract_size = float(market["contractSize"])
     if market.get("inverse"):
         return amount * contract_size / price
+    raw = trade.get("info")
+    raw_contracts = raw.get("a") if isinstance(raw, dict) else None
+    if isinstance(raw_contracts, int | float | str):
+        try:
+            parsed_contracts = float(raw_contracts)
+        except ValueError:
+            pass
+        else:
+            if _numbers_close(
+                amount,
+                parsed_contracts * contract_size,
+                relative=1e-12,
+                absolute=1e-12,
+            ):
+                # Some adapters, notably XT, already convert the native
+                # contract quantity to base amount but safe_trade computes
+                # `cost` as if it were still a contract count.
+                return amount
     cost = trade.get("cost")
     if cost is not None and price:
         # CCXT adapters differ on whether derivative trade `amount` is already
@@ -1566,7 +1589,7 @@ def main() -> None:
             "samples must be at least "
             f"{required_samples} for the configured confidence target"
         )
-    args.output.mkdir(parents=True, exist_ok=True)
+    _prepare_directories(args.output, args.temp_root)
     import ccxt
 
     known_venues = set(ccxt.exchanges)

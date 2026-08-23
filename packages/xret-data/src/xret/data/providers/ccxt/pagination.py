@@ -16,12 +16,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from xret.data.errors import ProviderError
-from xret.data.providers.ccxt.compatibility import ObservationProfile
+from xret.data.providers.ccxt.compatibility import ObservationProfile, WindowParameterFormat
 from xret.data.providers.contracts import ObservedWindow
 from xret.data.timeframe import TimeBar
 
 RawOHLCVRow = Sequence[float]
-PageFetcher = Callable[[int, int, dict[str, int]], list[list[float]]]
+WindowParameter = int | str
+PageFetcher = Callable[[int | None, int, dict[str, WindowParameter]], list[list[float]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,35 @@ class PaginationResult:
 
 def _epoch_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
+
+
+def _rfc3339_milliseconds(value: int) -> str:
+    return (
+        datetime.fromtimestamp(value / 1000, tz=UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _request_window(
+    profile: ObservationProfile,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> tuple[int | None, dict[str, WindowParameter]]:
+    native = profile.native_window_parameters
+    if native is not None:
+        if native.format is WindowParameterFormat.RFC3339_MILLISECONDS:
+            return None, {
+                native.start: _rfc3339_milliseconds(start_ms),
+                native.end: _rfc3339_milliseconds(end_ms - 1),
+            }
+        raise ProviderError(f"unsupported native CCXT window format: {native.format!r}")
+
+    params: dict[str, WindowParameter] = {}
+    if profile.send_unified_until:
+        params["until"] = end_ms - 1 if profile.until_inclusive else end_ms
+    return start_ms, params
 
 
 def _advance(
@@ -161,10 +191,8 @@ def paginate_ohlcv(
         # adapters disagree on whether it is inclusive. Translate Xret's
         # half-open page using the qualified endpoint contract so a full page
         # contains at most `effective_limit` candle boundaries.
-        params: dict[str, int] = {}
-        if profile.send_unified_until:
-            params["until"] = end_ms - 1 if profile.until_inclusive else end_ms
-        batch = fetch_page(start_ms, page_bars, params)
+        request_since, params = _request_window(profile, start_ms=start_ms, end_ms=end_ms)
+        batch = fetch_page(request_since, page_bars, params)
         _validate_page(
             batch,
             native_symbol=native_symbol,
