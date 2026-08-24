@@ -361,7 +361,8 @@ class BarUpdate:
     ``timestamp`` is the inclusive UTC start of the bar. Multiple updates for
     the same timestamp are valid. ``finality`` describes the bar relative to
     Xret's receipt clock and finality grace; it never implies persistence.
-    ``received_at`` records when Xret normalized the observation.
+    ``received_at`` records when Xret normalized the observation. OHLC values
+    summarize eligible executed trades and ``volume`` is base-asset quantity.
     """
 
     identity: MarketIdentity

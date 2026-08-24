@@ -16,10 +16,10 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import BarRequest, MarketIdentity
+from xret.data.models import BarRequest, Market, MarketIdentity
 from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
 from xret.data.providers import runtime as provider_runtime
-from xret.data.providers.ccxt import CcxtProvider, markets
+from xret.data.providers.ccxt import CcxtProvider, client, compatibility, markets
 from xret.data.providers.ccxt import provider as ccxt_provider
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_COLUMNS
@@ -232,6 +232,43 @@ def test_spot_client_id_is_always_the_slug() -> None:
     assert markets.client_id(_spot_identity()) == "binance"
 
 
+def test_provider_pools_client_but_preserves_independent_dataset_locks() -> None:
+    exchange = FakeExchange(
+        markets={
+            **_default_markets(),
+            "ETH/USDT": {
+                "id": "ETHUSDT",
+                "symbol": "ETH/USDT",
+                "base": "ETH",
+                "quote": "USDT",
+                "spot": True,
+            },
+        }
+    )
+    creations = 0
+
+    def factory(_client_id: str) -> FakeExchange:
+        nonlocal creations
+        creations += 1
+        return exchange
+
+    provider = CcxtProvider(
+        exchange_factory=factory,
+        version_provider=lambda: "4.5.0",
+        tick_size_precision_mode_provider=lambda: 4,
+    )
+    first = provider.resolve_market(_spot_identity())
+    second = provider.resolve_market(
+        MarketIdentity(exchange="binance", symbol="ETH/USDT", market="spot")
+    )
+
+    assert creations == 1
+    first_resolution = provider._resolutions_by_market[ccxt_provider._market_key(first)]
+    second_resolution = provider._resolutions_by_market[ccxt_provider._market_key(second)]
+    assert first_resolution.exchange is second_resolution.exchange
+    assert first_resolution.observation_lock is not second_resolution.observation_lock
+
+
 # --------------------------------------------------------------------------
 # Provider-neutral market-definition snapshots
 # --------------------------------------------------------------------------
@@ -346,6 +383,45 @@ def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
     definitions = _market_data().fetch_markets(exchange="binance", market="spot")
 
     assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
+    btc = _default_markets()["BTC/USDT"]
+    eth = {
+        **btc,
+        "id": "ETHUSDT",
+        "symbol": "ETH/USDT",
+        "base": "ETH",
+    }
+
+    class ReloadingExchange(FakeExchange):
+        def __init__(self) -> None:
+            super().__init__(client_id="binance", markets={})
+            self.remote_markets = {"BTC/USDT": btc}
+
+        def load_markets(self, reload: bool = False) -> dict:
+            self.load_markets_calls += 1
+            if reload or not self.markets:
+                self.markets = dict(self.remote_markets)
+            return self.markets
+
+    exchange = ReloadingExchange()
+    provider = CcxtProvider(
+        exchange_factory=lambda _client_id: exchange,
+        version_provider=lambda: "test",
+        tick_size_precision_mode_provider=lambda: 4,
+    )
+
+    first = provider.fetch_markets(exchange="binance", market=Market.SPOT)
+    exchange.remote_markets["ETH/USDT"] = eth
+    second = provider.fetch_markets(exchange="binance", market=Market.SPOT)
+    resolved = provider.resolve_market(
+        MarketIdentity(exchange="binance", symbol="ETH/USDT", market=Market.SPOT)
+    )
+
+    assert [item.identity.symbol for item in first] == ["BTC/USDT"]
+    assert {item.identity.symbol for item in second} == {"BTC/USDT", "ETH/USDT"}
+    assert resolved.identity.symbol == "ETH/USDT"
 
 
 def test_fetch_markets_preserves_unknown_active_and_unknown_fixed_increments() -> None:
@@ -711,13 +787,13 @@ def test_explicit_settle_never_reads_other_candidates() -> None:
     frame = (
         _market_data()
         .bars(
-            exchange="binance", symbol="BTC/USDT", market="perpetual", settle="USDC", timeframe="1m"
+            exchange="binance", symbol="BTC/USDT", market="perpetual", settle="USDT", timeframe="1m"
         )
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert (frame["settle"] == "USDC").all()
-    assert exchange.fetch_calls[0][0] == "BTC/USDT:USDC"
+    assert (frame["settle"] == "USDT").all()
+    assert exchange.fetch_calls[0][0] == "BTC/USDT:USDT"
 
 
 # --------------------------------------------------------------------------
@@ -771,7 +847,7 @@ def test_observation_spot_metadata_uses_the_resolved_ccxt_market() -> None:
     assert observation.source.native_symbol == "BTC/USDT"
     assert observation.market.derivative is None
     assert exchange.load_markets_calls == 1
-    assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 1000)]
+    assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 1)]
 
 
 def test_observation_perpetual_metadata_includes_native_market_interpretation() -> None:
@@ -810,7 +886,7 @@ def test_observation_perpetual_metadata_includes_native_market_interpretation() 
     )
     assert observation.frame["settle"].to_list() == ["USDT"]
     assert exchange.load_markets_calls == 1
-    assert exchange.fetch_calls == [("BTC/USDT:USDT", "1m", _BASE_MS, 1000)]
+    assert exchange.fetch_calls == [("BTC/USDT:USDT", "1m", _BASE_MS, 1)]
 
 
 def test_unlisted_spot_symbol_raises_unsupported_market_error() -> None:
@@ -1223,7 +1299,214 @@ def test_coinbase_effective_limit_does_not_skip_a_later_window() -> None:
     )
 
     assert frame.height == 2
-    assert [call[3] for call in exchange.fetch_calls] == [300, 300]
+    assert [call[3] for call in exchange.fetch_calls] == [300, 1]
+
+
+def test_endpoint_maximum_time_span_splits_pages_below_the_bar_limit(monkeypatch) -> None:
+    minute = 60_000
+    exchange = FakeExchange(candles=[_row(index * minute) for index in range(5)])
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, max_span=timedelta(minutes=2)),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+    )
+
+    assert frame.height == 5
+    assert [call[2:] for call in exchange.fetch_calls] == [
+        (_BASE_MS, 2),
+        (_BASE_MS + 2 * minute, 2),
+        (_BASE_MS + 4 * minute, 1),
+    ]
+
+
+def test_exclusive_until_endpoint_receives_the_half_open_end(monkeypatch) -> None:
+    minute = 60_000
+    received_params: list[dict] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        _since: int,
+        _limit: int,
+        params: dict,
+    ) -> list[list[float]]:
+        received_params.append(params)
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, until_inclusive=False),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received_params == [{"until": _BASE_MS + minute}]
+
+
+def test_endpoint_that_derives_bounds_from_since_and_limit_omits_until(monkeypatch) -> None:
+    received: list[tuple[int, int, dict[str, int]]] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        limit: int,
+        params: dict[str, int],
+    ) -> list[list[float]]:
+        received.append((since, limit, params))
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, send_unified_until=False),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received == [(_BASE_MS, 1, {})]
+
+
+def test_endpoint_that_ignores_bounds_when_limit_is_present_omits_limit(monkeypatch) -> None:
+    received: list[tuple[int, int | None, dict[str, int]]] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        limit: int | None,
+        params: dict[str, int],
+    ) -> list[list[float]]:
+        received.append((since, limit, params))
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, send_page_limit=False),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received == [(_BASE_MS, None, {"until": _BASE_MS + 60_000 - 1})]
+
+
+def test_native_iso_window_uses_exact_names_and_omits_unified_since(monkeypatch) -> None:
+    received: list[tuple[int | None, int, dict[str, int | str]]] = []
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        limit: int,
+        params: dict[str, int | str],
+    ) -> list[list[float]]:
+        received.append((since, limit, params))
+        return [_row(0)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(
+            max_bars=100,
+            native_window_parameters=compatibility.NativeWindowParameters(
+                start="fromISO",
+                end="toISO",
+                format=compatibility.WindowParameterFormat.RFC3339_MILLISECONDS,
+            ),
+        ),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame.height == 1
+    assert received == [
+        (
+            None,
+            1,
+            {
+                "fromISO": "2024-01-01T00:00:00.000Z",
+                "toISO": "2024-01-01T00:00:59.999Z",
+            },
+        )
+    ]
+
+
+def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypatch) -> None:
+    minute = 60_000
+
+    def fetch(
+        _symbol: str,
+        _timeframe: str,
+        since: int,
+        _limit: int,
+        _params: dict[str, int],
+    ) -> list[list[float]]:
+        return [_row(since - _BASE_MS), _row(since - _BASE_MS + minute)]
+
+    exchange = FakeExchange(fetch_override=fetch)
+    _register_spot(exchange)
+    monkeypatch.setitem(
+        compatibility._OBSERVATION_PROFILES,
+        compatibility.EndpointScope("binance", "spot"),
+        compatibility.ObservationProfile(max_bars=100, accept_end_boundary=True),
+    )
+    _set_now(datetime(2024, 1, 1, 1, tzinfo=UTC))
+
+    frame = _fetch_bars(
+        _spot_identity(),
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert frame["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+    assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 2)]
 
 
 def test_unqualified_exchange_pagination_fails_closed() -> None:
@@ -1238,6 +1521,38 @@ def test_unqualified_exchange_pagination_fails_closed() -> None:
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
         )
+
+
+def test_qualified_profile_can_be_restricted_to_one_market_family() -> None:
+    assert compatibility.observation_profile("bitrue", "spot").max_bars == 1000
+
+    with pytest.raises(UnsupportedMarketError, match="bitrue/perpetual"):
+        compatibility.observation_profile("bitrue", "perpetual")
+
+
+def test_request_pacer_serializes_calls_at_the_qualified_minimum_interval() -> None:
+    now = 10.0
+    sleeps: list[float] = []
+
+    def monotonic() -> float:
+        return now
+
+    def sleep(delay: float) -> None:
+        nonlocal now
+        sleeps.append(delay)
+        now += delay
+
+    pacer = client.RequestPacer(
+        minimum_interval_seconds=2.0,
+        monotonic=monotonic,
+        sleep=sleep,
+    )
+
+    pacer.wait()
+    pacer.wait()
+    pacer.wait()
+
+    assert sleeps == [2.0, 2.0]
 
 
 # --------------------------------------------------------------------------

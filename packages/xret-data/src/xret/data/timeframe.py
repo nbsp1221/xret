@@ -16,6 +16,12 @@ Units are case-sensitive (Decision 11):
 - `w`: calendar week (Monday 00:00 UTC anchored)
 - `M`: calendar month (1st-of-month 00:00 UTC anchored)
 
+Fixed `s`, `m`, `h`, and `d` multiples are anchored at
+`1970-01-01T00:00:00Z`. This makes arbitrary multiples deterministic but is an
+Xret canonical convention, not a claim about a venue's native aggregation.
+Consequently `7d` and `1w` are distinct identities: `7d` follows the fixed
+epoch grid, while `1w` follows the Monday UTC calendar grid.
+
 `w` and `M` are true calendar units, not fixed-duration approximations:
 `floor`/`next_boundary` honor real week/month boundaries (including
 variable month length and year rollover), never a fixed 7- or 30-day
@@ -64,7 +70,9 @@ class TimeBar:
 
     Construct via `TimeBar.parse("1h")` (or `TimeBar(amount=1, unit="h")`
     directly). Calendar units (`w`, `M`) only support `amount=1`: `2w` or
-    `3M` are not part of the canonical grammar.
+    `3M` are not part of the canonical grammar. Fixed units use the Unix epoch
+    as their origin; calendar weeks and months use their documented UTC
+    calendar boundaries.
     """
 
     amount: int

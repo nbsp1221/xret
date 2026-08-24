@@ -10,6 +10,7 @@ from typing import Any, Final
 from xret.data.errors import InvalidRequestError, UnsupportedMarketError
 from xret.data.models import Market, MarketIdentity
 from xret.data.providers.ccxt.client import CCXTExchange
+from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import (
     DerivativeInterpretation,
     MarketDefinition,
@@ -132,10 +133,15 @@ def _perpetual(identity: MarketIdentity, markets: dict[str, Any]) -> CcxtMarket:
     return _resolved_market(symbol, settlement, market)
 
 
-def resolve(identity: MarketIdentity, exchange: CCXTExchange) -> CcxtMarket:
+def resolve(
+    identity: MarketIdentity,
+    exchange: CCXTExchange,
+    *,
+    reload: bool = False,
+) -> CcxtMarket:
     if not exchange.has.get("fetchOHLCV"):
         raise UnsupportedMarketError(f"{exchange.id} does not support fetchOHLCV")
-    native_markets = exchange.load_markets()
+    native_markets = exchange.load_markets(reload=reload)
     return (
         _spot(identity, native_markets)
         if identity.market is Market.SPOT
@@ -166,7 +172,7 @@ def supported_timeframes(exchange: CCXTExchange) -> frozenset[str]:
         except InvalidRequestError:
             continue
         canonical.add(candidate)
-    return frozenset(canonical)
+    return canonical_timeframes(exchange.id, canonical)
 
 
 def market_definitions(
@@ -194,7 +200,7 @@ def market_definitions(
             canonical_exchange=canonical_exchange,
             market_family=market_family,
             metadata=raw,
-            timeframes=timeframes,
+            timeframes=canonical_timeframes(exchange.id, set(timeframes), raw),
             precision_mode=getattr(exchange, "precisionMode", None),
             tick_size_precision_mode=tick_size_precision_mode,
         )

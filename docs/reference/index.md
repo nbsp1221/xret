@@ -3,6 +3,7 @@
 This section defines the exact public contracts of the `xret-data` distribution, imported as `xret.data`.
 
 - [Market data API](api.md) — exports, market identity, time ranges, verbs, result types, maintenance, and canonical schema.
+- [Canonical time bars](time-bars.md) — interval origin, trade-price event universe, base-asset volume, and missing-data contract.
 - [Market-data providers](providers.md) — historical-bar SPI, optional market definitions, observation evidence, selection, and source lineage.
 - [Configuration](configuration.md) — explicit configuration and discovery precedence.
 - [Errors](errors.md) — public exception hierarchy and failure categories.

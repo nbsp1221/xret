@@ -13,15 +13,16 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Final
+from datetime import UTC, datetime, timedelta
 
-from xret.data.errors import ProviderError, UnsupportedMarketError
+from xret.data.errors import ProviderError
+from xret.data.providers.ccxt.compatibility import ObservationProfile, WindowParameterFormat
 from xret.data.providers.contracts import ObservedWindow
 from xret.data.timeframe import TimeBar
 
 RawOHLCVRow = Sequence[float]
-PageFetcher = Callable[[int, int, dict[str, int]], list[list[float]]]
+WindowParameter = int | str
+PageFetcher = Callable[[int | None, int | None, dict[str, WindowParameter]], list[list[float]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,43 +33,57 @@ class PaginationResult:
     observed: tuple[ObservedWindow, ...]
 
 
-@dataclass(frozen=True, slots=True)
-class _PaginationProfile:
-    max_bars: int
-
-
-# Conservative maxima for CCXT endpoint families whose OHLCV adapters accept
-# an explicit ``until`` bound.  These are correctness facts, not performance
-# hints: callers must never build a wider page and assume it was exhaustive.
-_PROFILES: Final[dict[str, _PaginationProfile]] = {
-    "coinbase": _PaginationProfile(max_bars=300),
-    "binance": _PaginationProfile(max_bars=1000),
-    "binanceusdm": _PaginationProfile(max_bars=1000),
-    "bybit": _PaginationProfile(max_bars=1000),
-    "okx": _PaginationProfile(max_bars=100),
-}
-
-
-def _profile(client_id: str) -> _PaginationProfile:
-    profile = _PROFILES.get(client_id)
-    if profile is None:
-        raise UnsupportedMarketError(
-            f"{client_id} has no qualified exhaustive fetchOHLCV pagination contract"
-        )
-    return profile
-
-
 def _epoch_ms(value: datetime) -> int:
     return int(value.timestamp() * 1000)
 
 
-def _advance(time_bar: TimeBar, start: datetime, bars: int, end: datetime) -> datetime:
+def _rfc3339_milliseconds(value: int) -> str:
+    return (
+        datetime.fromtimestamp(value / 1000, tz=UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _request_window(
+    profile: ObservationProfile,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> tuple[int | None, dict[str, WindowParameter]]:
+    native = profile.native_window_parameters
+    if native is not None:
+        if native.format is WindowParameterFormat.RFC3339_MILLISECONDS:
+            return None, {
+                native.start: _rfc3339_milliseconds(start_ms),
+                native.end: _rfc3339_milliseconds(end_ms - 1),
+            }
+        raise ProviderError(f"unsupported native CCXT window format: {native.format!r}")
+
+    params: dict[str, WindowParameter] = {}
+    if profile.send_unified_until:
+        params["until"] = end_ms - 1 if profile.until_inclusive else end_ms
+    return start_ms, params
+
+
+def _advance(
+    time_bar: TimeBar,
+    start: datetime,
+    bars: int,
+    end: datetime,
+    max_span: timedelta | None,
+) -> tuple[datetime, int]:
     cursor = start
+    traversed = 0
     for _ in range(bars):
-        cursor = time_bar.next_boundary(cursor)
+        next_cursor = time_bar.next_boundary(cursor)
+        if max_span is not None and next_cursor - start > max_span:
+            break
+        cursor = next_cursor
+        traversed += 1
         if cursor >= end:
-            return end
-    return cursor
+            return end, traversed
+    return cursor, traversed
 
 
 def _validate_page(
@@ -78,6 +93,7 @@ def _validate_page(
     exchange_id: str,
     window_start_ms: int,
     window_end_ms: int,
+    accept_end_boundary: bool,
 ) -> None:
     """Reject a page that does not honor the bounded window it answers.
 
@@ -108,7 +124,9 @@ def _validate_page(
             raise ProviderError(
                 f"fetchOHLCV returned non-ascending candles for {native_symbol} on {exchange_id}"
             )
-        if not window_start_ms <= timestamp_ms < window_end_ms:
+        within_window = window_start_ms <= timestamp_ms < window_end_ms
+        is_qualified_end_boundary = accept_end_boundary and timestamp_ms == window_end_ms
+        if not within_window and not is_qualified_end_boundary:
             raise ProviderError(
                 f"fetchOHLCV returned a candle outside the requested window for "
                 f"{native_symbol} on {exchange_id}: "
@@ -132,7 +150,7 @@ def _describe_ms(value: int) -> str:
 
 def paginate_ohlcv(
     *,
-    client_id: str,
+    profile: ObservationProfile,
     exchange_id: str,
     native_symbol: str,
     time_bar: TimeBar,
@@ -149,14 +167,19 @@ def paginate_ohlcv(
     """
     if requested_limit <= 0:
         raise ProviderError(f"page limit must be positive, got {requested_limit!r}")
-    profile = _profile(client_id)
     effective_limit = min(requested_limit, profile.max_bars)
     cursor = start
     collected: list[tuple[float, ...]] = []
     observed: list[ObservedWindow] = []
 
     while cursor < end:
-        page_end = _advance(time_bar, cursor, effective_limit, end)
+        page_end, page_bars = _advance(
+            time_bar,
+            cursor,
+            effective_limit,
+            end,
+            profile.max_span,
+        )
         if page_end <= cursor:
             raise ProviderError(
                 f"pagination made no progress for {native_symbol} on {exchange_id}: "
@@ -164,21 +187,28 @@ def paginate_ohlcv(
             )
         start_ms = _epoch_ms(cursor)
         end_ms = _epoch_ms(page_end)
-        # CCXT's unified `until` denotes the latest candle to fetch and the
-        # qualified endpoints accept it inclusively.  Translate Xret's
-        # half-open page to that contract so a full page contains at most
-        # `effective_limit` candle boundaries.  Passing `end_ms` could offer
-        # limit + 1 boundaries and let newest-first endpoints discard start.
-        inclusive_until_ms = end_ms - 1
-        batch = fetch_page(start_ms, effective_limit, {"until": inclusive_until_ms})
+        # CCXT's unified `until` denotes the latest candle to fetch, but native
+        # adapters disagree on whether it is inclusive. Translate Xret's
+        # half-open page using the qualified endpoint contract so a full page
+        # contains at most `effective_limit` candle boundaries.
+        request_since, params = _request_window(profile, start_ms=start_ms, end_ms=end_ms)
+        request_limit = (
+            min(profile.max_bars, page_bars + int(profile.accept_end_boundary))
+            if profile.send_page_limit
+            else None
+        )
+        batch = fetch_page(request_since, request_limit, params)
         _validate_page(
             batch,
             native_symbol=native_symbol,
             exchange_id=exchange_id,
             window_start_ms=start_ms,
             window_end_ms=end_ms,
+            accept_end_boundary=profile.accept_end_boundary,
         )
-        collected.extend(tuple(float(value) for value in row[:6]) for row in batch)
+        collected.extend(
+            tuple(float(value) for value in row[:6]) for row in batch if int(float(row[0])) < end_ms
+        )
         observed.append(ObservedWindow(cursor, page_end))
         cursor = page_end
 

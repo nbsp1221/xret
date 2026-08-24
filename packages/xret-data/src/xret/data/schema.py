@@ -17,12 +17,13 @@ __all__ = [
     "OHLC_COLUMNS",
 ]
 
-#: Column order and dtypes for canonical OHLCV Parquet files and frames
-#: (IR-2). `settle` is `null` exactly when `market="spot"`. `timestamp` is
-#: the candle open time (inclusive interval start), millisecond precision,
-#: UTC. There is no `run_id` row column (P-4, Decision 15): operational
-#: provenance lives in `SyncResult`, file metadata and the catalog, not
-#: mixed into the market observation schema.
+#: Column order and dtypes for canonical trade-OHLCV Parquet files and frames
+#: (IR-2). OHLC values summarize eligible executed trades, and `volume` is
+#: base-asset quantity. `settle` is `null` exactly when `market="spot"`.
+#: `timestamp` is the candle open time (inclusive interval start), millisecond
+#: precision, UTC. There is no `run_id` row column (P-4, Decision 15):
+#: operational provenance lives in `SyncResult`, file metadata and the catalog,
+#: not mixed into the market observation schema.
 OHLCV_SCHEMA: Final[pl.Schema] = pl.Schema(
     {
         "exchange": pl.String(),

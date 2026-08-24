@@ -10,6 +10,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - [Roadmap](roadmap.md) — see how Xret plans to connect trusted data, research, backtesting, and eventual live operation.
 - [Synchronize and read bars](guides/synchronization.md) — choose between `fetch`, `sync`, `scan`, and `scan_partial`.
 - [Consume live bar updates](guides/live-bars.md) — subscribe to typed bar observations and optionally bridge recent history into the live stream.
+- [Canonical time bars](reference/time-bars.md) — exact interval, trade-price, volume, finality, and missing-data meanings.
 - [Market data API](reference/api.md) — exact public contracts.
 - [Market-data providers](reference/providers.md) — implement historical and optional live capabilities.
 - [Verified support](quality/verified-support.md) — combinations exercised against real providers.
@@ -21,7 +22,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - **Reference** defines exact API, configuration, schema, and error contracts.
 - **Explanation** describes concepts, architecture, and design rationale.
 - **Quality** records durable public trust criteria and verified combinations.
-- **Development** documents current contributor, documentation, and [release](development/releasing.md) policy.
+- **Development** documents current contributor, documentation, [CCXT qualification](development/ccxt-qualification.md), and [release](development/releasing.md) policy.
 
 The [roadmap](roadmap.md) is directional. It does not define current behavior or promise release dates; released source, tests, and reference documentation remain the contract.
 

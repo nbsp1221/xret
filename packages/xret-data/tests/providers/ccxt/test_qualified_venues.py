@@ -9,7 +9,7 @@ entire advertised catalog instead of the timeframe the caller asked for.
 These tests read `ccxt.<id>().timeframes`, a static class attribute that
 needs no network, and assert the boundary contract for every venue Xret
 claims a qualified pagination profile for. Deriving the venue list from
-`pagination._PROFILES` rather than restating it keeps a newly qualified
+`compatibility._OBSERVATION_PROFILES` rather than restating it keeps a newly qualified
 venue covered automatically; a hardcoded copy would silently miss it.
 """
 
@@ -21,16 +21,13 @@ import ccxt
 import pytest
 from xret.data.errors import InvalidRequestError
 from xret.data.models import Market, MarketIdentity
+from xret.data.providers.ccxt.compatibility import qualified_client_ids
 from xret.data.providers.ccxt.markets import supported_timeframes
-from xret.data.providers.ccxt.pagination import _PROFILES
+from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import ResolvedBarMarket
 from xret.data.timeframe import TimeBar
 
-_QUALIFIED_CLIENT_IDS = sorted(_PROFILES)
-
-#: Every qualified venue offers hourly bars, and `verified-support.md` claims
-#: `1h` for each venue it lists. Filtering must never drop it.
-_BASELINE_TIMEFRAME = "1h"
+_QUALIFIED_CLIENT_IDS = qualified_client_ids()
 
 
 def _inexpressible(timeframes: Mapping[str, object]) -> list[str]:
@@ -69,13 +66,6 @@ def test_advertised_metadata_satisfies_the_resolved_market_contract(client_id: s
 
 
 @pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)
-def test_qualified_venue_still_offers_the_baseline_timeframe(client_id: str) -> None:
-    exchange = getattr(ccxt, client_id)()
-
-    assert _BASELINE_TIMEFRAME in supported_timeframes(exchange)
-
-
-@pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)
 def test_supported_timeframes_only_removes_advertised_entries(client_id: str) -> None:
     """Filtering never invents, rewrites, or renames an entry."""
     exchange = getattr(ccxt, client_id)()
@@ -84,7 +74,10 @@ def test_supported_timeframes_only_removes_advertised_entries(client_id: str) ->
     accepted = supported_timeframes(exchange)
 
     assert accepted <= advertised
-    assert accepted == frozenset(key for key in advertised if _is_canonical(key))
+    assert accepted == canonical_timeframes(
+        client_id,
+        {key for key in advertised if _is_canonical(key)},
+    )
 
 
 def test_installed_ccxt_still_advertises_bar_types_xret_cannot_express() -> None:

@@ -100,6 +100,21 @@ def test_hour_floor_and_next_boundary() -> None:
     assert bar.next_boundary(value) == datetime(2024, 1, 1, 14, 0, tzinfo=UTC)
 
 
+def test_multi_day_fixed_bar_uses_unix_epoch_origin() -> None:
+    bar = TimeBar.parse("3d")
+    value = datetime(2024, 1, 2, 12, tzinfo=UTC)
+
+    assert bar.floor(value) == datetime(2023, 12, 31, tzinfo=UTC)
+    assert (bar.floor(value) - datetime(1970, 1, 1, tzinfo=UTC)) % timedelta(days=3) == timedelta(0)
+
+
+def test_seven_fixed_days_and_one_calendar_week_are_distinct() -> None:
+    value = datetime(2024, 1, 4, 12, tzinfo=UTC)
+
+    assert TimeBar.parse("7d").floor(value) == datetime(2024, 1, 4, tzinfo=UTC)
+    assert TimeBar.parse("1w").floor(value) == datetime(2024, 1, 1, tzinfo=UTC)
+
+
 # --------------------------------------------------------------------------
 # floor / next_boundary: calendar week
 # --------------------------------------------------------------------------
