@@ -27,18 +27,18 @@ bars = market_data.bars(
 )
 
 result = bars.sync(start="2024-01-01", end="2024-02-01")
-print(result.source.verification if result.source else "local no-op")
+print(result.source if result.source else "local no-op")
 result.require_complete()
 ```
 
 A spot dataset uses `market="spot"` and no `settle`. `sync` checks local coverage, fetches only missing intervals, validates bars, and commits canonical Parquet. `result.require_complete()` makes the example reject any remaining coverage gap.
 
-The result answers two different trust questions:
+The result exposes the evidence needed for two different questions:
 
-- `result.source.verification` says whether Xret has independently qualified the exact remote scope. It is `None` only when the sync was already complete and made no remote call.
+- `result.source` identifies the provider and native market that produced the remote observation. It is `None` only when the sync was already complete and made no remote call.
 - `result.is_complete` says whether this requested time range has no remaining gap.
 
-Provider-advertised but unqualified CCXT scopes may run with explicit unverified evidence. The warning does not mean Xret skipped validation, and a verified scope can still suffer a current provider or network failure. Read [Provider support and trust](../explanation/provider-support.md) before treating these states as an exchange-wide approval or rejection.
+Prior Xret qualification is not runtime state. Every attempted scope receives the same current-response validation, while [Verified support](../quality/verified-support.md) separately records combinations exercised against real providers. Read [Provider support and trust](../explanation/provider-support.md) before treating historical QA evidence as an exchange-wide guarantee.
 
 ## Read complete local data
 

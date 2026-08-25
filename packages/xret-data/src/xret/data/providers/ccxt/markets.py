@@ -15,10 +15,8 @@ from xret.data.models import (
     MarketIdentity,
     OperationCapability,
     TimeBarCapability,
-    Verification,
-    VerificationStatus,
 )
-from xret.data.providers.ccxt import capabilities, compatibility, verification
+from xret.data.providers.ccxt import capabilities, compatibility
 from xret.data.providers.ccxt.client import CCXTExchange
 from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import (
@@ -225,7 +223,6 @@ def market_definitions(
             bar_capabilities=_bar_capabilities(
                 client_id=client_id,
                 market_family=market_family,
-                settle=definition.identity.settle,
                 historical_available=bool(exchange.has.get("fetchOHLCV")),
                 historical_timeframes=raw_timeframes,
                 live_capability=live_capability,
@@ -246,7 +243,6 @@ def _bar_capabilities(
     *,
     client_id: str,
     market_family: Market,
-    settle: str | None,
     historical_available: bool,
     historical_timeframes: frozenset[str],
     live_capability: capabilities.LiveOHLCVCapability,
@@ -265,12 +261,6 @@ def _bar_capabilities(
         historical = _operation_capability(
             advertised=historical_available and timeframe in historical_timeframes,
             excluded=historical_excluded,
-            evidence=verification.historical(
-                client_id,
-                market_family.value,
-                settle,
-                timeframe,
-            ),
             operation="historical",
         )
         live_advertised = live_capability.available and (
@@ -284,23 +274,9 @@ def _bar_capabilities(
                     "CCXT Pro advertises watchOHLCV without a timeframe catalog",
                 ),
             )
-        live_evidence = verification.live(
-            client_id,
-            market_family.value,
-            settle,
-            timeframe,
-        )
-        if live_advertised and live_evidence.status is VerificationStatus.UNVERIFIED:
-            live_notices += (
-                CapabilityNotice(
-                    "provider.volume_semantics_unverified",
-                    "Xret has not independently qualified this live OHLCV volume scope",
-                ),
-            )
         live = _operation_capability(
             advertised=live_advertised,
             excluded=timeframe in policy.live_excluded_timeframes,
-            evidence=live_evidence,
             operation="live",
             notices=live_notices,
         )
@@ -312,14 +288,12 @@ def _operation_capability(
     *,
     advertised: bool,
     excluded: bool,
-    evidence: Verification,
     operation: str,
     notices: tuple[CapabilityNotice, ...] = (),
 ) -> OperationCapability:
     if not advertised:
         return OperationCapability(
             Availability.UNAVAILABLE,
-            None,
             notices=(
                 CapabilityNotice(
                     f"provider.{operation}_unavailable",
@@ -330,7 +304,6 @@ def _operation_capability(
     if excluded:
         return OperationCapability(
             Availability.INCOMPATIBLE,
-            None,
             notices=(
                 CapabilityNotice(
                     "provider.known_incompatible",
@@ -338,7 +311,7 @@ def _operation_capability(
                 ),
             ),
         )
-    return OperationCapability(Availability.AVAILABLE, evidence, notices=notices)
+    return OperationCapability(Availability.AVAILABLE, notices=notices)
 
 
 def _timeframe_sort_key(value: str) -> tuple[int, int, str]:

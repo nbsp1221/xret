@@ -20,7 +20,6 @@ xret/data/providers/
     ├── provider.py      # implementation orchestration
     ├── capabilities.py  # CCXT capability metadata interpretation
     ├── compatibility.py # exact lossless semantics and bounded-window policies
-    ├── verification.py  # qualification evidence; never execution authorization
     ├── live.py          # CCXT Pro live-bar session
     ├── client.py        # CCXT construction, retry, and transport
     ├── markets.py       # crypto market resolution and definition translation
@@ -93,7 +92,7 @@ A provider used through `MarketData` still implements `HistoricalBarProvider`. I
 
 Every returned definition must belong to the requested canonical exchange and market family, and canonical identities must be unique. Xret rejects mutable collections, wrong value types, out-of-scope definitions, and duplicate identities as provider contract failures.
 
-`MarketDefinition` is immutable and contains canonical identity, nullable provider-advertised active status, canonical provider-advertised timeframes, optional exact `tick_size` and `size_increment`, and optional derivative interpretation. Its timeframes do not assert exhaustive historical pagination or Xret verification. Search, filtering, ordering, and result caching remain application responsibilities.
+`MarketDefinition` is immutable and contains canonical identity, nullable provider-advertised active status, canonical provider-advertised timeframes, optional exact `tick_size` and `size_increment`, and optional derivative interpretation. Its timeframes do not assert exhaustive historical pagination or Xret qualification. Search, filtering, ordering, and result caching remain application responsibilities.
 
 The built-in CCXT adapter translates only entries safely expressible with the requested spot or perpetual identity. Unrelated native instrument families, unknown optional fields, and native timeframe names outside Xret's grammar do not reject the venue. Canonical identity collisions are excluded rather than resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT precision values become increments only in `TICK_SIZE` mode; limits and other precision modes are not guessed into fixed increments.
 
@@ -108,7 +107,7 @@ class LiveBarProvider(Protocol):
 
 `LiveBarSession` is an async context manager and async iterator. Its `subscribe_bar_updates(resolved_market, timeframe)` method starts one stream; its iterator merges `ProviderBarUpdate` values from every subscription. The provider update carries canonical identity, timeframe, inclusive UTC bar-start, trade-derived OHLC values, and base-asset volume. Xret validates it, enforces per-dataset nondecreasing timestamps, and adds `received_at` before exposing `BarUpdate`. Xret also derives provider-neutral `BarFinality` from the bar interval, receipt time, and Xret's finality grace; providers do not add native closed/confirm flags to the SPI.
 
-The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions. Xret attempts an Xret-expressible timeframe when CCXT Pro advertises `watchOHLCV`; the verified live matrix supplies confidence evidence rather than permission. Historical REST and live WebSocket adapters may expose different native volume fields, so the live channel inherits the historical typed volume policy by default and requires an explicit channel override when qualification proves a difference. An unqualified live scope is explicitly reported as unverified, including its volume semantics, while malformed or known non-lossless values still fail. A field name or adapter comment is not sufficient semantic evidence: qualification compares a fully observed public-trade interval with the completed live candle and exact instrument metadata before deciding whether the value is independently verified as base quantity or a contract count.
+The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions. Xret attempts an Xret-expressible timeframe when CCXT Pro advertises `watchOHLCV`; the published live matrix supplies confidence evidence rather than permission. Historical REST and live WebSocket adapters may expose different native volume fields, so the live channel inherits the historical typed volume policy by default and requires an explicit channel override when qualification proves a difference. Scopes without prior qualification still run under the same compatibility rules and runtime validation, while malformed or known non-lossless values fail. A field name or adapter comment is not sufficient semantic evidence: qualification compares a fully observed public-trade interval with the completed live candle and exact instrument metadata before promoting a public base-quantity or contract-count claim.
 
 Live capability absence raises `UnsupportedMarketError`. Once open, a provider transport failure, malformed update, reader failure, or queue overflow raises a terminal `ProviderError` for the session. Providers and Xret do not silently retry, reconnect, coalesce, or claim continuity. Closing the context closes the provider's whole session; the initial contract has no unsubscribe operation.
 
@@ -204,8 +203,8 @@ This is a lineage constraint, not part of canonical market identity: `exchange`,
 
 Available lineage can be rebuilt from canonical Parquet. An exhaustive empty observation can create unavailable coverage and lineage without producing a Parquet file. Those catalog-only facts are intentionally non-rebuildable: after catalog loss, rebuild returns them to `missing` with no source binding.
 
-## Errors and qualification
+## Errors and external qualification
 
 Provider-native exceptions should be allowed to propagate from provider methods; Xret wraps unknown failures in `ProviderError` and chains the original cause. Providers should use `UnsupportedMarketError` when a requested market or timeframe cannot be operated safely.
 
-Conformance to these protocols means Xret can validate and orchestrate the implementation. It does not make a third-party provider an Xret-verified source. Verified claims require the separate live-provider qualification policy in [Verified support](../quality/verified-support.md).
+Conformance to these protocols means Xret can validate and orchestrate the implementation. It does not make a third-party provider a previously qualified source. Historical QA claims remain separate public evidence under [Verified support](../quality/verified-support.md) and are not part of the provider protocol or runtime result.

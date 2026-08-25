@@ -1,4 +1,4 @@
-"""Qualified CCXT venues stay resolvable with the installed `ccxt`.
+"""Profiled CCXT venues stay resolvable with the installed `ccxt`.
 
 Every other test under `providers/ccxt/` uses fakes, so none of them observe
 what real CCXT classes advertise. That blind spot let a refactor make 20 of
@@ -8,8 +8,8 @@ entire advertised catalog instead of the timeframe the caller asked for.
 
 These tests read `ccxt.<id>().timeframes`, a static class attribute that
 needs no network, and assert the boundary contract for every venue Xret
-claims a qualified pagination profile for. Deriving the venue list from
-`compatibility._OBSERVATION_PROFILES` rather than restating it keeps a newly qualified
+has an exact pagination profile for. Deriving the venue list from
+`compatibility._OBSERVATION_PROFILES` rather than restating it keeps a newly profiled
 venue covered automatically; a hardcoded copy would silently miss it.
 """
 
@@ -21,13 +21,13 @@ import ccxt
 import pytest
 from xret.data.errors import InvalidRequestError
 from xret.data.models import Market, MarketIdentity
-from xret.data.providers.ccxt.compatibility import qualified_client_ids
+from xret.data.providers.ccxt.compatibility import profiled_client_ids
 from xret.data.providers.ccxt.markets import supported_timeframes
 from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import ResolvedBarMarket
 from xret.data.timeframe import TimeBar
 
-_QUALIFIED_CLIENT_IDS = qualified_client_ids()
+_PROFILED_CLIENT_IDS = profiled_client_ids()
 
 
 def _inexpressible(timeframes: Mapping[str, object]) -> list[str]:
@@ -43,7 +43,7 @@ def _is_canonical(timeframe: str) -> bool:
     return True
 
 
-@pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)
+@pytest.mark.parametrize("client_id", _PROFILED_CLIENT_IDS)
 def test_advertised_metadata_satisfies_the_resolved_market_contract(client_id: str) -> None:
     """The `supported_timeframes` -> `ResolvedBarMarket` boundary must hold.
 
@@ -65,7 +65,7 @@ def test_advertised_metadata_satisfies_the_resolved_market_contract(client_id: s
     assert resolved.timeframes
 
 
-@pytest.mark.parametrize("client_id", _QUALIFIED_CLIENT_IDS)
+@pytest.mark.parametrize("client_id", _PROFILED_CLIENT_IDS)
 def test_supported_timeframes_only_removes_advertised_entries(client_id: str) -> None:
     """Filtering never invents, rewrites, or renames an entry."""
     exchange = getattr(ccxt, client_id)()
@@ -83,16 +83,16 @@ def test_supported_timeframes_only_removes_advertised_entries(client_id: str) ->
 def test_installed_ccxt_still_advertises_bar_types_xret_cannot_express() -> None:
     """Guards the premise the parametrized cases rely on.
 
-    If CCXT ever aligned every qualified venue with Xret's grammar, the cases
+    If CCXT ever aligned every profiled venue with Xret's grammar, the cases
     above would stop exercising filtering. This says so rather than leaving a
     silently vacuous suite.
     """
     found = {
         client_id: _inexpressible(getattr(ccxt, client_id)().timeframes)
-        for client_id in _QUALIFIED_CLIENT_IDS
+        for client_id in _PROFILED_CLIENT_IDS
     }
 
     assert any(found.values()), (
-        "no qualified venue advertises a bar type outside Xret's vocabulary; "
+        "no profiled venue advertises a bar type outside Xret's vocabulary; "
         f"the filtered cases above no longer exercise filtering: {found}"
     )

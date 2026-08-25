@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +11,6 @@ import pytest
 from xret.data.config import MarketDataConfig
 from xret.data.errors import (
     CatalogError,
-    CoverageError,
     InvalidRequestError,
     ProviderError,
     UnsupportedMarketError,
@@ -33,7 +31,6 @@ from xret.data.providers import (
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_SCHEMA
 from xret.data.storage.catalog import CATALOG_FILE_NAME, Catalog
-from xret.data.warnings import UnverifiedProviderWarning
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 1, 1, 3, tzinfo=UTC)
@@ -428,12 +425,12 @@ def test_direct_provider_fetch_uses_public_api_without_storage_side_effects(tmp_
         timeframe="1h",
     )
 
-    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
-        result = bars.fetch(START, END)
+    result = bars.fetch(START, END)
 
     assert result.data.height == 3
     assert result.is_complete
     assert result.data.schema == OHLCV_SCHEMA
+    assert result.warnings == ()
     assert provider.resolve_calls == 1
     assert provider.observe_calls == 1
     assert not config.state_dir.exists()
@@ -507,10 +504,8 @@ def test_named_provider_discovery_is_lazy_and_cached(
     assert calls == []
     assert bars.scan_partial(START, END).data.collect().is_empty()
     assert calls == []
-    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
-        assert bars.fetch(START, END).data.height == 3
-    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
-        assert bars.fetch(START, END).data.height == 3
+    assert bars.fetch(START, END).data.height == 3
+    assert bars.fetch(START, END).data.height == 3
     assert calls == [discovery.ENTRY_POINT_GROUP]
 
 
@@ -522,17 +517,16 @@ def test_direct_provider_bypasses_installed_discovery(
     provider = FakeProvider()
     config = MarketDataConfig(state_dir=tmp_path / "state", data_dir=tmp_path / "data")
 
-    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
-        result = (
-            MarketData(config=config, provider=provider)
-            .bars(
-                exchange="coinbase",
-                symbol="ETH/USD",
-                market="spot",
-                timeframe="1h",
-            )
-            .fetch(START, END)
+    result = (
+        MarketData(config=config, provider=provider)
+        .bars(
+            exchange="coinbase",
+            symbol="ETH/USD",
+            market="spot",
+            timeframe="1h",
         )
+        .fetch(START, END)
+    )
 
     assert result.data.height == 3
     assert calls == []
@@ -718,23 +712,6 @@ def test_custom_provider_sync_persists_generic_provenance_and_repeats_as_noop(
     assert "ccxt_version" not in metadata
     with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
         assert catalog.get_source_lineage(first.dataset_key) == "acme"
-
-
-def test_escalated_unverified_warning_fails_before_sync_publication(tmp_path: Path) -> None:
-    provider = RangeProvider("acme", "git:abc")
-    config, bars = _custom_bars(tmp_path, provider)
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UnverifiedProviderWarning)
-        with pytest.raises(UnverifiedProviderWarning):
-            bars.sync(START, END)
-
-    assert not list(config.data_dir.rglob("*.parquet"))
-    with pytest.raises(CoverageError):
-        bars.scan(START, END)
-    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
-        (status,) = catalog.connection.execute("SELECT status FROM ingestion_runs").fetchone()
-        assert status == "failed"
 
 
 def test_same_source_lineage_allows_provider_version_change(tmp_path: Path) -> None:

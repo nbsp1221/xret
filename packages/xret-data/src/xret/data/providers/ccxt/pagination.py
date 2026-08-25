@@ -129,8 +129,8 @@ def _validate_page(
                 f"fetchOHLCV returned non-ascending candles for {native_symbol} on {exchange_id}"
             )
         within_window = window_start_ms <= timestamp_ms < window_end_ms
-        is_qualified_end_boundary = accept_end_boundary and timestamp_ms == window_end_ms
-        if not within_window and not is_qualified_end_boundary:
+        is_known_end_boundary = accept_end_boundary and timestamp_ms == window_end_ms
+        if not within_window and not is_known_end_boundary:
             raise ProviderError(
                 f"fetchOHLCV returned a candle outside the requested window for "
                 f"{native_symbol} on {exchange_id}: "
@@ -163,7 +163,7 @@ def _bounded_ohlcv(
     requested_limit: int,
     fetch_page: PageFetcher,
 ) -> PaginationResult:
-    """Traverse every qualified bounded page in ``[start, end)``.
+    """Traverse every configured bounded page in ``[start, end)``.
 
     The cursor advances by the provider window, never by the last returned
     candle.  Therefore an empty successful page is evidence for that page and
@@ -193,7 +193,7 @@ def _bounded_ohlcv(
         end_ms = _epoch_ms(page_end)
         # CCXT's unified `until` denotes the latest candle to fetch, but native
         # adapters disagree on whether it is inclusive. Translate Xret's
-        # half-open page using the qualified endpoint contract so a full page
+        # half-open page using the endpoint policy so a full page
         # contains at most `effective_limit` candle boundaries.
         request_since, params = _request_window(profile, start_ms=start_ms, end_ms=end_ms)
         request_limit = (

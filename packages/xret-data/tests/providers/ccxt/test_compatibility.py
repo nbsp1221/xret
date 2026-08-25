@@ -6,8 +6,7 @@ from datetime import timedelta
 
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
-from xret.data.models import VerificationStatus
-from xret.data.providers.ccxt import compatibility, verification
+from xret.data.providers.ccxt import compatibility
 
 
 def test_client_wide_and_market_specific_semantics_are_merged() -> None:
@@ -189,28 +188,6 @@ def test_registry_validation_rejects_family_wide_perpetual_profile(
 
 def test_current_registry_is_self_consistent() -> None:
     compatibility.validate_registries()
-
-
-def test_qualification_evidence_is_independent_and_exact() -> None:
-    assert len(verification._HISTORICAL_TIMEFRAMES) == 45
-    assert set(verification._HISTORICAL_TIMEFRAMES).issubset(compatibility._OBSERVATION_PROFILES)
-    for scope, timeframes in verification._HISTORICAL_TIMEFRAMES.items():
-        assert timeframes
-        policy = compatibility.compatibility_policy(scope.client_id, scope.market_family)
-        assert timeframes.isdisjoint(policy.historical_excluded_timeframes)
-    assert (
-        verification.historical("binance", "spot", None, "1m").status is VerificationStatus.VERIFIED
-    )
-    assert (
-        verification.historical("binance", "spot", None, "2m").status
-        is VerificationStatus.UNVERIFIED
-    )
-    assert (
-        verification.historical("kraken", "spot", None, "1m").status
-        is VerificationStatus.UNVERIFIED
-    )
-    assert verification.live("binance", "spot", None, "1m").status is VerificationStatus.VERIFIED
-    assert verification.live("binance", "spot", None, "5m").status is VerificationStatus.UNVERIFIED
 
 
 def test_documented_candle_rate_limit_overrides_optimistic_client_default() -> None:

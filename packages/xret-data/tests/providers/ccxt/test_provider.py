@@ -16,7 +16,7 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import Availability, BarRequest, Market, MarketIdentity, VerificationStatus
+from xret.data.models import Availability, BarRequest, Market, MarketIdentity
 from xret.data.providers import (
     DerivativeInterpretation,
     ObservedWindow,
@@ -395,7 +395,7 @@ def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
     assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
 
 
-def test_fetch_markets_reports_availability_separately_from_verification() -> None:
+def test_fetch_markets_reports_historical_and_live_availability() -> None:
     exchange = FakeExchange(
         client_id="kraken",
         timeframes={"1m": "1m", "1h": "1h"},
@@ -417,31 +417,9 @@ def test_fetch_markets_reports_availability_separately_from_verification() -> No
     one_minute = capabilities_by_timeframe["1m"]
     one_hour = capabilities_by_timeframe["1h"]
     assert one_minute.historical.availability is Availability.AVAILABLE
-    assert one_minute.historical.verification is not None
-    assert one_minute.historical.verification.status is VerificationStatus.UNVERIFIED
     assert one_minute.live.availability is Availability.AVAILABLE
-    assert one_minute.live.verification is not None
-    assert one_minute.live.verification.status is VerificationStatus.UNVERIFIED
     assert one_hour.historical.availability is Availability.AVAILABLE
     assert one_hour.live.availability is Availability.UNAVAILABLE
-
-
-def test_historical_verification_requires_the_exact_qualified_timeframe() -> None:
-    exchange = FakeExchange(
-        client_id="binance",
-        timeframes={"1m": "1m", "2m": "2m"},
-    )
-    _register_spot(exchange)
-
-    (definition,) = _market_data().fetch_markets(exchange="binance", market="spot")
-
-    capabilities = {item.timeframe: item for item in definition.bar_capabilities}
-    one_minute = capabilities["1m"].historical.verification
-    two_minutes = capabilities["2m"].historical.verification
-    assert one_minute is not None
-    assert one_minute.status is VerificationStatus.VERIFIED
-    assert two_minutes is not None
-    assert two_minutes.status is VerificationStatus.UNVERIFIED
 
 
 def test_historical_incompatibility_does_not_hide_live_capability() -> None:
@@ -466,8 +444,6 @@ def test_historical_incompatibility_does_not_hide_live_capability() -> None:
     assert capability.timeframe == "3d"
     assert capability.historical.availability is Availability.INCOMPATIBLE
     assert capability.live.availability is Availability.AVAILABLE
-    assert capability.live.verification is not None
-    assert capability.live.verification.status is VerificationStatus.UNVERIFIED
 
 
 def test_unreported_live_timeframes_are_available_with_notice() -> None:
@@ -485,7 +461,6 @@ def test_unreported_live_timeframes_are_available_with_notice() -> None:
     assert capability.live.availability is Availability.AVAILABLE
     assert [notice.code for notice in capability.live.notices] == [
         "provider.live_timeframes_unreported",
-        "provider.volume_semantics_unverified",
     ]
     assert [warning.code for warning in provider._live_warnings(resolved, "1m")] == [
         "provider.live_timeframes_unreported"
@@ -1616,7 +1591,7 @@ def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypat
     assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 2)]
 
 
-def test_unqualified_exchange_uses_presence_only_generic_pagination() -> None:
+def test_unprofiled_exchange_uses_presence_only_generic_pagination() -> None:
     identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
     exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
     _exchanges["kraken"] = exchange
@@ -1635,7 +1610,6 @@ def test_unqualified_exchange_uses_presence_only_generic_pagination() -> None:
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
         ),
     )
-    assert observation.source.verification.status.value == "unverified"
 
 
 def test_generic_pagination_uses_advertised_ccxt_feature_limit() -> None:

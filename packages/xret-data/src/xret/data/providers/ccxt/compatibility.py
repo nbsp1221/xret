@@ -36,7 +36,7 @@ class CompatibilityScope:
 
 @dataclass(frozen=True, slots=True)
 class EndpointScope:
-    """The narrow operational scope of a qualified historical endpoint."""
+    """The narrow operational scope of a historical endpoint policy."""
 
     client_id: str
     market_family: MarketFamily
@@ -64,7 +64,7 @@ class NativeWindowParameters:
 
 @dataclass(frozen=True, slots=True)
 class ObservationProfile:
-    """Qualified bounded-window behavior for one historical endpoint scope."""
+    """Known bounded-window behavior for one historical endpoint scope."""
 
     max_bars: int
     max_span: timedelta | None = None
@@ -77,7 +77,7 @@ class ObservationProfile:
 
 @dataclass(frozen=True, slots=True)
 class TransportPolicy:
-    """Qualified transport constraints not represented accurately by CCXT."""
+    """Transport constraints not represented accurately by CCXT."""
 
     minimum_ohlcv_interval_seconds: float = 0.0
 
@@ -257,7 +257,7 @@ _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
     # margin avoids boundary bursts in its rolling limiter.
     "bitfinex": TransportPolicy(minimum_ohlcv_interval_seconds=2.2),
     # The public indexer returns sustained 429 responses at CCXT's current
-    # cadence. A one-second interval completed the qualification campaign.
+    # cadence. A one-second interval completed the live-network campaign.
     "dydx": TransportPolicy(minimum_ohlcv_interval_seconds=1.0),
     # Hyperliquid assigns candleSnapshot a base weight of 20 plus one unit per
     # 60 returned rows. CCXT 4.5.65 prices it as four base units, so its
@@ -318,14 +318,14 @@ def observation_profile(
     market_family: str,
     settle: str | None = None,
 ) -> ObservationProfile:
-    """Return the exact or family-wide qualified historical profile, failing closed."""
+    """Return the exact configured historical profile, failing closed."""
     family = _validated_market_family(market_family)
     exact = EndpointScope(client_id, family, settle)
     profile = _OBSERVATION_PROFILES.get(exact)
     if profile is None:
         suffix = f"/{settle}" if settle is not None else ""
         raise UnsupportedMarketError(
-            f"{client_id}/{market_family}{suffix} has no qualified exhaustive "
+            f"{client_id}/{market_family}{suffix} has no configured exhaustive "
             "fetchOHLCV pagination contract"
         )
     return profile
@@ -345,13 +345,13 @@ def find_observation_profile(
     return _OBSERVATION_PROFILES.get(EndpointScope(client_id, family, settle))
 
 
-def qualified_client_ids() -> tuple[str, ...]:
+def profiled_client_ids() -> tuple[str, ...]:
     """Installed CCXT client IDs covered by at least one observation profile."""
     return tuple(sorted({scope.client_id for scope in _OBSERVATION_PROFILES}))
 
 
 def has_observation_profile(client_id: str, market_family: MarketFamily) -> bool:
-    """Whether any settlement scope in one endpoint family is qualified."""
+    """Whether any settlement scope in one endpoint family has a profile."""
     return any(
         scope.client_id == client_id and scope.market_family == market_family
         for scope in _OBSERVATION_PROFILES
@@ -362,7 +362,7 @@ def observation_profiles(
     client_id: str,
     market_family: MarketFamily,
 ) -> tuple[ObservationProfile, ...]:
-    """All qualified settlement profiles for one endpoint family."""
+    """All configured settlement profiles for one endpoint family."""
     return tuple(
         profile
         for scope, profile in _OBSERVATION_PROFILES.items()
@@ -371,7 +371,7 @@ def observation_profiles(
 
 
 def transport_policy(client_id: str) -> TransportPolicy:
-    """Return the qualified client-wide transport correction, if any."""
+    """Return the known client-wide transport correction, if any."""
     return _TRANSPORT_POLICIES.get(client_id, TransportPolicy())
 
 

@@ -1,8 +1,8 @@
-"""Provider confidence and structured remote-result contracts."""
+"""Provider provenance and structured remote-result contracts."""
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -11,8 +11,6 @@ from xret.data import (
     FetchResult,
     OperationCapability,
     ProviderEvidence,
-    Verification,
-    VerificationStatus,
 )
 from xret.data.errors import InvalidRequestError, ProviderError
 from xret.data.models import CoverageInterval, CoverageStatus, DatasetKey, DataWarning, Market
@@ -30,37 +28,22 @@ def _key() -> DatasetKey:
     )
 
 
-def _source(status: VerificationStatus = VerificationStatus.UNVERIFIED) -> ProviderEvidence:
+def _source() -> ProviderEvidence:
     return ProviderEvidence(
         provider_name="ccxt",
         provider_version="4.5.65",
         provider_api_version=1,
         native_market_id="BTCUSDT",
         native_symbol="BTC/USDT",
-        verification=Verification(
-            status,
-            date(2026, 8, 25) if status is VerificationStatus.VERIFIED else None,
-        ),
     )
 
 
-def test_verification_requires_a_date_only_for_verified_evidence() -> None:
-    with pytest.raises(InvalidRequestError, match="requires verified_on"):
-        Verification(VerificationStatus.VERIFIED)
-    with pytest.raises(InvalidRequestError, match="cannot have verified_on"):
-        Verification(VerificationStatus.UNVERIFIED, date(2026, 8, 25))
-
-
-def test_operation_capability_keeps_availability_and_verification_orthogonal() -> None:
-    capability = OperationCapability(
-        Availability.AVAILABLE,
-        Verification(VerificationStatus.UNVERIFIED),
-    )
+def test_operation_capability_validates_availability() -> None:
+    capability = OperationCapability(Availability.AVAILABLE)
 
     assert capability.availability is Availability.AVAILABLE
-    assert capability.verification == Verification(VerificationStatus.UNVERIFIED)
-    with pytest.raises(InvalidRequestError, match="cannot have verification"):
-        OperationCapability(Availability.INCOMPATIBLE, capability.verification)
+    with pytest.raises(InvalidRequestError, match="must be an Availability"):
+        OperationCapability("available")  # type: ignore[arg-type]
 
 
 def test_fetch_result_exposes_completeness_without_proxying_the_dataframe() -> None:
@@ -85,7 +68,7 @@ def test_fetch_result_require_complete_returns_itself() -> None:
         dataset_key=_key(),
         data=pl.DataFrame(schema=OHLCV_SCHEMA),
         covered=(),
-        source=_source(VerificationStatus.VERIFIED),
+        source=_source(),
     )
 
     assert result.require_complete() is result

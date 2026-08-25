@@ -12,7 +12,7 @@ import enum
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
 from xret.data.errors import InvalidRequestError, ProviderError, SyncError, UnsupportedMarketError
@@ -24,7 +24,6 @@ if TYPE_CHECKING:
 __all__ = [
     "CoverageStatus",
     "Availability",
-    "VerificationStatus",
     "BarFinality",
     "Market",
     "QualitySeverity",
@@ -33,7 +32,6 @@ __all__ = [
     "BarUpdate",
     "DataWarning",
     "CapabilityNotice",
-    "Verification",
     "OperationCapability",
     "TimeBarCapability",
     "ProviderEvidence",
@@ -75,13 +73,6 @@ class Availability(enum.StrEnum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     INCOMPATIBLE = "incompatible"
-
-
-class VerificationStatus(enum.StrEnum):
-    """Whether Xret has current qualification evidence for an available scope."""
-
-    VERIFIED = "verified"
-    UNVERIFIED = "unverified"
 
 
 class BarFinality(enum.Enum):
@@ -494,41 +485,15 @@ class CapabilityNotice:
 
 
 @dataclass(frozen=True, slots=True)
-class Verification:
-    """Qualification evidence for one exact available operation scope."""
-
-    status: VerificationStatus
-    verified_on: date | None = None
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.status, VerificationStatus):
-            raise InvalidRequestError("verification status must be a VerificationStatus")
-        if self.verified_on is not None and not isinstance(self.verified_on, date):
-            raise InvalidRequestError("verified_on must be a date or None")
-        if self.status is VerificationStatus.VERIFIED and self.verified_on is None:
-            raise InvalidRequestError("verified qualification requires verified_on")
-        if self.status is VerificationStatus.UNVERIFIED and self.verified_on is not None:
-            raise InvalidRequestError("unverified qualification cannot have verified_on")
-
-
-@dataclass(frozen=True, slots=True)
 class OperationCapability:
-    """Availability and independent qualification evidence for one operation."""
+    """Current provider availability and notices for one operation."""
 
     availability: Availability
-    verification: Verification | None
     notices: tuple[CapabilityNotice, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.availability, Availability):
             raise InvalidRequestError("operation availability must be an Availability")
-        if self.availability is Availability.AVAILABLE:
-            if not isinstance(self.verification, Verification):
-                raise InvalidRequestError("available operation requires verification evidence")
-        elif self.verification is not None:
-            raise InvalidRequestError(
-                "unavailable or incompatible operation cannot have verification evidence"
-            )
         if not isinstance(self.notices, tuple) or not all(
             isinstance(notice, CapabilityNotice) for notice in self.notices
         ):
@@ -553,14 +518,13 @@ class TimeBarCapability:
 
 @dataclass(frozen=True, slots=True)
 class ProviderEvidence:
-    """Provider-native provenance and Xret evidence for one remote operation."""
+    """Provider-native provenance for one remote operation."""
 
     provider_name: str
     provider_version: str
     provider_api_version: int
     native_market_id: str
     native_symbol: str
-    verification: Verification
     normalizations: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -579,8 +543,6 @@ class ProviderEvidence:
             or self.provider_api_version <= 0
         ):
             raise InvalidRequestError("provider_api_version must be a positive integer")
-        if not isinstance(self.verification, Verification):
-            raise InvalidRequestError("provider verification must be a Verification")
         if not isinstance(self.normalizations, tuple) or not all(
             isinstance(value, str) and value for value in self.normalizations
         ):

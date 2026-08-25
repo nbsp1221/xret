@@ -61,13 +61,13 @@ bars = md.bars(
 # Acquire and validate — only missing intervals are fetched
 result = bars.sync("2024-01-01", "2024-06-01")
 result.require_complete()
-print(result.source.verification if result.source else "local no-op")
+print(result.source if result.source else "local no-op")
 
 # Read — raises CoverageError if any bar is missing
 df = bars.scan("2024-01-01", "2024-06-01").collect()
 ```
 
-`scan` never returns incomplete data. Remote operations are capability-based: Xret attempts provider-advertised CCXT markets, validates every response, and reports whether the exact scope has independent Xret verification. Unverified does not mean blocked; malformed, conflicting, or semantically incompatible data still fails before return or storage. This is the Xret contract: **the tool refuses to lie to you.**
+`scan` never returns incomplete data. Remote operations are capability-based: Xret attempts provider-advertised CCXT markets and validates every response. Malformed, conflicting, or semantically incompatible data fails before return or storage. This is the Xret contract: **the tool refuses to lie to you.**
 
 ## What `xret-data` supports
 
@@ -76,9 +76,9 @@ df = bars.scan("2024-01-01", "2024-06-01").collect()
 | Markets | Crypto spot and perpetual | Futures with expiry, options, and non-crypto identities are not part of the current contract. |
 | Historical bars | Provider fetch, incremental sync, canonical Parquet, strict and partial local reads | Complete coverage is reported separately; Xret never fills unexplained gaps. |
 | Live bars | Provider-advertised time-bar streams and optional recent-history bootstrap | Live observations are transient; Xret does not promise automatic reconnect or persistence. |
-| Providers | Built-in CCXT/CCXT Pro and an experimental custom-provider API | Provider capability permits an attempt; Xret qualification is separate confidence evidence. |
+| Providers | Built-in CCXT/CCXT Pro and an experimental custom-provider API | Provider capability permits an attempt; current responses must still satisfy Xret's contract. |
 
-Xret does not restrict CCXT to a small approved-exchange list. For an exact venue, market, settlement, timeframe, and operation, it reports two independent facts: whether the operation is available and whether Xret has independently verified it. Available but unverified operations are attempted with an explicit warning and the same runtime validation. Known incompatible or unsafe data fails explicitly. Read [Provider support and trust](docs/explanation/provider-support.md) for the mental model and [Verified support](docs/quality/verified-support.md) for the exact evidence matrix.
+Xret does not restrict CCXT to a small approved-exchange list. Provider capability and known lossless-compatibility rules determine whether an operation can be attempted; runtime validation and coverage evidence determine whether its result is safe and complete. Prior qualification is published separately as useful historical evidence, but it is not execution state and does not create warnings. Read [Provider support and trust](docs/explanation/provider-support.md) for the mental model and [Verified support](docs/quality/verified-support.md) for the tested combinations.
 
 ## Principles
 

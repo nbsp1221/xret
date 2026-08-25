@@ -204,7 +204,7 @@ def test_fetch_has_no_storage_side_effect(tmp_path: Path) -> None:
 
     assert result.data.height == 3
     assert result.is_complete
-    assert result.source.verification.status.value == "verified"
+    assert result.source.provider_name == "ccxt"
     assert len(exchange.fetch_calls) == 1
     assert not config.state_dir.exists()
     assert not config.data_dir.exists()
@@ -351,7 +351,7 @@ def test_sync_rejects_incomplete_provider_observation_before_publication(
     assert list(config.data_dir.rglob("*.parquet"))
 
 
-def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> None:
+def test_generic_pagination_leaves_unproved_sync_coverage_missing(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
     _register_as("kraken", exchange)
@@ -359,8 +359,7 @@ def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> 
         exchange="kraken", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
-    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
-        result = bars.sync(_now(0), _now(3))
+    result = bars.sync(_now(0), _now(3))
 
     partial = bars.scan_partial(_now(0), _now(3))
     assert result.fetched_rows == 1

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import warnings as python_warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -18,11 +17,10 @@ from xret.data.models import (
     DataWarning,
     LiveSubscription,
     MarketIdentity,
-    VerificationStatus,
 )
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.live_runtime import LiveBarRuntime
-from xret.data.warnings import UnverifiedProviderWarning, normalized_warnings
+from xret.data.warnings import normalized_warnings
 
 _DEFAULT_QUEUE_SIZE = 1024
 
@@ -194,25 +192,6 @@ class LiveMarketData:
             bootstrap_partial = await self._bootstrap(key, gate)
         evidence = self._runtime.subscription_evidence(resolved, bars.timeframe)
         warnings = list(self._runtime.subscription_warnings(resolved, bars.timeframe))
-        if evidence.verification.status is VerificationStatus.UNVERIFIED:
-            message = (
-                f"{evidence.provider_name} has no current Xret qualification evidence "
-                "for this live scope"
-            )
-            warnings.extend(
-                (
-                    DataWarning("provider.unverified", message),
-                    DataWarning(
-                        "provider.volume_semantics_unverified",
-                        "Xret has not independently qualified this live OHLCV volume scope",
-                    ),
-                )
-            )
-            python_warnings.warn(
-                message,
-                UnverifiedProviderWarning,
-                stacklevel=2,
-            )
         if bootstrap_partial:
             warnings.append(
                 DataWarning(

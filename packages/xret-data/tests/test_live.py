@@ -14,8 +14,6 @@ from xret.data import (
     BarUpdate,
     LiveSubscription,
     MarketData,
-    UnverifiedProviderWarning,
-    VerificationStatus,
 )
 from xret.data.config import MarketDataConfig
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
@@ -130,18 +128,13 @@ def test_live_binding_performs_no_io_and_happy_path_allows_same_timestamp() -> N
         async with live:
             assert provider.open_calls == 1
             assert provider.resolve_calls == 0
-            with pytest.warns(UnverifiedProviderWarning, match="no current Xret qualification"):
-                receipt = await live.subscribe_bar_updates(bars)
+            receipt = await live.subscribe_bar_updates(bars)
             first = await anext(live)
             second = await anext(live)
 
         assert isinstance(first, BarUpdate)
         assert isinstance(receipt, LiveSubscription)
-        assert receipt.source.verification.status is VerificationStatus.UNVERIFIED
-        assert [warning.code for warning in receipt.warnings] == [
-            "provider.unverified",
-            "provider.volume_semantics_unverified",
-        ]
+        assert receipt.warnings == ()
         assert first.timestamp == second.timestamp == T0
         assert first.close == 101.0
         assert second.close == 102.0
@@ -499,15 +492,10 @@ def test_bootstrap_receipt_reports_partial_historical_evidence() -> None:
         live = _bootstrap_live(provider, bars, now=now)
 
         async with live:
-            with pytest.warns(UnverifiedProviderWarning):
-                receipt = await live.subscribe_bar_updates(bars, bootstrap=True)
+            receipt = await live.subscribe_bar_updates(bars, bootstrap=True)
             updates = [await anext(live) for _ in range(2)]
 
-        assert [warning.code for warning in receipt.warnings] == [
-            "live.bootstrap_partial",
-            "provider.unverified",
-            "provider.volume_semantics_unverified",
-        ]
+        assert [warning.code for warning in receipt.warnings] == ["live.bootstrap_partial"]
         assert [update.timestamp for update in updates] == [
             T0 - timedelta(minutes=1),
             T1,

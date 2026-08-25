@@ -1,4 +1,4 @@
-"""Public warning categories and deterministic result-warning normalization."""
+"""Deterministic result-warning normalization."""
 
 from __future__ import annotations
 
@@ -6,12 +6,6 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from xret.data.models import DataWarning
-
-__all__ = ["UnverifiedProviderWarning"]
-
-
-class UnverifiedProviderWarning(UserWarning):
-    """An available provider scope lacks current Xret qualification evidence."""
 
 
 def normalized_warnings(values: Iterable[DataWarning]) -> tuple[DataWarning, ...]:

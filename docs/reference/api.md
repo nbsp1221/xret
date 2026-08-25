@@ -10,15 +10,12 @@
 - `BarUpdate`
 - `BarFinality`
 - `Availability`
-- `VerificationStatus`
 - `CapabilityNotice`
-- `Verification`
 - `OperationCapability`
 - `TimeBarCapability`
 - `ProviderEvidence`
 - `FetchResult`
 - `LiveSubscription`
-- `UnverifiedProviderWarning`
 - `LiveMarketData`
 - `SyncResult`
 - `PartialScanResult`
@@ -79,14 +76,14 @@ Each `MarketDefinition` contains:
 - `tick_size`: a positive exact `Decimal` fixed price increment, or `None`;
 - `size_increment`: a positive exact `Decimal` fixed quantity increment, or `None`;
 - `derivative`: linear/inverse and contract-size interpretation for a perpetual, otherwise `None`.
-- `bar_capabilities`: per-timeframe historical and live availability, independent Xret verification, and capability notices.
+- `bar_capabilities`: per-timeframe historical and live availability plus capability notices.
 
-`active=True` is not a guarantee that every venue operation is currently available. `timeframes` remains the concise historical catalog and is not a verification claim. Inspect `bar_capabilities` to distinguish `available`, `unavailable`, and `incompatible`, then inspect the independent `verified` or `unverified` evidence for an available operation. Xret attempts available operations regardless of verification status.
+`active=True` is not a guarantee that every venue operation is currently available. `timeframes` remains the concise historical catalog and is not an exhaustive-pagination or qualification claim. Inspect `bar_capabilities` to distinguish `available`, `unavailable`, and `incompatible`. Xret attempts available operations and validates the current response.
 
 These fields answer discovery-time questions, not whether a later network request succeeded. See [Provider support and trust](../explanation/provider-support.md) for the state model.
 
 ```python
-from xret.data import Availability, VerificationStatus
+from xret.data import Availability
 
 definitions = market_data.fetch_markets(exchange="binance", market="spot")
 one_minute = next(
@@ -95,10 +92,7 @@ one_minute = next(
     if capability.timeframe == "1m"
 )
 can_fetch = one_minute.historical.availability is Availability.AVAILABLE
-is_qualified = (
-    one_minute.historical.verification is not None
-    and one_minute.historical.verification.status is VerificationStatus.VERIFIED
-)
+notices = one_minute.historical.notices
 ```
 
 Provider-native client IDs, derivative symbols, and raw metadata are not part of `MarketDefinition`. Native transport failures raise chained `ProviderError`; a selected provider without the optional market-definition capability raises `UnsupportedMarketError`. A successful empty tuple means the provider returned no safely representable market in the requested scope.
@@ -137,14 +131,14 @@ Binds a one-shot asynchronous live session for one canonical exchange and perfor
 ```python
 async with market_data.live(exchange="binance") as live:
     receipt = await live.subscribe_bar_updates(bars, bootstrap=True)
-    print(receipt.source.verification)
+    print(receipt.source, receipt.warnings)
     async for update in live:
         ...
 ```
 
 `bars` must be a `BarDataset` created by the same `MarketData` instance and must use the session exchange. One session may merge several bar subscriptions into its single-consumer iterator. The only current event type is immutable `BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start timestamp, trade-derived OHLC floats, base-asset `volume`, Xret's UTC normalization receipt time, and `BarFinality` (`FORMING`, `PROVISIONAL`, or `FINAL`). Finality describes the observation relative to the bar interval and Xret's finality grace. It never claims that the value is stored as canonical data.
 
-`subscribe_bar_updates(bars, *, bootstrap=False) -> LiveSubscription` starts live-only delivery by default and returns the resolved dataset identity, provider evidence, verification, normalization identifiers, and initial warnings. With `bootstrap=True`, Xret buffers the activated live stream, observes the two most recent closed intervals through the same provider, coalesces timestamp overlap with the last buffered live value taking precedence, emits the bootstrap sequence in ascending timestamp order, and then continues live delivery. The operation performs remote I/O but never reads or changes canonical storage.
+`subscribe_bar_updates(bars, *, bootstrap=False) -> LiveSubscription` starts live-only delivery by default and returns the resolved dataset identity, provider evidence, normalization identifiers, and initial warnings. With `bootstrap=True`, Xret buffers the activated live stream, observes the two most recent closed intervals through the same provider, coalesces timestamp overlap with the last buffered live value taking precedence, emits the bootstrap sequence in ascending timestamp order, and then continues live delivery. The operation performs remote I/O but never reads or changes canonical storage.
 
 Same-timestamp updates are valid after bootstrap. Backward timestamps, provider failures, malformed events, and bounded queue or bootstrap-buffer overflow fail the whole session with `ProviderError`; Xret does not silently retry, reconnect, or drop old events. Ordering is nondecreasing per dataset, not globally across different datasets in one session. A non-boolean `bootstrap` value raises `InvalidRequestError` before provider I/O. See [Consume live bar updates](../guides/live-bars.md) for lifecycle and continuity guidance.
 
@@ -160,11 +154,9 @@ fetch(start, end=None) -> FetchResult
 
 Always calls the provider and returns validated completed bars in `result.data`, an eager Polars frame. It never reads or writes canonical local state. With omitted `end`, provider finalization grace determines the latest completed bar boundary.
 
-An endpoint with a maintained bounded-window policy traverses explicit half-open windows and can prove both present and absent bars. An endpoint without that policy uses conservative forward pagination: validated returned bars prove only their own intervals, and every unproved remainder stays `missing`. Missing qualification does not deny execution. Ignored bounds, malformed rows, conflicting duplicates, non-progress, unsupported provider capability, or known exact incompatibility still fails explicitly.
+An endpoint with a maintained bounded-window policy traverses explicit half-open windows and can prove both present and absent bars. An endpoint without that policy uses conservative forward pagination: validated returned bars prove only their own intervals, and every unproved remainder stays `missing`. Qualification is not consulted. Ignored bounds, malformed rows, conflicting duplicates, non-progress, unsupported provider capability, or known exact incompatibility still fails explicitly.
 
-`FetchResult` exposes `dataset_key`, `data`, `covered`, `gaps`, `source`, `warnings`, `is_complete`, and `require_complete()`. `source.verification` distinguishes current qualification from an available unverified operation. Unverified use emits one `UnverifiedProviderWarning` and records `provider.unverified`; partial evidence records `coverage.partial_observation`. Call `require_complete()` when the application requires complete remote coverage.
-
-`source.verification` and `is_complete` are orthogonal: the former describes independent qualification of the provider scope, while the latter describes evidence for this requested range.
+`FetchResult` exposes `dataset_key`, `data`, `covered`, `gaps`, `source`, `warnings`, `is_complete`, and `require_complete()`. `source` records the provider, native market identity, and normalizations used by the actual call; partial evidence records `coverage.partial_observation`. Call `require_complete()` when the application requires complete remote coverage.
 
 ## `BarDataset.sync`
 
@@ -218,9 +210,9 @@ Xret 0.x does not migrate incompatible canonical or catalog schemas. Normal open
 
 ## 0.5.1 migration
 
-`BarDataset.fetch()` now returns `FetchResult`; replace direct frame use with `bars.fetch(...).data` and inspect `.gaps`, `.warnings`, and `.source` when remote completeness or provider confidence matters. `LiveMarketData.subscribe_bar_updates()` now returns `LiveSubscription` instead of `None`. `SyncResult` adds optional `.source`.
+`BarDataset.fetch()` now returns `FetchResult`; replace direct frame use with `bars.fetch(...).data` and inspect `.gaps`, `.warnings`, and `.source` when remote completeness or provenance matters. `LiveMarketData.subscribe_bar_updates()` now returns `LiveSubscription` instead of `None`. `SyncResult` adds optional `.source`.
 
-CCXT qualification is no longer an authorization gate. Applications that require only Xret-qualified scopes should inspect `bar_capabilities` before execution and enforce `VerificationStatus.VERIFIED` themselves. Applications that accept provider-advertised unverified scopes should handle `UnverifiedProviderWarning` and call `require_complete()` when partial presence-only history is insufficient.
+CCXT qualification is no longer an authorization gate or runtime state. `VerificationStatus`, `Verification`, `UnverifiedProviderWarning`, `OperationCapability.verification`, and `ProviderEvidence.verification` are removed. Applications should inspect `bar_capabilities` for current availability, inspect operation results for source and warnings, and call `require_complete()` when partial presence-only history is insufficient. The separate [verified-support matrix](../quality/verified-support.md) remains the dated record of scopes exercised by Xret.
 
 ## Canonical bar schema
 

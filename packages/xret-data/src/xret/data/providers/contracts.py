@@ -139,7 +139,7 @@ class MarketDefinition:
     """One provider-advertised market translated into Xret vocabulary.
 
     `timeframes` contains provider-advertised bar types that Xret can express;
-    it is not an Xret verification or exhaustive-pagination claim. `tick_size`
+    it is not an Xret qualification or exhaustive-pagination claim. `tick_size`
     and `size_increment` are exact fixed increments when the provider exposes
     them with unambiguous semantics, otherwise `None`.
     """

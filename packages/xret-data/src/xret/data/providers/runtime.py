@@ -17,8 +17,6 @@ from xret.data.models import (
     MarketIdentity,
     OperationCapability,
     TimeBarCapability,
-    Verification,
-    VerificationStatus,
 )
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
@@ -42,7 +40,6 @@ class ProviderSnapshot:
     descriptor: ProviderDescriptor
     native_market_id: str
     native_symbol: str
-    verification: Verification
     normalizations: tuple[str, ...] = ()
 
 
@@ -118,10 +115,8 @@ class MarketDefinitionRuntime:
     def _with_default_capabilities(definition: MarketDefinition) -> MarketDefinition:
         if definition.bar_capabilities:
             return definition
-        unverified = Verification(VerificationStatus.UNVERIFIED)
         live_unavailable = OperationCapability(
             Availability.UNAVAILABLE,
-            None,
             notices=(
                 CapabilityNotice(
                     "provider.live_unavailable",
@@ -134,7 +129,7 @@ class MarketDefinitionRuntime:
             bar_capabilities=tuple(
                 TimeBarCapability(
                     timeframe=timeframe,
-                    historical=OperationCapability(Availability.AVAILABLE, unverified),
+                    historical=OperationCapability(Availability.AVAILABLE),
                     live=live_unavailable,
                 )
                 for timeframe in sorted(definition.timeframes)
@@ -307,7 +302,7 @@ class ProviderRuntime:
         finalized = raw.frame.filter(pl.col("timestamp") < finalizable_end)
         canonical = _xret_frame(finalized, request, raw.market)
         enforce_ohlcv_batch(canonical, request, error_cls=ProviderError)
-        return self._result(raw, canonical, timeframe=request.timeframe)
+        return self._result(raw, canonical)
 
     def observe_recent_closed(
         self,
@@ -324,7 +319,7 @@ class ProviderRuntime:
         raw = self._observe_provider(request, market=market)
         recent = _xret_frame(raw.frame, request, raw.market)
         enforce_ohlcv_batch(recent, request, error_cls=ProviderError)
-        return self._result(raw, recent, timeframe=request.timeframe)
+        return self._result(raw, recent)
 
     def _observe_provider(
         self,
@@ -392,18 +387,7 @@ class ProviderRuntime:
         self,
         raw: _ValidatedProviderObservation,
         frame: pl.DataFrame,
-        *,
-        timeframe: str,
     ) -> ValidatedBarObservation:
-        verification = Verification(VerificationStatus.UNVERIFIED)
-        verification_method = getattr(self._provider, "_historical_verification", None)
-        if callable(verification_method):
-            candidate = verification_method(raw.market, timeframe)
-            if not isinstance(candidate, Verification):
-                raise ProviderError(
-                    "provider historical verification hook must return Verification"
-                )
-            verification = candidate
         normalizations: tuple[str, ...] = ()
         normalizations_method = getattr(self._provider, "_historical_normalizations", None)
         if callable(normalizations_method):
@@ -423,7 +407,6 @@ class ProviderRuntime:
                 descriptor=self._descriptor,
                 native_market_id=raw.market.native_market_id,
                 native_symbol=raw.market.native_symbol,
-                verification=verification,
                 normalizations=normalizations,
             ),
             evidence_at=raw.evidence_at,

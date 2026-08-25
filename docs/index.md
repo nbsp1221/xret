@@ -7,7 +7,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 ## Start here
 
 - [Getting started](getting-started/index.md) — install `xret-data`, synchronize a market, and read it locally.
-- [Provider support and trust](explanation/provider-support.md) — understand what “available,” “verified,” “unverified,” and “incompatible” mean before choosing an exchange.
+- [Provider support and trust](explanation/provider-support.md) — understand capability, runtime validation, coverage, and qualification evidence before choosing an exchange.
 - [Roadmap](roadmap.md) — see how Xret plans to connect trusted data, research, backtesting, and eventual live operation.
 - [Synchronize and read bars](guides/synchronization.md) — choose between `fetch`, `sync`, `scan`, and `scan_partial`.
 - [Consume live bar updates](guides/live-bars.md) — subscribe to typed bar observations and optionally bridge recent history into the live stream.
@@ -26,7 +26,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 | Local data | Canonical Parquet storage, strict `scan`, explicit `scan_partial`, validation, and catalog rebuild |
 | Built-in provider | CCXT for historical data and CCXT Pro for live bars |
 
-Xret does not use qualification as an allowlist. Provider-advertised scopes may run as `unverified`; all returned observations still pass the same runtime contract. See [Provider support and trust](explanation/provider-support.md) for the complete decision model and [Verified support](quality/verified-support.md) for exact qualification evidence.
+Xret does not use qualification as an allowlist or runtime status. Provider-advertised scopes may run when their semantics can be represented safely, and every returned observation passes the same runtime contract. See [Provider support and trust](explanation/provider-support.md) for the decision model and [Verified support](quality/verified-support.md) for separate historical QA evidence.
 
 ## Browse by intent
 

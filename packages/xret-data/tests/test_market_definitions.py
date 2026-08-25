@@ -24,8 +24,6 @@ from xret.data.providers import (
     ProviderDescriptor,
     ResolvedBarMarket,
     TimeBarCapability,
-    Verification,
-    VerificationStatus,
 )
 
 
@@ -105,25 +103,24 @@ def test_market_definition_is_an_immutable_domain_value() -> None:
 
 
 def test_market_definition_accepts_independent_historical_and_live_capabilities() -> None:
-    unverified = Verification(VerificationStatus.UNVERIFIED)
-    unavailable = OperationCapability(Availability.UNAVAILABLE, None)
+    unavailable = OperationCapability(Availability.UNAVAILABLE)
     definition = _spot_definition(
         bar_capabilities=(
             TimeBarCapability(
                 timeframe="1m",
-                historical=OperationCapability(Availability.AVAILABLE, unverified),
+                historical=OperationCapability(Availability.AVAILABLE),
                 live=unavailable,
             ),
         )
     )
 
     assert definition.timeframes == frozenset({"1m", "1h"})
-    assert definition.bar_capabilities[0].historical.verification == unverified
+    assert definition.bar_capabilities[0].historical.availability is Availability.AVAILABLE
     assert definition.bar_capabilities[0].live.availability is Availability.UNAVAILABLE
 
 
 def test_market_definition_rejects_duplicate_capability_timeframes() -> None:
-    unavailable = OperationCapability(Availability.UNAVAILABLE, None)
+    unavailable = OperationCapability(Availability.UNAVAILABLE)
     capability = TimeBarCapability(
         timeframe="1m",
         historical=unavailable,
@@ -279,7 +276,6 @@ def test_fetch_markets_uses_optional_provider_capability_without_storage_side_ef
     assert {item.timeframe for item in result[0].bar_capabilities} == {"1m", "1h"}
     assert all(
         item.historical.availability is Availability.AVAILABLE
-        and item.historical.verification == Verification(VerificationStatus.UNVERIFIED)
         and item.live.availability is Availability.UNAVAILABLE
         for item in result[0].bar_capabilities
     )

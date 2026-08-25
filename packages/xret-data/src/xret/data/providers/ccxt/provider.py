@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, DataWarning, Market, MarketIdentity, Verification
+from xret.data.models import BarRequest, DataWarning, Market, MarketIdentity
 from xret.data.providers.ccxt import (
     capabilities,
     client,
@@ -18,7 +18,6 @@ from xret.data.providers.ccxt import (
     markets,
     pagination,
     semantics,
-    verification,
 )
 from xret.data.providers.ccxt.live import (
     CcxtLiveBarSession,
@@ -224,18 +223,6 @@ class CcxtProvider:
             exchange_factory=self._live_exchange_factory,
         )
 
-    def _historical_verification(
-        self,
-        market: ResolvedBarMarket,
-        timeframe: str,
-    ) -> Verification:
-        return verification.historical(
-            markets.client_id(market.identity),
-            market.identity.market.value,
-            market.identity.settle,
-            timeframe,
-        )
-
     def _historical_normalizations(
         self,
         market: ResolvedBarMarket,
@@ -247,18 +234,6 @@ class CcxtProvider:
         if policy.volume_mode is compatibility.VolumeMode.BASE_ASSET:
             return ()
         return (f"volume.{policy.volume_mode.value}",)
-
-    def _live_verification(
-        self,
-        market: ResolvedBarMarket,
-        timeframe: str,
-    ) -> Verification:
-        return verification.live(
-            markets.client_id(market.identity),
-            market.identity.market.value,
-            market.identity.settle,
-            timeframe,
-        )
 
     def _live_supports_timeframe(
         self,

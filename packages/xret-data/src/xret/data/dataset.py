@@ -24,7 +24,6 @@ override below) only when no explicit config was given.
 from __future__ import annotations
 
 import uuid
-import warnings as python_warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -52,7 +51,6 @@ from xret.data.models import (
     PartialScanResult,
     ProviderEvidence,
     SyncResult,
-    VerificationStatus,
     YearMonth,
 )
 from xret.data.observation_coverage import evaluate_observation_coverage
@@ -83,7 +81,7 @@ from xret.data.storage.parquet import (
     split_by_year_month,
 )
 from xret.data.timeframe import TimeBar, parse_time_input, validate_range
-from xret.data.warnings import UnverifiedProviderWarning, normalized_warnings
+from xret.data.warnings import normalized_warnings
 
 if TYPE_CHECKING:
     from xret.data.config import MarketDataConfig
@@ -365,27 +363,12 @@ class BarDataset:
             provider_api_version=observation.source.descriptor.api_version,
             native_market_id=observation.source.native_market_id,
             native_symbol=observation.source.native_symbol,
-            verification=observation.source.verification,
             normalizations=observation.source.normalizations,
         )
         warnings = [
             DataWarning(finding.code, finding.message, request.start, request.end)
             for finding in quality_result.warnings
         ]
-        if source.verification.status is VerificationStatus.UNVERIFIED:
-            unverified = DataWarning(
-                "provider.unverified",
-                f"{source.provider_name} has no current Xret qualification evidence "
-                f"for this historical scope",
-                request.start,
-                request.end,
-            )
-            warnings.append(unverified)
-            python_warnings.warn(
-                unverified.message,
-                UnverifiedProviderWarning,
-                stacklevel=2,
-            )
         for gap in coverage.gaps:
             warnings.append(
                 DataWarning(
@@ -553,27 +536,8 @@ class BarDataset:
                         provider_api_version=snapshot.descriptor.api_version,
                         native_market_id=snapshot.native_market_id,
                         native_symbol=snapshot.native_symbol,
-                        verification=snapshot.verification,
                         normalizations=snapshot.normalizations,
                     )
-                    if source.verification.status is VerificationStatus.UNVERIFIED:
-                        message = (
-                            f"{source.provider_name} has no current Xret qualification evidence "
-                            "for this historical scope"
-                        )
-                        result_warnings.append(
-                            DataWarning(
-                                "provider.unverified",
-                                message,
-                                start_dt,
-                                end_dt,
-                            )
-                        )
-                        python_warnings.warn(
-                            message,
-                            UnverifiedProviderWarning,
-                            stacklevel=2,
-                        )
 
                 monthly_batches: dict[YearMonth, list[pl.DataFrame]] = {}
                 monthly_observations: dict[YearMonth, ValidatedBarObservation] = {}

@@ -73,7 +73,7 @@ def normalize_ohlcv(
     *,
     policy: CompatibilityPolicy | None = None,
 ) -> tuple[tuple[float, ...], ...]:
-    """Convert a qualified native candle volume unit to base quantity."""
+    """Convert a known native candle volume unit to base quantity."""
     effective = policy or compatibility_policy(client_id, _market_family(market))
     if effective.volume_mode is VolumeMode.BASE_ASSET:
         return rows
@@ -94,11 +94,11 @@ def normalize_live_volume(
     market: ResolvedBarMarket,
     volume: float,
 ) -> float:
-    """Convert a qualified CCXT Pro candle volume to base quantity.
+    """Convert a known CCXT Pro candle volume to base quantity.
 
     Historical and WebSocket adapters can select different native fields. The
-    live channel inherits the historical representation unless qualification
-    records an explicit delivery-channel override.
+    live channel inherits the historical representation unless the
+    compatibility policy records an explicit delivery-channel override.
     """
     policy = compatibility_policy(client_id, market.identity.market.value)
     live_volume_mode = policy.live_volume_mode or policy.volume_mode

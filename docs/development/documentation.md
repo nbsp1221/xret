@@ -35,7 +35,7 @@ A behavior change is incomplete until its affected reference, guide, examples, a
 - Keep each prose paragraph on one physical line instead of hard-wrapping it to a fixed column; preserve line breaks required by Markdown structure.
 - State side effects, network access, mutation, strictness, and raised errors explicitly.
 - Put the reader's decision before implementation history: state what is available, what is guaranteed, and what remains uncertain near the top of the page.
-- Separate capability, runtime outcome, qualification evidence, and historical coverage; never collapse them into the ambiguous word “supported.”
+- Separate capability, runtime outcome, historical coverage, and published qualification evidence; never collapse them into the ambiguous word “supported,” and never present qualification as runtime state.
 - Pair a status label with its consequence. A reader should not need source-code knowledge to learn whether Xret attempts, warns, rejects, stores, or retries.
 - Keep exact matrices close to their scope and date, and summarize counts without turning sampled confidence into a universal correctness probability.
 - Add a page only when maintained content exists.

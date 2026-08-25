@@ -8,8 +8,6 @@ from xret.data.models import (
     MarketIdentity,
     OperationCapability,
     TimeBarCapability,
-    Verification,
-    VerificationStatus,
 )
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
@@ -33,9 +31,7 @@ __all__ = [
     "BarObservation",
     "BarRequest",
     "Availability",
-    "VerificationStatus",
     "CapabilityNotice",
-    "Verification",
     "OperationCapability",
     "TimeBarCapability",
     "DerivativeInterpretation",

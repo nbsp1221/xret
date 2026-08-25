@@ -17,8 +17,6 @@ from xret.data.models import (
     DataWarning,
     MarketIdentity,
     ProviderEvidence,
-    Verification,
-    VerificationStatus,
 )
 from xret.data.observation_coverage import evaluate_observation_coverage
 from xret.data.providers.contracts import (
@@ -204,14 +202,7 @@ class LiveBarRuntime:
         resolved: ResolvedBarMarket,
         timeframe: str,
     ) -> ProviderEvidence:
-        """Return provider provenance and exact live qualification evidence."""
-        verification = Verification(VerificationStatus.UNVERIFIED)
-        verification_method = getattr(self._provider, "_live_verification", None)
-        if callable(verification_method):
-            candidate = verification_method(resolved, timeframe)
-            if not isinstance(candidate, Verification):
-                raise ProviderError("provider live verification hook must return Verification")
-            verification = candidate
+        """Return provider provenance for one live subscription."""
         normalizations: tuple[str, ...] = ()
         normalizations_method = getattr(self._provider, "_live_normalizations", None)
         if callable(normalizations_method):
@@ -229,7 +220,6 @@ class LiveBarRuntime:
             provider_api_version=self._descriptor.api_version,
             native_market_id=resolved.native_market_id,
             native_symbol=resolved.native_symbol,
-            verification=verification,
             normalizations=normalizations,
         )
 

@@ -20,10 +20,7 @@ from xret.data.models import (
     ProviderEvidence,
     SyncResult,
     TimeBarCapability,
-    Verification,
-    VerificationStatus,
 )
-from xret.data.warnings import UnverifiedProviderWarning
 
 __version__ = _version("xret-data")
 
@@ -34,15 +31,12 @@ __all__ = [
     "BarUpdate",
     "BarFinality",
     "Availability",
-    "VerificationStatus",
     "CapabilityNotice",
-    "Verification",
     "OperationCapability",
     "TimeBarCapability",
     "ProviderEvidence",
     "FetchResult",
     "LiveSubscription",
-    "UnverifiedProviderWarning",
     "LiveMarketData",
     "SyncResult",
     "PartialScanResult",

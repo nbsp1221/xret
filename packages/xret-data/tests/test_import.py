@@ -31,15 +31,12 @@ def test_public_surface_exposes_runtime_evidence_contracts() -> None:
         "SyncResult",
         "PartialScanResult",
         "Availability",
-        "VerificationStatus",
         "CapabilityNotice",
-        "Verification",
         "OperationCapability",
         "TimeBarCapability",
         "ProviderEvidence",
         "FetchResult",
         "LiveSubscription",
-        "UnverifiedProviderWarning",
     }
 
 
@@ -55,15 +52,12 @@ def test_public_surface_exposes_runtime_evidence_contracts() -> None:
         "SyncResult",
         "PartialScanResult",
         "Availability",
-        "VerificationStatus",
         "CapabilityNotice",
-        "Verification",
         "OperationCapability",
         "TimeBarCapability",
         "ProviderEvidence",
         "FetchResult",
         "LiveSubscription",
-        "UnverifiedProviderWarning",
     ],
 )
 def test_every_declared_public_name_is_importable(name: str) -> None:
@@ -156,9 +150,7 @@ def test_provider_author_surface_is_explicit_and_importable() -> None:
         "ProviderBarUpdate",
         "ResolvedBarMarket",
         "Availability",
-        "VerificationStatus",
         "CapabilityNotice",
-        "Verification",
         "OperationCapability",
         "TimeBarCapability",
     }

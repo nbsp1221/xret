@@ -1,21 +1,21 @@
 # Verified support
 
-`verified` means that Xret has been exercised as an external user would use it against the real provider, beyond repository-controlled automated tests. Verification is scoped confidence evidence, not an execution allowlist. Provider-advertised operations absent from this page may run as `unverified`; Xret still validates every returned observation and preserves unproved coverage as `missing`. Start with [Provider support and trust](../explanation/provider-support.md) if you need to decide whether a scope can run or what each state means.
+This page records combinations that Xret has exercised as an external user would use them against real providers, beyond repository-controlled automated tests. It is dated, scoped confidence evidence, not an execution allowlist or runtime registry. Provider-advertised operations absent from this page may still run; Xret does not label or warn about that absence and instead validates every actual observation while preserving unproved coverage as `missing`. Start with [Provider support and trust](../explanation/provider-support.md) for the runtime decision model.
 
 ## Current evidence summary
 
 | Question | Current answer |
 |---|---|
-| Is qualification required to execute? | No. Available unverified scopes are attempted with explicit evidence and warnings. |
+| Is qualification required to execute? | No. Qualification is not loaded into runtime behavior. |
 | What historical evidence exists? | 29 venue rows across 45 exact market-family and settlement scopes; see the historical matrix below. |
 | What live evidence exists? | 6 exact scopes across Binance, Bybit, and OKX, all for the `1m` initial snapshot-to-live handoff. |
-| Does historical verification imply live verification? | No. Historical and live evidence are independent. |
-| Does venue verification cover every symbol and future provider change? | No. Verification is scoped evidence, and every actual response is still validated at runtime. |
+| Does historical qualification imply live qualification? | No. Historical and live evidence are independent. |
+| Does venue qualification cover every symbol and future provider change? | No. Qualification is scoped evidence, and every actual response is still validated at runtime. |
 | Where are known exclusions recorded? | [Known limitations and scopes not verified](#known-limitations-and-scopes-not-verified). |
 
-## Verification criterion
+## Qualification criterion
 
-A provider combination is verified only after human-style dogfooding succeeds in a fresh project outside the repository. The evaluator installs the built `xret-data` distribution through uv, uses the public API against the real network, inspects results, and adapts the investigation when behavior warrants additional checks.
+A provider combination is added to this page only after human-style dogfooding succeeds in a fresh project outside the repository. The evaluator installs the built `xret-data` distribution through uv, uses the public API against the real network, inspects results, and adapts the investigation when behavior warrants additional checks.
 
 The evaluation must be broad enough to exercise the material risks of the provider combination without pretending to test every symbol. It covers representative symbols and the publicly claimed timeframes across realistic short and multi-year ranges, and separately proves the [canonical trade time-bar semantics](../reference/time-bars.md), including as applicable:
 
@@ -32,9 +32,9 @@ The evaluator must also prove that OHLC comes from the eligible executed-trade u
 
 Automated unit, integration, and heavy E2E tests are engineering prerequisites. Their definitions and results are already represented by test configuration, local command output, and CI logs; they are not repeated as verified promotion criteria.
 
-## Verification granularity
+## Qualification granularity
 
-Verification applies to a specific combination of:
+Qualification applies to a specific combination of:
 
 ```text
 provider adapter
@@ -44,9 +44,9 @@ provider adapter
 + exact timeframe
 ```
 
-Representative symbols exercise shared adapter behavior. Verification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
+Representative symbols exercise shared adapter behavior. Qualification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
-This matrix is the public qualification statement for historical bars. CCXT market discovery may expose a venue or market that is absent here. If the operation is available and not known incompatible, historical `fetch` and `sync` attempt it with unverified evidence and conservative presence-only pagination when no exact bounded policy exists. Absence does not assert that the venue is untrustworthy, nor does it imply complete historical operability. Successfully discovering a market definition, `active=True`, or an advertised timeframe is not sufficient verification evidence. Market availability, runtime observation, exhaustive coverage, and verified support remain separate facts.
+This matrix is the public qualification statement for historical bars. CCXT market discovery may expose a venue or market that is absent here. If the operation is available and not known incompatible, historical `fetch` and `sync` attempt it using the same runtime validation and conservative presence-only pagination when no exact bounded policy exists. Absence does not assert that the venue is untrustworthy, nor does it imply complete historical operability. Successfully discovering a market definition, `active=True`, or an advertised timeframe is not sufficient qualification evidence. Market availability, runtime observation, exhaustive coverage, and prior QA evidence remain separate facts.
 
 ## Historical qualification at a glance
 
@@ -57,7 +57,7 @@ The complete canonical historical evidence set is listed below. Every entry pass
 | Complete canonical historical qualification | ApeX, Aster, Binance, BingX perpetual, Bitfinex, Bitget, Bitrue spot, Bitso spot, Bitstamp spot, Bitvavo, BTCTurk spot, Bybit, Coinbase, Crypto.com, Deribit, dYdX USDC perpetual, HashKey, HTX spot and USDT perpetual, Hyperliquid, Kraken Futures USD perpetual, KuCoin, MEXC, OKX, Pacifica USDC perpetual, Phemex USDT perpetual, Toobit spot, Upbit spot, WOO, XT |
 | Available recent history but not qualified for arbitrary history | Gate |
 
-Live-bar verification is separate and appears under [Currently verified live bars](#currently-verified-live-bars). A historical qualification never implies live support.
+Live-bar qualification is separate and appears under [Currently verified live bars](#currently-verified-live-bars). A historical qualification never implies live support.
 
 ## Complete canonical historical qualification
 
@@ -118,7 +118,7 @@ The live-bar matrix below was structurally requalified on 2026-08-11 from the bu
 
 The Binance USD-M qualification additionally exercised the handoff immediately after a one-minute boundary, while the just-closed bar remained provisional under the finality grace period. It produced consecutive `FINAL`, `PROVISIONAL`, and `FORMING` observations without touching canonical storage.
 
-CCXT Pro may attempt provider-advertised scopes outside this table as unverified. The matrix is a connectivity, canonical semantic normalization, initial-handoff, multiplexing, and lifecycle qualification claim for the exact rows shown. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
+CCXT Pro may attempt provider-advertised scopes outside this table. The matrix is a connectivity, canonical semantic normalization, initial-handoff, multiplexing, and lifecycle qualification claim for the exact rows shown. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
 
 ## Evidence history
 
@@ -136,9 +136,9 @@ The 2026-08-24 compatibility campaign qualified Bitfinex spot and USDT perpetual
 
 The final 2026-08-24 bounded-window campaign qualified Bitso spot and HTX USDT perpetual from one fresh Python 3.12.11 consumer with CCXT 4.5.75 and the built wheel. The independent endpoint runs completed in 756.41 summed seconds with 1,002 OHLCV calls and 113,026 returned rows. Bitso uses a reproducible closed right boundary while Xret discards that boundary witness from the canonical half-open result. HTX requires the page-size parameter to be absent so the official endpoint honors its explicit `from` and `to` bounds.
 
-## Re-verification
+## Requalification
 
-Human-style re-verification is required when a change can materially alter real provider behavior, including:
+Human-style requalification is required when a change can materially alter real provider behavior, including:
 
 - provider adapter or endpoint-family changes;
 - market or symbol resolution changes;

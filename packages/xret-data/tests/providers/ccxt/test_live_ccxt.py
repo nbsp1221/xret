@@ -129,7 +129,7 @@ def test_ccxt_live_session_validates_timeframe_on_reused_client() -> None:
     asyncio.run(scenario())
 
 
-def test_ccxt_live_session_allows_unqualified_mexc_scope() -> None:
+def test_ccxt_live_session_allows_advertised_mexc_scope() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
         client.id = "mexc"
@@ -147,7 +147,7 @@ def test_ccxt_live_session_allows_unqualified_mexc_scope() -> None:
     asyncio.run(scenario())
 
 
-def test_ccxt_live_session_allows_unqualified_kucoin_futures_scope() -> None:
+def test_ccxt_live_session_allows_advertised_kucoin_futures_scope() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])
         client.id = "kucoinfutures"

@@ -19,7 +19,7 @@ async def main() -> None:
 
     async with market_data.live(exchange="binance") as live:
         receipt = await live.subscribe_bar_updates(btc, bootstrap=True)
-        print(receipt.source.verification, receipt.warnings)
+        print(receipt.source, receipt.warnings)
 
         async for update in live:
             print(update.timestamp, update.close, update.finality)
@@ -30,11 +30,11 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`MarketData.live(...)` only binds the canonical exchange and performs no I/O. Entering the context opens the provider session; subscribing resolves the market, checks provider capability, starts its remote stream, and returns a `LiveSubscription` receipt with source, verification, normalization, and warning evidence. Leaving the context closes every native client owned by the session.
+`MarketData.live(...)` only binds the canonical exchange and performs no I/O. Entering the context opens the provider session; subscribing resolves the market, checks provider capability, starts its remote stream, and returns a `LiveSubscription` receipt with source, normalization, and warning evidence. Leaving the context closes every native client owned by the session.
 
-CCXT Pro scopes are capability-based. A provider-advertised `watchOHLCV` scope can run even when it is absent from Xret's verified matrix; the receipt reports it as `unverified` and Xret emits one `UnverifiedProviderWarning` for the subscription. Verification never bypasses validation. Missing capability or timeframe, a known exact incompatibility, or unsafe runtime data still fails explicitly.
+CCXT Pro scopes are capability-based. A provider-advertised `watchOHLCV` scope can run even when it is absent from Xret's published qualification matrix. Xret does not load that matrix into the session or warn merely because a scope lacks prior QA evidence. Missing capability or timeframe, a known exact incompatibility, or unsafe runtime data still fails explicitly.
 
-This means the verified live list is not a three-exchange allowlist. Binance, Bybit, and OKX are the currently qualified venues, while another provider-advertised live scope may still be attempted as unverified. The subscription receipt describes the exact operation that ran; the [verified-support matrix](../quality/verified-support.md#currently-verified-live-bars) describes the narrower set with independent Xret evidence.
+The published live list is therefore evidence, not a three-exchange allowlist. Binance, Bybit, and OKX are the currently qualified venues, while another provider-advertised live scope may also be attempted. The subscription receipt describes the operation that actually ran; the [verified-support matrix](../quality/verified-support.md#currently-verified-live-bars) describes the narrower set with prior Xret QA evidence.
 
 One session may subscribe to multiple `BarDataset` values when all were created by the same `MarketData` instance and use the session's exchange. Updates from all subscriptions arrive through the session-wide iterator. A session is one-shot and has one consuming task.
 
