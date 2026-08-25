@@ -452,6 +452,28 @@ def test_historical_incompatibility_does_not_hide_live_capability() -> None:
     assert capability.live.verification.status is VerificationStatus.UNVERIFIED
 
 
+def test_unreported_live_timeframes_are_available_with_notice() -> None:
+    exchange = FakeExchange(client_id="kraken", timeframes={"1m": "1m"})
+    _register_as("kraken", exchange)
+    provider = _ccxt_provider(live_capability_provider=lambda _: LiveOHLCVCapability(True, None))
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="kraken",
+        market="spot",
+    )
+    (capability,) = definition.bar_capabilities
+    resolved = provider.resolve_market(definition.identity)
+
+    assert capability.live.availability is Availability.AVAILABLE
+    assert [notice.code for notice in capability.live.notices] == [
+        "provider.live_timeframes_unreported",
+        "provider.volume_semantics_unverified",
+    ]
+    assert [warning.code for warning in provider._live_warnings(resolved, "1m")] == [
+        "provider.live_timeframes_unreported"
+    ]
+
+
 def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
     btc = _default_markets()["BTC/USDT"]
     eth = {

@@ -15,8 +15,9 @@ from xret.data import (
     VerificationStatus,
 )
 from xret.data.errors import InvalidRequestError, ProviderError
-from xret.data.models import CoverageInterval, CoverageStatus, DatasetKey, Market
+from xret.data.models import CoverageInterval, CoverageStatus, DatasetKey, DataWarning, Market
 from xret.data.schema import OHLCV_SCHEMA
+from xret.data.warnings import normalized_warnings
 
 
 def _key() -> DatasetKey:
@@ -88,3 +89,20 @@ def test_fetch_result_require_complete_returns_itself() -> None:
     )
 
     assert result.require_complete() is result
+
+
+def test_structured_warnings_are_deduplicated_and_stably_ordered() -> None:
+    later = datetime(2026, 1, 2, tzinfo=UTC)
+    earlier = datetime(2026, 1, 1, tzinfo=UTC)
+    values = (
+        DataWarning("z.warning", "later", later, later),
+        DataWarning("b.warning", "same range", earlier, later),
+        DataWarning("a.warning", "same range", earlier, later),
+        DataWarning("a.warning", "same range", earlier, later),
+    )
+
+    assert [warning.code for warning in normalized_warnings(values)] == [
+        "a.warning",
+        "b.warning",
+        "z.warning",
+    ]

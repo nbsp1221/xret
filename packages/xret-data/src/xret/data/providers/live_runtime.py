@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
@@ -13,11 +14,13 @@ from xret.data.models import (
     BarFinality,
     BarRequest,
     BarUpdate,
+    DataWarning,
     MarketIdentity,
     ProviderEvidence,
     Verification,
     VerificationStatus,
 )
+from xret.data.observation_coverage import evaluate_observation_coverage
 from xret.data.providers.contracts import (
     HistoricalBarProvider,
     LiveBarSession,
@@ -55,6 +58,12 @@ def _bar_finality(
 
 def _previous_boundary(time_bar: TimeBar, boundary: datetime) -> datetime:
     return time_bar.floor(boundary - timedelta(microseconds=1))
+
+
+@dataclass(frozen=True, slots=True)
+class RecentClosedBars:
+    updates: tuple[BarUpdate, ...]
+    is_complete: bool
 
 
 class LiveBarRuntime:
@@ -224,12 +233,27 @@ class LiveBarRuntime:
             normalizations=normalizations,
         )
 
+    def subscription_warnings(
+        self,
+        resolved: ResolvedBarMarket,
+        timeframe: str,
+    ) -> tuple[DataWarning, ...]:
+        warnings_method = getattr(self._provider, "_live_warnings", None)
+        if not callable(warnings_method):
+            return ()
+        candidate = warnings_method(resolved, timeframe)
+        if not isinstance(candidate, tuple) or not all(
+            isinstance(value, DataWarning) for value in candidate
+        ):
+            raise ProviderError("provider live warnings hook must return DataWarning values")
+        return candidate
+
     async def recent_closed(
         self,
         key: tuple[MarketIdentity, str],
         *,
         count: int,
-    ) -> tuple[BarUpdate, ...]:
+    ) -> RecentClosedBars:
         """Observe a small closed window for an active live subscription."""
         market = self._active.get(key)
         if market is None:
@@ -271,7 +295,15 @@ class LiveBarRuntime:
                     finality=_bar_finality(timestamp, timeframe, received_at),
                 )
             )
-        return tuple(updates)
+        coverage = evaluate_observation_coverage(
+            time_bar=time_bar,
+            start=start,
+            end=cutover,
+            finalizable_end=cutover,
+            timestamps=observation.frame.get_column("timestamp").to_list(),
+            observed=observation.observed,
+        )
+        return RecentClosedBars(tuple(updates), coverage.is_complete)
 
     async def updates(self) -> AsyncIterator[BarUpdate]:
         session = self._require_session()

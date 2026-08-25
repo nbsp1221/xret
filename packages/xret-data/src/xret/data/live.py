@@ -22,7 +22,7 @@ from xret.data.models import (
 )
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.live_runtime import LiveBarRuntime
-from xret.data.warnings import UnverifiedProviderWarning
+from xret.data.warnings import UnverifiedProviderWarning, normalized_warnings
 
 _DEFAULT_QUEUE_SIZE = 1024
 
@@ -189,26 +189,36 @@ class LiveMarketData:
         self._requested.add(requested)
         if self._reader is None:
             self._reader = asyncio.create_task(self._read_updates())
+        bootstrap_partial = False
         if gate is not None:
-            await self._bootstrap(key, gate)
+            bootstrap_partial = await self._bootstrap(key, gate)
         evidence = self._runtime.subscription_evidence(resolved, bars.timeframe)
-        warnings: tuple[DataWarning, ...] = ()
+        warnings = list(self._runtime.subscription_warnings(resolved, bars.timeframe))
         if evidence.verification.status is VerificationStatus.UNVERIFIED:
             message = (
                 f"{evidence.provider_name} has no current Xret qualification evidence "
                 "for this live scope"
             )
-            warnings = (
-                DataWarning("provider.unverified", message),
-                DataWarning(
-                    "provider.volume_semantics_unverified",
-                    "Xret has not independently qualified this live OHLCV volume scope",
-                ),
+            warnings.extend(
+                (
+                    DataWarning("provider.unverified", message),
+                    DataWarning(
+                        "provider.volume_semantics_unverified",
+                        "Xret has not independently qualified this live OHLCV volume scope",
+                    ),
+                )
             )
             python_warnings.warn(
                 message,
                 UnverifiedProviderWarning,
                 stacklevel=2,
+            )
+        if bootstrap_partial:
+            warnings.append(
+                DataWarning(
+                    "live.bootstrap_partial",
+                    "The recent historical bootstrap did not prove every requested interval",
+                )
             )
         return LiveSubscription(
             dataset_key=DatasetKey.from_identity(
@@ -216,7 +226,7 @@ class LiveMarketData:
                 timeframe=bars.timeframe,
             ),
             source=evidence,
-            warnings=warnings,
+            warnings=normalized_warnings(warnings),
         )
 
     def __aiter__(self) -> LiveMarketData:
@@ -259,7 +269,7 @@ class LiveMarketData:
         self,
         key: tuple[MarketIdentity, str],
         gate: _BootstrapGate,
-    ) -> None:
+    ) -> bool:
         assert self._runtime is not None
         try:
             await gate.ready.wait()
@@ -268,7 +278,7 @@ class LiveMarketData:
             snapshot = await self._runtime.recent_closed(key, count=2)
             if gate.failure is not None:
                 raise gate.failure
-            merged = {update.timestamp: update for update in snapshot}
+            merged = {update.timestamp: update for update in snapshot.updates}
             for update in gate.buffer:
                 merged[update.timestamp] = update
             for timestamp in sorted(merged):
@@ -276,6 +286,7 @@ class LiveMarketData:
                     assert self._failure is not None
                     raise self._failure
             self._routes[key] = None
+            return not snapshot.is_complete
         except asyncio.CancelledError:
             self._publish_failure(
                 ProviderError("live bootstrap was cancelled after subscription activation")

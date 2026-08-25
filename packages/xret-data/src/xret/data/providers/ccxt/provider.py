@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, Market, MarketIdentity, Verification
+from xret.data.models import BarRequest, DataWarning, Market, MarketIdentity, Verification
 from xret.data.providers.ccxt import (
     capabilities,
     client,
@@ -87,6 +87,7 @@ class CcxtProvider:
         self._live_capability_provider = live_capability_provider
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
+        self._live_capabilities_by_id: dict[str, capabilities.LiveOHLCVCapability] = {}
         self._pacers_by_id: dict[str, client.RequestPacer] = {}
         self._resolutions_by_request: dict[MarketIdentity, _Resolution] = {}
         self._resolutions_by_market: dict[
@@ -108,6 +109,14 @@ class CcxtProvider:
                     sleep=self._sleep,
                 )
             return exchange
+
+    def _live_capability(self, client_id: str) -> capabilities.LiveOHLCVCapability:
+        with self._resolution_lock:
+            capability = self._live_capabilities_by_id.get(client_id)
+            if capability is None:
+                capability = self._live_capability_provider(client_id)
+                self._live_capabilities_by_id[client_id] = capability
+            return capability
 
     @property
     def descriptor(self) -> ProviderDescriptor:
@@ -199,7 +208,7 @@ class CcxtProvider:
                 exchange=ccxt_exchange,
                 tick_size_precision_mode=self._tick_size_precision_mode_provider(),
                 client_id=native_client_id,
-                live_capability=self._live_capability_provider(native_client_id),
+                live_capability=self._live_capability(native_client_id),
             )
         except (ProviderError, UnsupportedMarketError):
             raise
@@ -251,14 +260,29 @@ class CcxtProvider:
             timeframe,
         )
 
-    @staticmethod
     def _live_supports_timeframe(
+        self,
         market: ResolvedBarMarket,
         timeframe: str,
     ) -> bool:
-        """Defer CCXT live capability enforcement to the Pro session metadata."""
-        del market, timeframe
-        return True
+        """Interpret static Pro capability before the session confirms it again."""
+        client_id = markets.client_id(market.identity)
+        capability = self._live_capability(client_id)
+        if not capability.available:
+            return False
+        if capability.timeframes is None:
+            return True
+        policy = compatibility.compatibility_policy(
+            client_id,
+            market.identity.market.value,
+        )
+        timeframes = semantics.canonical_timeframes(
+            client_id,
+            set(capability.timeframes),
+            policy=policy,
+            operation="live",
+        )
+        return timeframe in timeframes
 
     def _live_normalizations(
         self,
@@ -272,6 +296,21 @@ class CcxtProvider:
         if mode is compatibility.VolumeMode.BASE_ASSET:
             return ()
         return (f"live_volume.{mode.value}",)
+
+    def _live_warnings(
+        self,
+        market: ResolvedBarMarket,
+        timeframe: str,
+    ) -> tuple[DataWarning, ...]:
+        capability = self._live_capability(markets.client_id(market.identity))
+        if capability.available and capability.timeframes is None:
+            return (
+                DataWarning(
+                    "provider.live_timeframes_unreported",
+                    f"CCXT Pro accepted {timeframe!r} without publishing a timeframe catalog",
+                ),
+            )
+        return ()
 
     def observe_bars(
         self,

@@ -83,7 +83,7 @@ from xret.data.storage.parquet import (
     split_by_year_month,
 )
 from xret.data.timeframe import TimeBar, parse_time_input, validate_range
-from xret.data.warnings import UnverifiedProviderWarning
+from xret.data.warnings import UnverifiedProviderWarning, normalized_warnings
 
 if TYPE_CHECKING:
     from xret.data.config import MarketDataConfig
@@ -412,7 +412,7 @@ class BarDataset:
             covered=coverage.covered,
             gaps=coverage.gaps,
             source=source,
-            warnings=tuple(warnings),
+            warnings=normalized_warnings(warnings),
         )
 
     # -- sync --------------------------------------------------------------
@@ -808,7 +808,7 @@ class BarDataset:
             written_partitions=len(prepared),
             covered=covered,
             gaps=gaps,
-            warnings=tuple(result_warnings),
+            warnings=normalized_warnings(result_warnings),
             source=source,
         )
 
