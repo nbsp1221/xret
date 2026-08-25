@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from xret.data.errors import UnsupportedMarketError
 from xret.data.providers.ccxt.compatibility import (
@@ -35,10 +35,16 @@ def canonical_timeframes(
     market: Mapping[str, Any] | None = None,
     *,
     policy: CompatibilityPolicy | None = None,
+    operation: Literal["historical", "live"] = "historical",
 ) -> frozenset[str]:
     """Remove only endpoint/timeframe pairs proven incompatible with Xret."""
     effective = policy or compatibility_policy(client_id, _market_family(market))
-    return frozenset(advertised - effective.excluded_timeframes)
+    excluded = (
+        effective.historical_excluded_timeframes
+        if operation == "historical"
+        else effective.live_excluded_timeframes
+    )
+    return frozenset(advertised - excluded)
 
 
 def supports_canonical_volume(

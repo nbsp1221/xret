@@ -261,10 +261,10 @@ def _bar_capabilities(
 
     result: list[TimeBarCapability] = []
     for timeframe in sorted(union, key=_timeframe_sort_key):
-        excluded = timeframe in policy.excluded_timeframes
+        historical_excluded = timeframe in policy.historical_excluded_timeframes
         historical = _operation_capability(
             advertised=historical_available and timeframe in historical_timeframes,
-            excluded=excluded,
+            excluded=historical_excluded,
             evidence=verification.historical(
                 client_id,
                 market_family.value,
@@ -298,7 +298,7 @@ def _bar_capabilities(
             )
         live = _operation_capability(
             advertised=live_advertised,
-            excluded=excluded,
+            excluded=timeframe in policy.live_excluded_timeframes,
             evidence=live_evidence,
             operation="live",
             notices=live_notices,

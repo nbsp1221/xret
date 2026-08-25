@@ -426,6 +426,32 @@ def test_fetch_markets_reports_availability_separately_from_verification() -> No
     assert one_hour.live.availability is Availability.UNAVAILABLE
 
 
+def test_historical_incompatibility_does_not_hide_live_capability() -> None:
+    exchange = FakeExchange(
+        client_id="binance",
+        timeframes={"3d": "3d"},
+    )
+    _register_spot(exchange)
+    provider = _ccxt_provider(
+        live_capability_provider=lambda _: LiveOHLCVCapability(
+            True,
+            frozenset({"3d"}),
+        )
+    )
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="binance",
+        market="spot",
+    )
+
+    (capability,) = definition.bar_capabilities
+    assert capability.timeframe == "3d"
+    assert capability.historical.availability is Availability.INCOMPATIBLE
+    assert capability.live.availability is Availability.AVAILABLE
+    assert capability.live.verification is not None
+    assert capability.live.verification.status is VerificationStatus.UNVERIFIED
+
+
 def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
     btc = _default_markets()["BTC/USDT"]
     eth = {

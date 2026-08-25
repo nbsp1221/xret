@@ -159,6 +159,7 @@ class CcxtLiveBarSession:
                         client_id,
                         market.identity.market.value,
                     ),
+                    operation="live",
                 )
                 if timeframe not in canonical:
                     with contextlib.suppress(Exception):

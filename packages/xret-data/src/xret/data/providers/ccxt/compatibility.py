@@ -47,7 +47,8 @@ class EndpointScope:
 class CompatibilityPolicy:
     """Lossless semantic corrections known for one effective endpoint scope."""
 
-    excluded_timeframes: frozenset[str] = frozenset()
+    historical_excluded_timeframes: frozenset[str] = frozenset()
+    live_excluded_timeframes: frozenset[str] = frozenset()
     volume_mode: VolumeMode = VolumeMode.BASE_ASSET
     live_volume_mode: VolumeMode | None = None
 
@@ -82,61 +83,71 @@ class TransportPolicy:
 
 
 _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = {
-    CompatibilityScope("aster"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h", "3d"})),
-    CompatibilityScope("bingx"): CompatibilityPolicy(excluded_timeframes=frozenset({"1M"})),
+    CompatibilityScope("aster"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1h", "3d"})
+    ),
+    CompatibilityScope("bingx"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1M"})
+    ),
     CompatibilityScope("bingx", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"6h", "12h", "1d", "3d", "1w"})
+        historical_excluded_timeframes=frozenset({"6h", "12h", "1d", "3d", "1w"})
     ),
-    CompatibilityScope("binance"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("binance"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"3d"})
+    ),
     CompatibilityScope("binanceusdm"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1s", "3d", "1w"})
+        historical_excluded_timeframes=frozenset({"1s", "3d", "1w"})
     ),
-    CompatibilityScope("bitfinex"): CompatibilityPolicy(excluded_timeframes=frozenset({"1w"})),
+    CompatibilityScope("bitfinex"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1w"})
+    ),
     CompatibilityScope("bitget", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"2h"})
+        historical_excluded_timeframes=frozenset({"2h"})
     ),
     CompatibilityScope("bitrue", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w"})
+        historical_excluded_timeframes=frozenset({"1d", "1w"})
     ),
     CompatibilityScope("bitstamp", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("bitso", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w"})
+        historical_excluded_timeframes=frozenset({"1d", "1w"})
     ),
     CompatibilityScope("btcturk", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("deribit"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"3h", "6h", "12h", "1d"})
+        historical_excluded_timeframes=frozenset({"3h", "6h", "12h", "1d"})
     ),
     CompatibilityScope("hyperliquid"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w", "1M"})
+        historical_excluded_timeframes=frozenset({"1w", "1M"})
     ),
     CompatibilityScope("htx"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"1d", "1w", "1M"})
     ),
     CompatibilityScope("krakenfutures", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("kucoin", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("kucoinfutures", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"3m", "6h", "1M"}),
+        historical_excluded_timeframes=frozenset({"3m", "6h", "1M"}),
         volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
     ),
     CompatibilityScope("mexc", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"8h", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"8h", "1w", "1M"})
     ),
     CompatibilityScope("pacifica", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1h"})
+        historical_excluded_timeframes=frozenset({"1h"})
     ),
-    CompatibilityScope("xt"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("xt"): CompatibilityPolicy(historical_excluded_timeframes=frozenset({"3d"})),
     CompatibilityScope("woo"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
     ),
-    CompatibilityScope("woo", "spot"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h"})),
+    CompatibilityScope("woo", "spot"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1h"})
+    ),
     **{
         CompatibilityScope(client_id, "perpetual"): CompatibilityPolicy(
             volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
@@ -282,7 +293,12 @@ def compatibility_policy(
     if specific is None:
         return shared
     return CompatibilityPolicy(
-        excluded_timeframes=shared.excluded_timeframes | specific.excluded_timeframes,
+        historical_excluded_timeframes=(
+            shared.historical_excluded_timeframes | specific.historical_excluded_timeframes
+        ),
+        live_excluded_timeframes=(
+            shared.live_excluded_timeframes | specific.live_excluded_timeframes
+        ),
         volume_mode=specific.volume_mode,
         live_volume_mode=specific.live_volume_mode or shared.live_volume_mode,
     )
@@ -364,7 +380,9 @@ def validate_registries() -> None:
     for scope, policy in _COMPATIBILITY_POLICIES.items():
         if not scope.client_id:
             raise ProviderError("CCXT compatibility client ID must not be empty")
-        for timeframe in policy.excluded_timeframes:
+        for timeframe in policy.historical_excluded_timeframes:
+            TimeBar.parse(timeframe)
+        for timeframe in policy.live_excluded_timeframes:
             TimeBar.parse(timeframe)
     for scope, profile in _OBSERVATION_PROFILES.items():
         if not scope.client_id:
