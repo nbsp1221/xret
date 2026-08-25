@@ -9,7 +9,13 @@ from typing import cast
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, Market, MarketIdentity
+from xret.data.models import (
+    BarRequest,
+    Market,
+    MarketIdentity,
+    Verification,
+    VerificationStatus,
+)
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -32,6 +38,8 @@ class ProviderSnapshot:
     descriptor: ProviderDescriptor
     native_market_id: str
     native_symbol: str
+    verification: Verification
+    normalizations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,26 +174,25 @@ def _validate_windows(
 ) -> None:
     if not isinstance(windows, tuple):
         raise ProviderError("provider observed windows must be a tuple")
-    expected = request.start
+    previous_end: datetime | None = None
     for window in windows:
         if not isinstance(window, ObservedWindow):
             raise ProviderError("provider observed entries must be ObservedWindow values")
-        if window.start != expected or window.end > request.end:
+        if window.start < request.start or window.end > request.end:
             raise ProviderError(
-                "incomplete provider observation: observed windows do not "
-                f"contiguously cover [{request.start.isoformat()}, {request.end.isoformat()})"
+                "invalid provider observation: observed window falls outside "
+                f"[{request.start.isoformat()}, {request.end.isoformat()})"
             )
         if time_bar.floor(window.start) != window.start or time_bar.floor(window.end) != window.end:
             raise ProviderError(
                 "invalid provider observation: window boundaries are not aligned to "
                 f"{request.timeframe}"
             )
-        expected = window.end
-    if expected != request.end:
-        raise ProviderError(
-            "incomplete provider observation: observed windows end at "
-            f"{expected.isoformat()}, expected {request.end.isoformat()}"
-        )
+        if previous_end is not None and window.start < previous_end:
+            raise ProviderError(
+                "invalid provider observation: observed windows must be ordered and non-overlapping"
+            )
+        previous_end = window.end
 
 
 def _validate_provider_frame(frame: object) -> pl.DataFrame:
@@ -267,7 +274,7 @@ class ProviderRuntime:
         finalized = raw.frame.filter(pl.col("timestamp") < finalizable_end)
         canonical = _xret_frame(finalized, request, raw.market)
         enforce_ohlcv_batch(canonical, request, error_cls=ProviderError)
-        return self._result(raw, canonical)
+        return self._result(raw, canonical, timeframe=request.timeframe)
 
     def observe_recent_closed(
         self,
@@ -284,7 +291,7 @@ class ProviderRuntime:
         raw = self._observe_provider(request, market=market)
         recent = _xret_frame(raw.frame, request, raw.market)
         enforce_ohlcv_batch(recent, request, error_cls=ProviderError)
-        return self._result(raw, recent)
+        return self._result(raw, recent, timeframe=request.timeframe)
 
     def _observe_provider(
         self,
@@ -352,7 +359,29 @@ class ProviderRuntime:
         self,
         raw: _ValidatedProviderObservation,
         frame: pl.DataFrame,
+        *,
+        timeframe: str,
     ) -> ValidatedBarObservation:
+        verification = Verification(VerificationStatus.UNVERIFIED)
+        verification_method = getattr(self._provider, "_historical_verification", None)
+        if callable(verification_method):
+            candidate = verification_method(raw.market, timeframe)
+            if not isinstance(candidate, Verification):
+                raise ProviderError(
+                    "provider historical verification hook must return Verification"
+                )
+            verification = candidate
+        normalizations: tuple[str, ...] = ()
+        normalizations_method = getattr(self._provider, "_historical_normalizations", None)
+        if callable(normalizations_method):
+            candidate = normalizations_method(raw.market)
+            if not isinstance(candidate, tuple) or not all(
+                isinstance(value, str) and value for value in candidate
+            ):
+                raise ProviderError(
+                    "provider historical normalizations hook must return nonempty strings"
+                )
+            normalizations = candidate
         return ValidatedBarObservation(
             frame=frame,
             observed=raw.observed,
@@ -361,6 +390,8 @@ class ProviderRuntime:
                 descriptor=self._descriptor,
                 native_market_id=raw.market.native_market_id,
                 native_symbol=raw.market.native_symbol,
+                verification=verification,
+                normalizations=normalizations,
             ),
             evidence_at=raw.evidence_at,
             completed_at=raw.completed_at,

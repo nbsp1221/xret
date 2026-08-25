@@ -24,6 +24,7 @@ override below) only when no explicit config was given.
 from __future__ import annotations
 
 import uuid
+import warnings as python_warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -37,6 +38,7 @@ from xret.data.errors import (
     CatalogError,
     CoverageError,
     InvalidRequestError,
+    ProviderError,
     SyncError,
 )
 from xret.data.models import (
@@ -45,11 +47,14 @@ from xret.data.models import (
     CoverageStatus,
     DatasetKey,
     DataWarning,
+    FetchResult,
     Market,
     PartialScanResult,
+    ProviderEvidence,
     SyncResult,
     YearMonth,
 )
+from xret.data.observation_coverage import evaluate_observation_coverage
 from xret.data.providers import DerivativeInterpretation, HistoricalBarProvider
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.discovery import ProviderHandle
@@ -77,6 +82,7 @@ from xret.data.storage.parquet import (
     split_by_year_month,
 )
 from xret.data.timeframe import TimeBar, parse_time_input, validate_range
+from xret.data.warnings import UnverifiedProviderWarning
 
 if TYPE_CHECKING:
     from xret.data.config import MarketDataConfig
@@ -306,13 +312,12 @@ class BarDataset:
         self,
         start: str | datetime,
         end: str | datetime | None = None,
-    ) -> pl.DataFrame:
+    ) -> FetchResult:
         """Fetch completed bars directly from the provider (Decision 12).
 
         Always uses the remote provider. Never reads or writes canonical
-        files or catalog coverage. Returns an eager, canonical Polars
-        `DataFrame` containing only completed bars (Decision 13) inside the
-        half-open `[start, end)` range (Decision 10).
+        files or catalog coverage. Returns completed canonical rows together
+        with provider evidence, observation coverage, gaps, and warnings.
 
         `start` is required. When `end` is omitted, it resolves to the end
         of the latest completed bar at call time, honoring the provider's
@@ -333,7 +338,81 @@ class BarDataset:
         request = BarRequest(
             identity=self.identity, timeframe=self.timeframe, start=start_dt, end=end_dt
         )
-        return ProviderRuntime(self._effective_provider()).observe(request).frame
+        provider = self._effective_provider()
+        observation = ProviderRuntime(provider).observe(request)
+        quality_result = quality.enforce_ohlcv_batch(
+            observation.frame,
+            request,
+            error_cls=ProviderError,
+        )
+        finalizable_end = _finalizable_end(
+            time_bar,
+            request.end,
+            observation.evidence_at,
+        )
+        coverage = evaluate_observation_coverage(
+            time_bar=time_bar,
+            start=request.start,
+            end=request.end,
+            finalizable_end=finalizable_end,
+            timestamps=observation.frame.get_column("timestamp").to_list(),
+            observed=observation.observed,
+        )
+        source = ProviderEvidence(
+            provider_name=observation.source.descriptor.name,
+            provider_version=observation.source.descriptor.version,
+            provider_api_version=observation.source.descriptor.api_version,
+            native_market_id=observation.source.native_market_id,
+            native_symbol=observation.source.native_symbol,
+            verification=observation.source.verification,
+            normalizations=observation.source.normalizations,
+        )
+        warnings = [
+            DataWarning(finding.code, finding.message, request.start, request.end)
+            for finding in quality_result.warnings
+        ]
+        if source.verification.status.value == "unverified":
+            unverified = DataWarning(
+                "provider.unverified",
+                f"{source.provider_name} has no current Xret qualification evidence "
+                f"for this historical scope",
+                request.start,
+                request.end,
+            )
+            warnings.append(unverified)
+            python_warnings.warn(
+                unverified.message,
+                UnverifiedProviderWarning,
+                stacklevel=2,
+            )
+        for gap in coverage.gaps:
+            warnings.append(
+                DataWarning(
+                    (
+                        "coverage.partial_observation"
+                        if gap.status is CoverageStatus.MISSING
+                        else "coverage.unavailable"
+                    ),
+                    (
+                        "provider observation did not prove this range"
+                        if gap.status is CoverageStatus.MISSING
+                        else "provider exhaustively observed no bar in this range"
+                    ),
+                    gap.start,
+                    gap.end,
+                )
+            )
+        return FetchResult(
+            dataset_key=DatasetKey.from_identity(
+                observation.market.identity,
+                timeframe=self.timeframe,
+            ),
+            data=observation.frame,
+            covered=coverage.covered,
+            gaps=coverage.gaps,
+            source=source,
+            warnings=tuple(warnings),
+        )
 
     # -- sync --------------------------------------------------------------
 
@@ -549,22 +628,37 @@ class BarDataset:
                         new_segments: list[CoverageSegment] = []
                         for fetch_window, observation, _nr in observations:
                             present = set(observation.frame.get_column("timestamp").to_list())
-                            for missing_gap in fetch_window.gaps:
-                                finalizable_end = _finalizable_end(
-                                    time_bar, missing_gap.end, observation.evidence_at
-                                )
-                                if finalizable_end <= missing_gap.start:
-                                    continue
-                                for _month, month_start, month_end in paths.iter_month_slices(
-                                    missing_gap.start, finalizable_end
-                                ):
-                                    clipped_start = max(missing_gap.start, month_start)
-                                    clipped_end = min(finalizable_end, month_end)
-                                    new_segments.extend(
-                                        _bar_segments_for_range(
-                                            present, time_bar, clipped_start, clipped_end
-                                        )
+                            for observed_window in observation.observed:
+                                for missing_gap in fetch_window.gaps:
+                                    observed_start = max(
+                                        observed_window.start,
+                                        missing_gap.start,
                                     )
+                                    observed_end = min(
+                                        observed_window.end,
+                                        missing_gap.end,
+                                    )
+                                    finalizable_end = _finalizable_end(
+                                        time_bar,
+                                        observed_end,
+                                        observation.evidence_at,
+                                    )
+                                    if finalizable_end <= observed_start:
+                                        continue
+                                    for _month, month_start, month_end in paths.iter_month_slices(
+                                        observed_start,
+                                        finalizable_end,
+                                    ):
+                                        clipped_start = max(observed_start, month_start)
+                                        clipped_end = min(finalizable_end, month_end)
+                                        new_segments.extend(
+                                            _bar_segments_for_range(
+                                                present,
+                                                time_bar,
+                                                clipped_start,
+                                                clipped_end,
+                                            )
+                                        )
                         has_canonical_provider_facts = bool(prepared) or bool(new_segments)
                         if has_canonical_provider_facts:
                             catalog.bind_source_lineage(
@@ -654,6 +748,57 @@ class BarDataset:
                 )
                 raise
 
+        source = None
+        result_warnings = [
+            DataWarning(finding.code, finding.message, gap.start, gap.end)
+            for gap, finding in quality_warnings
+        ]
+        if observations:
+            snapshot = observations[0][1].source
+            source = ProviderEvidence(
+                provider_name=snapshot.descriptor.name,
+                provider_version=snapshot.descriptor.version,
+                provider_api_version=snapshot.descriptor.api_version,
+                native_market_id=snapshot.native_market_id,
+                native_symbol=snapshot.native_symbol,
+                verification=snapshot.verification,
+                normalizations=snapshot.normalizations,
+            )
+            if source.verification.status.value == "unverified":
+                message = (
+                    f"{source.provider_name} has no current Xret qualification evidence "
+                    "for this historical scope"
+                )
+                result_warnings.append(
+                    DataWarning(
+                        "provider.unverified",
+                        message,
+                        start_dt,
+                        end_dt,
+                    )
+                )
+                python_warnings.warn(
+                    message,
+                    UnverifiedProviderWarning,
+                    stacklevel=2,
+                )
+        result_warnings.extend(
+            DataWarning(
+                (
+                    "coverage.partial_observation"
+                    if gap.status is CoverageStatus.MISSING
+                    else "coverage.unavailable"
+                ),
+                (
+                    "provider observation did not prove this range"
+                    if gap.status is CoverageStatus.MISSING
+                    else "provider exhaustively observed no bar in this range"
+                ),
+                gap.start,
+                gap.end,
+            )
+            for gap in gaps
+        )
         return SyncResult(
             dataset_key=dataset_key,
             run_id=run_id,
@@ -662,10 +807,8 @@ class BarDataset:
             written_partitions=len(prepared),
             covered=covered,
             gaps=gaps,
-            warnings=tuple(
-                DataWarning(finding.code, finding.message, gap.start, gap.end)
-                for gap, finding in quality_warnings
-            ),
+            warnings=tuple(result_warnings),
+            source=source,
         )
 
     # -- scan / scan_partial ------------------------------------------------

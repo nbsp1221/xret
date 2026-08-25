@@ -1,6 +1,16 @@
 """Market-data provider extension API."""
 
-from xret.data.models import BarRequest, Market, MarketIdentity
+from xret.data.models import (
+    Availability,
+    BarRequest,
+    CapabilityNotice,
+    Market,
+    MarketIdentity,
+    OperationCapability,
+    TimeBarCapability,
+    Verification,
+    VerificationStatus,
+)
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -22,6 +32,12 @@ __all__ = [
     "PROVIDER_BAR_SCHEMA",
     "BarObservation",
     "BarRequest",
+    "Availability",
+    "VerificationStatus",
+    "CapabilityNotice",
+    "Verification",
+    "OperationCapability",
+    "TimeBarCapability",
     "DerivativeInterpretation",
     "HistoricalBarProvider",
     "LiveBarProvider",

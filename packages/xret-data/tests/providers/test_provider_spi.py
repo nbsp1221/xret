@@ -196,7 +196,7 @@ def test_runtime_rejects_unsupported_market_timeframe_before_observation() -> No
     assert provider.observe_calls == 0
 
 
-def test_runtime_rejects_incomplete_observation_evidence() -> None:
+def test_runtime_accepts_partial_observation_evidence() -> None:
     provider = FakeProvider(
         observation=BarObservation(
             frame=_provider_frame((0,)),
@@ -204,7 +204,27 @@ def test_runtime_rejects_incomplete_observation_evidence() -> None:
         )
     )
 
-    with pytest.raises(ProviderError, match="incomplete provider observation"):
+    result = ProviderRuntime(provider).observe(REQUEST)
+
+    assert result.observed == (ObservedWindow(START, datetime(2024, 1, 1, 1, tzinfo=UTC)),)
+    assert result.frame.height == 1
+
+
+def test_runtime_rejects_overlapping_observation_evidence() -> None:
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=_provider_frame((0,)),
+            observed=(
+                ObservedWindow(START, datetime(2024, 1, 1, 2, tzinfo=UTC)),
+                ObservedWindow(
+                    datetime(2024, 1, 1, 1, tzinfo=UTC),
+                    datetime(2024, 1, 1, 3, tzinfo=UTC),
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(ProviderError, match="ordered and non-overlapping"):
         ProviderRuntime(provider).observe(REQUEST)
 
 
@@ -405,10 +425,12 @@ def test_direct_provider_fetch_uses_public_api_without_storage_side_effects(tmp_
         timeframe="1h",
     )
 
-    frame = bars.fetch(START, END)
+    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
+        result = bars.fetch(START, END)
 
-    assert frame.height == 3
-    assert frame.schema == OHLCV_SCHEMA
+    assert result.data.height == 3
+    assert result.is_complete
+    assert result.data.schema == OHLCV_SCHEMA
     assert provider.resolve_calls == 1
     assert provider.observe_calls == 1
     assert not config.state_dir.exists()
@@ -482,8 +504,10 @@ def test_named_provider_discovery_is_lazy_and_cached(
     assert calls == []
     assert bars.scan_partial(START, END).data.collect().is_empty()
     assert calls == []
-    assert bars.fetch(START, END).height == 3
-    assert bars.fetch(START, END).height == 3
+    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
+        assert bars.fetch(START, END).data.height == 3
+    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
+        assert bars.fetch(START, END).data.height == 3
     assert calls == [discovery.ENTRY_POINT_GROUP]
 
 
@@ -495,18 +519,19 @@ def test_direct_provider_bypasses_installed_discovery(
     provider = FakeProvider()
     config = MarketDataConfig(state_dir=tmp_path / "state", data_dir=tmp_path / "data")
 
-    frame = (
-        MarketData(config=config, provider=provider)
-        .bars(
-            exchange="coinbase",
-            symbol="ETH/USD",
-            market="spot",
-            timeframe="1h",
+    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
+        result = (
+            MarketData(config=config, provider=provider)
+            .bars(
+                exchange="coinbase",
+                symbol="ETH/USD",
+                market="spot",
+                timeframe="1h",
+            )
+            .fetch(START, END)
         )
-        .fetch(START, END)
-    )
 
-    assert frame.height == 3
+    assert result.data.height == 3
     assert calls == []
 
 

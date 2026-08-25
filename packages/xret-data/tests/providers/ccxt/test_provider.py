@@ -674,7 +674,7 @@ def test_omitted_settle_infers_the_single_safe_candidate() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert (frame["settle"] == "USDT").all()
+    assert (frame.data["settle"] == "USDT").all()
     assert exchange.fetch_calls[0][0] == "BTC/USDT:USDT"
 
 
@@ -792,7 +792,7 @@ def test_explicit_settle_never_reads_other_candidates() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert (frame["settle"] == "USDT").all()
+    assert (frame.data["settle"] == "USDT").all()
     assert exchange.fetch_calls[0][0] == "BTC/USDT:USDT"
 
 
@@ -813,8 +813,8 @@ def test_spot_fetch_uses_the_public_symbol_as_the_native_symbol() -> None:
     )
 
     assert exchange.fetch_calls[0][0] == "BTC/USDT"
-    assert frame["settle"].null_count() == frame.height
-    assert (frame["market"] == "spot").all()
+    assert frame.data["settle"].null_count() == frame.data.height
+    assert (frame.data["market"] == "spot").all()
 
 
 def test_observation_spot_metadata_uses_the_resolved_ccxt_market() -> None:
@@ -1072,9 +1072,9 @@ def test_fetch_returns_canonical_schema_with_no_run_id() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert tuple(frame.columns) == OHLCV_COLUMNS
-    assert "run_id" not in frame.columns
-    row = frame.row(0, named=True)
+    assert tuple(frame.data.columns) == OHLCV_COLUMNS
+    assert "run_id" not in frame.data.columns
+    row = frame.data.row(0, named=True)
     assert row["exchange"] == "binance"
     assert row["symbol"] == "BTC/USDT"
     assert row["market"] == "spot"
@@ -1089,7 +1089,7 @@ def test_fetch_has_no_local_side_effects_and_is_repeatable() -> None:
     first = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     second = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
 
-    assert first.equals(second)
+    assert first.data.equals(second.data)
     assert exchange.load_markets_calls == 1
     assert len(exchange.fetch_calls) == 2
 
@@ -1893,7 +1893,7 @@ def test_request_range_filter_is_half_open() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 3, tzinfo=UTC))
     )
 
-    assert frame.height == 3
+    assert frame.data.height == 3
 
 
 def test_nonpositive_page_limit_raises_provider_error() -> None:
@@ -1964,7 +1964,7 @@ def test_candle_within_grace_window_is_dropped() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
     )
 
-    assert frame["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+    assert frame.data["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
 
 
 def test_candle_past_grace_window_is_included() -> None:
@@ -1980,7 +1980,7 @@ def test_candle_past_grace_window_is_included() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
     )
 
-    assert frame.height == 2
+    assert frame.data.height == 2
 
 
 # --------------------------------------------------------------------------
@@ -2006,7 +2006,7 @@ def test_fetch_with_omitted_end_uses_provider_grace_boundary() -> None:
         .fetch(datetime(2023, 12, 31, 23, 59, tzinfo=UTC))
     )
 
-    assert frame.height == 0  # [23:59, 00:00) excludes the t=0 candle
+    assert frame.data.height == 0  # [23:59, 00:00) excludes the t=0 candle
 
 
 # --------------------------------------------------------------------------
@@ -2046,7 +2046,7 @@ def test_transient_error_retries_and_recovers(monkeypatch: pytest.MonkeyPatch) -
         )
     )
 
-    assert frame.height == 1
+    assert frame.data.height == 1
     assert attempts["count"] == 3
     assert len(sleeps) == 2
 
