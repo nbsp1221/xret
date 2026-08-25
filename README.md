@@ -61,12 +61,13 @@ bars = md.bars(
 # Acquire and validate — only missing intervals are fetched
 result = bars.sync("2024-01-01", "2024-06-01")
 result.require_complete()
+print(result.source.verification if result.source else "local no-op")
 
 # Read — raises CoverageError if any bar is missing
 df = bars.scan("2024-01-01", "2024-06-01").collect()
 ```
 
-`scan` never returns incomplete data. If coverage is missing, it fails loudly instead of silently giving you a wrong answer. This is the Xret contract: **the tool refuses to lie to you.**
+`scan` never returns incomplete data. Remote operations are capability-based: Xret attempts provider-advertised CCXT markets, validates every response, and reports whether the exact scope has independent Xret verification. Unverified does not mean blocked; malformed, conflicting, or semantically incompatible data still fails before return or storage. This is the Xret contract: **the tool refuses to lie to you.**
 
 ## Principles
 

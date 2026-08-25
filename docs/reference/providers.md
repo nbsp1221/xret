@@ -18,12 +18,14 @@ xret/data/providers/
 └── ccxt/                # built-in crypto implementation
     ├── __init__.py      # CcxtProvider export
     ├── provider.py      # implementation orchestration
-    ├── compatibility.py # typed endpoint-scope semantics and qualified observation policy
+    ├── capabilities.py  # CCXT capability metadata interpretation
+    ├── compatibility.py # exact lossless semantics and bounded-window policies
+    ├── verification.py  # qualification evidence; never execution authorization
     ├── live.py          # CCXT Pro live-bar session
     ├── client.py        # CCXT construction, retry, and transport
     ├── markets.py       # crypto market resolution and definition translation
     ├── semantics.py     # generic lossless canonical-value translation
-    └── pagination.py    # qualified exhaustive observation windows
+    └── pagination.py    # exhaustive and conservative presence-only strategies
 ```
 
 An additional built-in provider would be a sibling implementation package, not another branch inside `runtime.py` or the CCXT package. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. The current contract is deliberately limited to crypto spot and perpetual historical bars; it does not claim that non-crypto asset identity or session semantics have been designed.
@@ -106,7 +108,7 @@ class LiveBarProvider(Protocol):
 
 `LiveBarSession` is an async context manager and async iterator. Its `subscribe_bar_updates(resolved_market, timeframe)` method starts one stream; its iterator merges `ProviderBarUpdate` values from every subscription. The provider update carries canonical identity, timeframe, inclusive UTC bar-start, trade-derived OHLC values, and base-asset volume. Xret validates it, enforces per-dataset nondecreasing timestamps, and adds `received_at` before exposing `BarUpdate`. Xret also derives provider-neutral `BarFinality` from the bar interval, receipt time, and Xret's finality grace; providers do not add native closed/confirm flags to the SPI.
 
-The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions. Subscriptions fail closed unless the exact market family, settlement, and timeframe appears in the verified live matrix. Historical REST and live WebSocket adapters may expose different native volume fields, so the live channel inherits the historical typed volume policy by default and requires an explicit channel override when qualification proves a difference. A field name or adapter comment is not sufficient semantic evidence: qualification compares a fully observed public-trade interval with the completed live candle and exact instrument metadata before deciding whether the value is already base quantity or a contract count.
+The built-in provider implements this capability through CCXT Pro with `newUpdates=True` and rate limiting enabled. Async clients are distinct from historical sync clients and are reused by native CCXT client ID within one session. A canonical Binance session may therefore own separate `binance` and `binanceusdm` clients for spot and USD-M perpetual subscriptions. Xret attempts an Xret-expressible timeframe when CCXT Pro advertises `watchOHLCV`; the verified live matrix supplies confidence evidence rather than permission. Historical REST and live WebSocket adapters may expose different native volume fields, so the live channel inherits the historical typed volume policy by default and requires an explicit channel override when qualification proves a difference. An unqualified live scope is explicitly reported as unverified, including its volume semantics, while malformed or known non-lossless values still fail. A field name or adapter comment is not sufficient semantic evidence: qualification compares a fully observed public-trade interval with the completed live candle and exact instrument metadata before deciding whether the value is independently verified as base quantity or a contract count.
 
 Live capability absence raises `UnsupportedMarketError`. Once open, a provider transport failure, malformed update, reader failure, or queue overflow raises a terminal `ProviderError` for the session. Providers and Xret do not silently retry, reconnect, coalesce, or claim continuity. Closing the context closes the provider's whole session; the initial contract has no unsubscribe operation.
 
@@ -153,7 +155,9 @@ This distinction prevents a temporary empty native page from turning an unquerie
 no returned row != proof that the entire remaining range was observed empty
 ```
 
-The built-in CCXT adapter partitions a request into endpoint-qualified windows and sends the actual number of remaining bar boundaries on the final page, not the endpoint's maximum page size. A typed endpoint profile may omit CCXT's unified `until` when the adapter derives the native end from `since + limit`. A profile may also recognize a documented closed native window by accepting only the exact right-boundary candle as an observation witness and discarding it from Xret's half-open result. Unknown endpoints and every other out-of-range response fail closed.
+For an endpoint with a maintained bounded-window policy, the built-in CCXT adapter partitions a request into exact windows and sends the actual number of remaining bar boundaries on the final page, not the endpoint's maximum page size. A typed endpoint profile may omit CCXT's unified `until` when the adapter derives the native end from `since + limit`. A profile may also recognize a documented closed native window by accepting only the exact right-boundary candle as an observation witness and discarding it from Xret's half-open result.
+
+An endpoint without an exact policy is not blocked. Xret uses CCXT's advertised page limit when available, advances only from validated returned timestamps, rejects ignored `since`, backward data, conflicting overlap, malformed rows, and non-progress, and stops under a deterministic request budget. This generic strategy establishes presence only: returned bar intervals are observed, while every other interval remains `missing` and retryable. It never turns an unknown empty response into unavailable coverage.
 
 ## Direct injection
 

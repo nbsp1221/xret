@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import (
+    Availability,
     BarRequest,
+    CapabilityNotice,
     Market,
     MarketIdentity,
+    OperationCapability,
+    TimeBarCapability,
     Verification,
     VerificationStatus,
 )
@@ -97,6 +101,7 @@ class MarketDefinitionRuntime:
         if not isinstance(result, tuple):
             raise ProviderError("provider fetch_markets() must return a tuple")
         identities: set[MarketIdentity] = set()
+        normalized: list[MarketDefinition] = []
         for definition in result:
             if not isinstance(definition, MarketDefinition):
                 raise ProviderError("provider market entries must be MarketDefinition values")
@@ -106,7 +111,35 @@ class MarketDefinitionRuntime:
             if identity in identities:
                 raise ProviderError(f"provider returned duplicate canonical identity: {identity!r}")
             identities.add(identity)
-        return result
+            normalized.append(self._with_default_capabilities(definition))
+        return tuple(normalized)
+
+    @staticmethod
+    def _with_default_capabilities(definition: MarketDefinition) -> MarketDefinition:
+        if definition.bar_capabilities:
+            return definition
+        unverified = Verification(VerificationStatus.UNVERIFIED)
+        live_unavailable = OperationCapability(
+            Availability.UNAVAILABLE,
+            None,
+            notices=(
+                CapabilityNotice(
+                    "provider.live_unavailable",
+                    "The provider did not declare live OHLCV capability metadata",
+                ),
+            ),
+        )
+        return replace(
+            definition,
+            bar_capabilities=tuple(
+                TimeBarCapability(
+                    timeframe=timeframe,
+                    historical=OperationCapability(Availability.AVAILABLE, unverified),
+                    live=live_unavailable,
+                )
+                for timeframe in sorted(definition.timeframes)
+            ),
+        )
 
 
 def _default_clock() -> datetime:

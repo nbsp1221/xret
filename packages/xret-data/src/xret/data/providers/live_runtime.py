@@ -9,7 +9,15 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarFinality, BarRequest, BarUpdate, MarketIdentity
+from xret.data.models import (
+    BarFinality,
+    BarRequest,
+    BarUpdate,
+    MarketIdentity,
+    ProviderEvidence,
+    Verification,
+    VerificationStatus,
+)
 from xret.data.providers.contracts import (
     HistoricalBarProvider,
     LiveBarSession,
@@ -139,10 +147,20 @@ class LiveBarRuntime:
             raise
         if resolved.identity.exchange != self._exchange:
             raise ProviderError("provider resolved a live market outside the session exchange")
-        if timeframe not in resolved.timeframes:
+        live_supports = getattr(self._provider, "_live_supports_timeframe", None)
+        if callable(live_supports):
+            supported = live_supports(resolved, timeframe)
+            if not isinstance(supported, bool):
+                raise ProviderError("provider live timeframe hook must return bool")
+        else:
+            # Provider SPI v1 has no separate live-capability object. Existing
+            # custom providers therefore use their resolved timeframe catalog
+            # for both operations unless they opt into the private richer hook.
+            supported = timeframe in resolved.timeframes
+        if not supported:
             raise UnsupportedMarketError(
                 f"provider {self._descriptor.name!r} does not support timeframe "
-                f"{timeframe!r} for {identity.exchange}/{identity.symbol}"
+                f"{timeframe!r} for live {identity.exchange}/{identity.symbol}"
             )
         key = (resolved.identity, str(time_bar))
         if key in self._active:
@@ -171,6 +189,40 @@ class LiveBarRuntime:
                 f"{resolved.identity.exchange}/{resolved.identity.symbol} {timeframe}: {exc}"
             ) from exc
         return key
+
+    def subscription_evidence(
+        self,
+        resolved: ResolvedBarMarket,
+        timeframe: str,
+    ) -> ProviderEvidence:
+        """Return provider provenance and exact live qualification evidence."""
+        verification = Verification(VerificationStatus.UNVERIFIED)
+        verification_method = getattr(self._provider, "_live_verification", None)
+        if callable(verification_method):
+            candidate = verification_method(resolved, timeframe)
+            if not isinstance(candidate, Verification):
+                raise ProviderError("provider live verification hook must return Verification")
+            verification = candidate
+        normalizations: tuple[str, ...] = ()
+        normalizations_method = getattr(self._provider, "_live_normalizations", None)
+        if callable(normalizations_method):
+            candidate = normalizations_method(resolved)
+            if not isinstance(candidate, tuple) or not all(
+                isinstance(value, str) and value for value in candidate
+            ):
+                raise ProviderError(
+                    "provider live normalizations hook must return nonempty strings"
+                )
+            normalizations = candidate
+        return ProviderEvidence(
+            provider_name=self._descriptor.name,
+            provider_version=self._descriptor.version,
+            provider_api_version=self._descriptor.api_version,
+            native_market_id=resolved.native_market_id,
+            native_symbol=resolved.native_symbol,
+            verification=verification,
+            normalizations=normalizations,
+        )
 
     async def recent_closed(
         self,

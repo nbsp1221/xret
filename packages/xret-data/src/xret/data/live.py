@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import warnings as python_warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -11,9 +12,17 @@ from types import TracebackType
 
 from xret.data.dataset import BarDataset
 from xret.data.errors import InvalidRequestError, ProviderError
-from xret.data.models import BarUpdate, MarketIdentity
+from xret.data.models import (
+    BarUpdate,
+    DatasetKey,
+    DataWarning,
+    LiveSubscription,
+    MarketIdentity,
+    VerificationStatus,
+)
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.live_runtime import LiveBarRuntime
+from xret.data.warnings import UnverifiedProviderWarning
 
 _DEFAULT_QUEUE_SIZE = 1024
 
@@ -142,7 +151,7 @@ class LiveMarketData:
         bars: BarDataset,
         *,
         bootstrap: bool = False,
-    ) -> None:
+    ) -> LiveSubscription:
         if self._state is not _State.OPEN or self._runtime is None:
             raise InvalidRequestError("live subscriptions require an open session")
         if not isinstance(bars, BarDataset):
@@ -182,6 +191,33 @@ class LiveMarketData:
             self._reader = asyncio.create_task(self._read_updates())
         if gate is not None:
             await self._bootstrap(key, gate)
+        evidence = self._runtime.subscription_evidence(resolved, bars.timeframe)
+        warnings: tuple[DataWarning, ...] = ()
+        if evidence.verification.status is VerificationStatus.UNVERIFIED:
+            message = (
+                f"{evidence.provider_name} has no current Xret qualification evidence "
+                "for this live scope"
+            )
+            warnings = (
+                DataWarning("provider.unverified", message),
+                DataWarning(
+                    "provider.volume_semantics_unverified",
+                    "Xret has not independently qualified this live OHLCV volume scope",
+                ),
+            )
+            python_warnings.warn(
+                message,
+                UnverifiedProviderWarning,
+                stacklevel=2,
+            )
+        return LiveSubscription(
+            dataset_key=DatasetKey.from_identity(
+                resolved.identity,
+                timeframe=bars.timeframe,
+            ),
+            source=evidence,
+            warnings=warnings,
+        )
 
     def __aiter__(self) -> LiveMarketData:
         return self

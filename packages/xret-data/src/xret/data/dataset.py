@@ -52,6 +52,7 @@ from xret.data.models import (
     PartialScanResult,
     ProviderEvidence,
     SyncResult,
+    VerificationStatus,
     YearMonth,
 )
 from xret.data.observation_coverage import evaluate_observation_coverage
@@ -371,7 +372,7 @@ class BarDataset:
             DataWarning(finding.code, finding.message, request.start, request.end)
             for finding in quality_result.warnings
         ]
-        if source.verification.status.value == "unverified":
+        if source.verification.status is VerificationStatus.UNVERIFIED:
             unverified = DataWarning(
                 "provider.unverified",
                 f"{source.provider_name} has no current Xret qualification evidence "
@@ -428,9 +429,9 @@ class BarDataset:
         local coverage or `DatasetKey` is derived, so an omitted perpetual
         `settle` never leaks a storage-layer sentinel error.
 
-        Reads local coverage, fetches only missing/gap intervals through
-        qualified exhaustive provider windows, validates each fetched batch
-        and its observation evidence, publishes monthly Parquet partitions,
+        Reads local coverage, fetches only missing/gap intervals through exact
+        bounded or conservative presence-only provider observations, validates
+        each fetched batch and its evidence, publishes monthly Parquet partitions,
         and records their catalog state under the per-dataset lock.
         A fully covered request is an observable no-op: `changed=False`,
         `fetched_rows=0`, `written_partitions=0`. After Parquet publication,
@@ -440,8 +441,8 @@ class BarDataset:
 
         Raises:
             UnsupportedMarketError: an unlisted symbol, an unsupported
-                timeframe, an unqualified exhaustive pagination contract,
-                or ambiguous/absent perpetual settlement inference.
+                timeframe or capability, a known exact incompatibility, or
+                ambiguous/absent perpetual settlement inference.
             ProviderError: the provider call failed.
             SyncError: a fetched batch failed fatal data-quality
                 validation (P-1), the dataset lock timed out, or catalog
@@ -764,7 +765,7 @@ class BarDataset:
                 verification=snapshot.verification,
                 normalizations=snapshot.normalizations,
             )
-            if source.verification.status.value == "unverified":
+            if source.verification.status is VerificationStatus.UNVERIFIED:
                 message = (
                     f"{source.provider_name} has no current Xret qualification evidence "
                     "for this historical scope"

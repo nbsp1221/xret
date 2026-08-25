@@ -273,7 +273,16 @@ def test_fetch_markets_uses_optional_provider_capability_without_storage_side_ef
         market="spot",
     )
 
-    assert result == (definition,)
+    assert len(result) == 1
+    assert result[0].identity == definition.identity
+    assert result[0].timeframes == definition.timeframes
+    assert {item.timeframe for item in result[0].bar_capabilities} == {"1m", "1h"}
+    assert all(
+        item.historical.availability is Availability.AVAILABLE
+        and item.historical.verification == Verification(VerificationStatus.UNVERIFIED)
+        and item.live.availability is Availability.UNAVAILABLE
+        for item in result[0].bar_capabilities
+    )
     assert provider.calls == [("coinbase", Market.SPOT)]
     assert not config.state_dir.exists()
     assert not config.data_dir.exists()

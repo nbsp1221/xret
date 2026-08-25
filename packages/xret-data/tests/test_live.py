@@ -8,7 +8,15 @@ from typing import cast
 
 import polars as pl
 import pytest
-from xret.data import BarDataset, BarFinality, BarUpdate, MarketData
+from xret.data import (
+    BarDataset,
+    BarFinality,
+    BarUpdate,
+    LiveSubscription,
+    MarketData,
+    UnverifiedProviderWarning,
+    VerificationStatus,
+)
 from xret.data.config import MarketDataConfig
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.live import LiveMarketData
@@ -122,11 +130,18 @@ def test_live_binding_performs_no_io_and_happy_path_allows_same_timestamp() -> N
         async with live:
             assert provider.open_calls == 1
             assert provider.resolve_calls == 0
-            await live.subscribe_bar_updates(bars)
+            with pytest.warns(UnverifiedProviderWarning, match="no current Xret qualification"):
+                receipt = await live.subscribe_bar_updates(bars)
             first = await anext(live)
             second = await anext(live)
 
         assert isinstance(first, BarUpdate)
+        assert isinstance(receipt, LiveSubscription)
+        assert receipt.source.verification.status is VerificationStatus.UNVERIFIED
+        assert [warning.code for warning in receipt.warnings] == [
+            "provider.unverified",
+            "provider.volume_semantics_unverified",
+        ]
         assert first.timestamp == second.timestamp == T0
         assert first.close == 101.0
         assert second.close == 102.0

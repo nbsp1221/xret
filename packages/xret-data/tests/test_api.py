@@ -359,15 +359,16 @@ def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> 
         exchange="kraken", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
-    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
-        bars.sync(_now(0), _now(3))
+    with pytest.warns(UserWarning, match="no current Xret qualification evidence"):
+        result = bars.sync(_now(0), _now(3))
 
     partial = bars.scan_partial(_now(0), _now(3))
-    assert partial.data.collect().height == 0
+    assert result.fetched_rows == 1
+    assert partial.data.collect().height == 1
     assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
-        (_now(0), _now(3), CoverageStatus.MISSING)
+        (_now(1), _now(3), CoverageStatus.MISSING)
     }
-    assert not list(config.data_dir.rglob("*.parquet"))
+    assert list(config.data_dir.rglob("*.parquet"))
 
 
 def test_middle_page_failure_publishes_no_partial_observation(tmp_path: Path) -> None:

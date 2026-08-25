@@ -6,7 +6,9 @@ historical fetches or live subscriptions.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date
+from typing import Final, Literal
 
 from xret.data.models import Verification, VerificationStatus
 from xret.data.providers.ccxt import compatibility
@@ -15,6 +17,28 @@ __all__ = ["historical", "live"]
 
 _EXACT_SCOPE_REQUALIFIED_ON = date(2026, 8, 24)
 _LIVE_REQUALIFIED_ON = date(2026, 8, 24)
+
+
+@dataclass(frozen=True, slots=True)
+class QualificationScope:
+    """Exact operation scope covered by durable qualification evidence."""
+
+    client_id: str
+    market_family: Literal["spot", "perpetual"]
+    settle: str | None
+    timeframe: str | None = None
+
+
+_LIVE_SCOPES: Final[frozenset[QualificationScope]] = frozenset(
+    {
+        QualificationScope("binance", "spot", None, "1m"),
+        QualificationScope("binanceusdm", "perpetual", "USDT", "1m"),
+        QualificationScope("bybit", "spot", None, "1m"),
+        QualificationScope("bybit", "perpetual", "USDT", "1m"),
+        QualificationScope("okx", "spot", None, "1m"),
+        QualificationScope("okx", "perpetual", "USDT", "1m"),
+    }
+)
 
 
 def historical(
@@ -41,7 +65,7 @@ def live(
 ) -> Verification:
     """Return exact live qualification evidence without gating use."""
     family = compatibility._validated_market_family(market_family)
-    scope = compatibility.LiveEndpointScope(client_id, family, settle, timeframe)
-    if scope in compatibility._LIVE_ENDPOINT_SCOPES:
+    scope = QualificationScope(client_id, family, settle, timeframe)
+    if scope in _LIVE_SCOPES:
         return Verification(VerificationStatus.VERIFIED, _LIVE_REQUALIFIED_ON)
     return Verification(VerificationStatus.UNVERIFIED)

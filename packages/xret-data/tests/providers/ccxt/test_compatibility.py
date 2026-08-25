@@ -6,7 +6,8 @@ from datetime import timedelta
 
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
-from xret.data.providers.ccxt import compatibility
+from xret.data.models import VerificationStatus
+from xret.data.providers.ccxt import compatibility, verification
 
 
 def test_client_wide_and_market_specific_semantics_are_merged() -> None:
@@ -184,14 +185,11 @@ def test_current_registry_is_self_consistent() -> None:
     compatibility.validate_registries()
 
 
-def test_live_endpoint_qualification_is_exact_and_fail_closed() -> None:
-    compatibility.require_live_endpoint("binance", "spot", None, "1m")
-    compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDT", "1m")
-
-    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
-        compatibility.require_live_endpoint("binance", "spot", None, "5m")
-    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
-        compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDC", "1m")
+def test_qualification_evidence_is_independent_and_exact() -> None:
+    assert verification.historical("binance", "spot", None).status is VerificationStatus.VERIFIED
+    assert verification.historical("kraken", "spot", None).status is VerificationStatus.UNVERIFIED
+    assert verification.live("binance", "spot", None, "1m").status is VerificationStatus.VERIFIED
+    assert verification.live("binance", "spot", None, "5m").status is VerificationStatus.UNVERIFIED
 
 
 def test_documented_candle_rate_limit_overrides_optimistic_client_default() -> None:

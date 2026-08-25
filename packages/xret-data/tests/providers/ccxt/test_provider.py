@@ -16,11 +16,16 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import BarRequest, Market, MarketIdentity
-from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
+from xret.data.models import Availability, BarRequest, Market, MarketIdentity, VerificationStatus
+from xret.data.providers import (
+    DerivativeInterpretation,
+    ObservedWindow,
+    ResolvedBarMarket,
+)
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.ccxt import CcxtProvider, client, compatibility, markets
 from xret.data.providers.ccxt import provider as ccxt_provider
+from xret.data.providers.ccxt.capabilities import LiveOHLCVCapability
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_COLUMNS
 from xret.data.timeframe import TimeBar
@@ -53,12 +58,14 @@ class FakeExchange:
         fetch_override=None,
         page_size: int | None = None,
         precision_mode: int = 4,
+        features: dict | None = None,
     ) -> None:
         self.id = client_id
         self.has = {"fetchOHLCV": has_fetch_ohlcv}
         self.markets = markets if markets is not None else _default_markets()
         self.timeframes = timeframes if timeframes is not None else {"1m": "1m", "1h": "1h"}
         self.precisionMode = precision_mode
+        self.features = features
         self._candles = candles or []
         self._fetch_override = fetch_override
         self._page_size = page_size
@@ -148,6 +155,10 @@ def _exchange_factory(client_id: str) -> FakeExchange:
 
 
 def _ccxt_provider(**options) -> CcxtProvider:
+    options.setdefault(
+        "live_capability_provider",
+        lambda _: LiveOHLCVCapability(False, None),
+    )
     return CcxtProvider(
         exchange_factory=_exchange_factory,
         version_provider=lambda: "4.5.0",
@@ -337,23 +348,22 @@ def test_fetch_markets_translates_all_selected_perpetuals_without_ui_filtering()
     by_symbol = {definition.identity.symbol: definition for definition in definitions}
     btc = by_symbol["BTC/USDT"]
     eth = by_symbol["ETH/USDT"]
-    assert btc == MarketDefinition(
-        identity=MarketIdentity(
-            exchange="binance",
-            symbol="BTC/USDT",
-            market="perpetual",
-            settle="USDT",
-        ),
-        active=True,
-        timeframes=frozenset({"1m", "1h"}),
-        tick_size=Decimal("0.1"),
-        size_increment=Decimal("0.001"),
-        derivative=DerivativeInterpretation(
-            linear=True,
-            inverse=False,
-            contract_size="1",
-        ),
+    assert btc.identity == MarketIdentity(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market="perpetual",
+        settle="USDT",
     )
+    assert btc.active is True
+    assert btc.timeframes == frozenset({"1m", "1h"})
+    assert btc.tick_size == Decimal("0.1")
+    assert btc.size_increment == Decimal("0.001")
+    assert btc.derivative == DerivativeInterpretation(
+        linear=True,
+        inverse=False,
+        contract_size="1",
+    )
+    assert {item.timeframe for item in btc.bar_capabilities} == {"1m", "1h"}
     assert eth.active is False
     assert eth.tick_size == Decimal("0.01")
     assert not hasattr(btc, "native_market_id")
@@ -383,6 +393,37 @@ def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
     definitions = _market_data().fetch_markets(exchange="binance", market="spot")
 
     assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_fetch_markets_reports_availability_separately_from_verification() -> None:
+    exchange = FakeExchange(
+        client_id="kraken",
+        timeframes={"1m": "1m", "1h": "1h"},
+    )
+    _register_as("kraken", exchange)
+    provider = _ccxt_provider(
+        live_capability_provider=lambda _: LiveOHLCVCapability(
+            True,
+            frozenset({"1m"}),
+        )
+    )
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="kraken",
+        market="spot",
+    )
+
+    capabilities_by_timeframe = {item.timeframe: item for item in definition.bar_capabilities}
+    one_minute = capabilities_by_timeframe["1m"]
+    one_hour = capabilities_by_timeframe["1h"]
+    assert one_minute.historical.availability is Availability.AVAILABLE
+    assert one_minute.historical.verification is not None
+    assert one_minute.historical.verification.status is VerificationStatus.UNVERIFIED
+    assert one_minute.live.availability is Availability.AVAILABLE
+    assert one_minute.live.verification is not None
+    assert one_minute.live.verification.status is VerificationStatus.UNVERIFIED
+    assert one_hour.historical.availability is Availability.AVAILABLE
+    assert one_hour.live.availability is Availability.UNAVAILABLE
 
 
 def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
@@ -1509,18 +1550,138 @@ def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypat
     assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 2)]
 
 
-def test_unqualified_exchange_pagination_fails_closed() -> None:
+def test_unqualified_exchange_uses_presence_only_generic_pagination() -> None:
     identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
-    exchange = FakeExchange(client_id="kraken")
+    exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
     _exchanges["kraken"] = exchange
 
-    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
-        _fetch_bars(
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert observation.frame.height == 1
+    assert observation.observed == (
+        ObservedWindow(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        ),
+    )
+    assert observation.source.verification.status.value == "unverified"
+
+
+def test_generic_pagination_uses_advertised_ccxt_feature_limit() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        candles=[_row(0), _row(60_000)],
+        features={"spot": {"fetchOHLCV": {"limit": 2}}},
+    )
+    _register_as("kraken", exchange)
+
+    _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+    )
+
+    assert exchange.fetch_calls[0][3] == 2
+
+
+def test_generic_pagination_rejects_ignored_since() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=lambda *_: [_row(-60_000)],
+    )
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="ignored since"):
+        _observe(
             identity,
             "1m",
             datetime(2024, 1, 1, tzinfo=UTC),
-            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
         )
+
+
+def test_generic_pagination_rejects_conflicting_boundary_overlap() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def conflicting(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        if since == _BASE_MS:
+            return [_row(0), _row(60_000)]
+        return [_row(60_000, price=200), _row(120_000)]
+
+    exchange = FakeExchange(client_id="kraken", fetch_override=conflicting)
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="conflicting candles"):
+        _observe(
+            identity,
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+            page_limit=2,
+        )
+
+
+def test_generic_empty_first_page_probe_proves_only_returned_bar() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def empty_then_latest(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        return [_row(60_000)] if since is None else []
+
+    exchange = FakeExchange(client_id="kraken", fetch_override=empty_then_latest)
+    _register_as("kraken", exchange)
+
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+    )
+
+    assert observation.observed == (
+        ObservedWindow(
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+        ),
+    )
+
+
+def test_generic_right_tail_does_not_prove_requested_absence() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=lambda *_: [_row(180_000)],
+    )
+    _register_as("kraken", exchange)
+
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+    )
+
+    assert observation.frame.is_empty()
+    assert observation.observed == ()
 
 
 def test_qualified_profile_can_be_restricted_to_one_market_family() -> None:

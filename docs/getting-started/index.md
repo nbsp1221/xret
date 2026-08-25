@@ -27,10 +27,11 @@ bars = market_data.bars(
 )
 
 result = bars.sync(start="2024-01-01", end="2024-02-01")
+print(result.source.verification if result.source else "local no-op")
 result.require_complete()
 ```
 
-A spot dataset uses `market="spot"` and no `settle`. `sync` checks local coverage, fetches only missing intervals, validates bars, and commits canonical Parquet. Available coverage is persisted; a successful provider observation records each absent completed bar boundary as unavailable. A failed request does not mark data unavailable. Repeating a fully covered request is a canonical data/coverage no-op that still records operational ingestion-run provenance.
+A spot dataset uses `market="spot"` and no `settle`. `sync` checks local coverage, fetches only missing intervals, validates bars, and commits canonical Parquet. Available coverage is persisted; only an exhaustive observation can record an absent completed bar boundary as unavailable. An unproved interval stays missing, and a failed request does not mark data unavailable. Provider-advertised but unqualified CCXT scopes may run with explicit unverified evidence. Repeating a fully covered request is a canonical data/coverage no-op that still records operational ingestion-run provenance.
 
 ## Read complete local data
 

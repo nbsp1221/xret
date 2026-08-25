@@ -12,6 +12,7 @@ import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import BarRequest, Market, MarketIdentity, Verification
 from xret.data.providers.ccxt import (
+    capabilities,
     client,
     compatibility,
     markets,
@@ -70,6 +71,9 @@ class CcxtProvider:
         monotonic: Callable[[], float] = time.monotonic,
         tick_size_precision_mode_provider: Callable[[], int] = client.tick_size_precision_mode,
         live_exchange_factory: LiveExchangeFactory = create_live_exchange,
+        live_capability_provider: capabilities.LiveCapabilityProvider = (
+            capabilities.installed_live_ohlcv
+        ),
     ) -> None:
         self._exchange_factory = exchange_factory
         self._version_provider = version_provider
@@ -80,6 +84,7 @@ class CcxtProvider:
         self._monotonic = monotonic
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
+        self._live_capability_provider = live_capability_provider
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
         self._pacers_by_id: dict[str, client.RequestPacer] = {}
@@ -193,6 +198,8 @@ class CcxtProvider:
                 native_markets=compatible_markets,
                 exchange=ccxt_exchange,
                 tick_size_precision_mode=self._tick_size_precision_mode_provider(),
+                client_id=native_client_id,
+                live_capability=self._live_capability_provider(native_client_id),
             )
         except (ProviderError, UnsupportedMarketError):
             raise
@@ -232,6 +239,40 @@ class CcxtProvider:
             return ()
         return (f"volume.{policy.volume_mode.value}",)
 
+    def _live_verification(
+        self,
+        market: ResolvedBarMarket,
+        timeframe: str,
+    ) -> Verification:
+        return verification.live(
+            markets.client_id(market.identity),
+            market.identity.market.value,
+            market.identity.settle,
+            timeframe,
+        )
+
+    @staticmethod
+    def _live_supports_timeframe(
+        market: ResolvedBarMarket,
+        timeframe: str,
+    ) -> bool:
+        """Defer CCXT live capability enforcement to the Pro session metadata."""
+        del market, timeframe
+        return True
+
+    def _live_normalizations(
+        self,
+        market: ResolvedBarMarket,
+    ) -> tuple[str, ...]:
+        policy = compatibility.compatibility_policy(
+            markets.client_id(market.identity),
+            market.identity.market.value,
+        )
+        mode = policy.live_volume_mode or policy.volume_mode
+        if mode is compatibility.VolumeMode.BASE_ASSET:
+            return ()
+        return (f"live_volume.{mode.value}",)
+
     def observe_bars(
         self,
         request: BarRequest,
@@ -254,7 +295,7 @@ class CcxtProvider:
                 sleep=self._sleep,
             )
             result = pagination.paginate_ohlcv(
-                profile=compatibility.observation_profile(
+                profile=compatibility.find_observation_profile(
                     resolution.client_id,
                     market.identity.market.value,
                     market.identity.settle,
@@ -265,6 +306,11 @@ class CcxtProvider:
                 start=request.start,
                 end=request.end,
                 requested_limit=self._page_limit,
+                provider_limit=capabilities.ohlcv_page_limit(
+                    resolution.exchange,
+                    market_family=market.identity.market.value,
+                    metadata=resolution.native_market.metadata,
+                ),
                 fetch_page=lambda since_ms, limit, params: client.fetch_page(
                     resolution.exchange,
                     resolution.native_market.native_symbol,

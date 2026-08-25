@@ -44,16 +44,6 @@ class EndpointScope:
 
 
 @dataclass(frozen=True, slots=True)
-class LiveEndpointScope:
-    """An exact CCXT Pro scope whose canonical trade updates are qualified."""
-
-    client_id: str
-    market_family: MarketFamily
-    settle: str | None
-    timeframe: str
-
-
-@dataclass(frozen=True, slots=True)
 class CompatibilityPolicy:
     """Lossless semantic corrections known for one effective endpoint scope."""
 
@@ -268,18 +258,6 @@ _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
 }
 
 
-_LIVE_ENDPOINT_SCOPES: Final[frozenset[LiveEndpointScope]] = frozenset(
-    {
-        LiveEndpointScope("binance", "spot", None, "1m"),
-        LiveEndpointScope("binanceusdm", "perpetual", "USDT", "1m"),
-        LiveEndpointScope("bybit", "spot", None, "1m"),
-        LiveEndpointScope("bybit", "perpetual", "USDT", "1m"),
-        LiveEndpointScope("okx", "spot", None, "1m"),
-        LiveEndpointScope("okx", "perpetual", "USDT", "1m"),
-    }
-)
-
-
 def _validated_market_family(value: str) -> MarketFamily:
     if value == "spot":
         return "spot"
@@ -337,6 +315,20 @@ def observation_profile(
     return profile
 
 
+def find_observation_profile(
+    client_id: str,
+    market_family: str,
+    settle: str | None = None,
+) -> ObservationProfile | None:
+    """Return a bounded paginator policy when one is known.
+
+    Absence selects conservative generic pagination; it is not an execution
+    denial and says nothing about provider trust.
+    """
+    family = _validated_market_family(market_family)
+    return _OBSERVATION_PROFILES.get(EndpointScope(client_id, family, settle))
+
+
 def qualified_client_ids() -> tuple[str, ...]:
     """Installed CCXT client IDs covered by at least one observation profile."""
     return tuple(sorted({scope.client_id for scope in _OBSERVATION_PROFILES}))
@@ -365,23 +357,6 @@ def observation_profiles(
 def transport_policy(client_id: str) -> TransportPolicy:
     """Return the qualified client-wide transport correction, if any."""
     return _TRANSPORT_POLICIES.get(client_id, TransportPolicy())
-
-
-def require_live_endpoint(
-    client_id: str,
-    market_family: str,
-    settle: str | None,
-    timeframe: str,
-) -> None:
-    """Fail closed unless one exact CCXT Pro trade-bar scope is qualified."""
-    family = _validated_market_family(market_family)
-    scope = LiveEndpointScope(client_id, family, settle, timeframe)
-    if scope not in _LIVE_ENDPOINT_SCOPES:
-        suffix = f"/{settle}" if settle is not None else ""
-        raise UnsupportedMarketError(
-            f"{client_id}/{family}{suffix}/{timeframe} has no qualified canonical "
-            "CCXT Pro trade-bar contract"
-        )
 
 
 def validate_registries() -> None:
@@ -416,12 +391,6 @@ def validate_registries() -> None:
             raise ProviderError("CCXT transport client ID must not be empty")
         if policy.minimum_ohlcv_interval_seconds < 0:
             raise ProviderError(f"CCXT OHLCV interval must not be negative for {client_id!r}")
-    for scope in _LIVE_ENDPOINT_SCOPES:
-        if scope.market_family == "spot" and scope.settle is not None:
-            raise ProviderError(f"CCXT live spot scope cannot settle for {scope!r}")
-        if scope.market_family == "perpetual" and scope.settle is None:
-            raise ProviderError(f"CCXT live perpetual scope must settle exactly for {scope!r}")
-        TimeBar.parse(scope.timeframe)
 
 
 validate_registries()
