@@ -36,7 +36,7 @@ class CompatibilityScope:
 
 @dataclass(frozen=True, slots=True)
 class EndpointScope:
-    """The narrow operational scope of a qualified historical endpoint."""
+    """The narrow operational scope of a historical endpoint policy."""
 
     client_id: str
     market_family: MarketFamily
@@ -44,20 +44,11 @@ class EndpointScope:
 
 
 @dataclass(frozen=True, slots=True)
-class LiveEndpointScope:
-    """An exact CCXT Pro scope whose canonical trade updates are qualified."""
-
-    client_id: str
-    market_family: MarketFamily
-    settle: str | None
-    timeframe: str
-
-
-@dataclass(frozen=True, slots=True)
 class CompatibilityPolicy:
     """Lossless semantic corrections known for one effective endpoint scope."""
 
-    excluded_timeframes: frozenset[str] = frozenset()
+    historical_excluded_timeframes: frozenset[str] = frozenset()
+    live_excluded_timeframes: frozenset[str] = frozenset()
     volume_mode: VolumeMode = VolumeMode.BASE_ASSET
     live_volume_mode: VolumeMode | None = None
 
@@ -73,7 +64,7 @@ class NativeWindowParameters:
 
 @dataclass(frozen=True, slots=True)
 class ObservationProfile:
-    """Qualified bounded-window behavior for one historical endpoint scope."""
+    """Known bounded-window behavior for one historical endpoint scope."""
 
     max_bars: int
     max_span: timedelta | None = None
@@ -86,67 +77,77 @@ class ObservationProfile:
 
 @dataclass(frozen=True, slots=True)
 class TransportPolicy:
-    """Qualified transport constraints not represented accurately by CCXT."""
+    """Transport constraints not represented accurately by CCXT."""
 
     minimum_ohlcv_interval_seconds: float = 0.0
 
 
 _COMPATIBILITY_POLICIES: Final[dict[CompatibilityScope, CompatibilityPolicy]] = {
-    CompatibilityScope("aster"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h", "3d"})),
-    CompatibilityScope("bingx"): CompatibilityPolicy(excluded_timeframes=frozenset({"1M"})),
+    CompatibilityScope("aster"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1h", "3d"})
+    ),
+    CompatibilityScope("bingx"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1M"})
+    ),
     CompatibilityScope("bingx", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"6h", "12h", "1d", "3d", "1w"})
+        historical_excluded_timeframes=frozenset({"6h", "12h", "1d", "3d", "1w"})
     ),
-    CompatibilityScope("binance"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("binance"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"3d"})
+    ),
     CompatibilityScope("binanceusdm"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1s", "3d", "1w"})
+        historical_excluded_timeframes=frozenset({"1s", "3d", "1w"})
     ),
-    CompatibilityScope("bitfinex"): CompatibilityPolicy(excluded_timeframes=frozenset({"1w"})),
+    CompatibilityScope("bitfinex"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1w"})
+    ),
     CompatibilityScope("bitget", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"2h"})
+        historical_excluded_timeframes=frozenset({"2h"})
     ),
     CompatibilityScope("bitrue", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w"})
+        historical_excluded_timeframes=frozenset({"1d", "1w"})
     ),
     CompatibilityScope("bitstamp", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("bitso", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w"})
+        historical_excluded_timeframes=frozenset({"1d", "1w"})
     ),
     CompatibilityScope("btcturk", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("deribit"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"3h", "6h", "12h", "1d"})
+        historical_excluded_timeframes=frozenset({"3h", "6h", "12h", "1d"})
     ),
     CompatibilityScope("hyperliquid"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w", "1M"})
+        historical_excluded_timeframes=frozenset({"1w", "1M"})
     ),
     CompatibilityScope("htx"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1d", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"1d", "1w", "1M"})
     ),
     CompatibilityScope("krakenfutures", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("kucoin", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1w"})
+        historical_excluded_timeframes=frozenset({"1w"})
     ),
     CompatibilityScope("kucoinfutures", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"3m", "6h", "1M"}),
+        historical_excluded_timeframes=frozenset({"3m", "6h", "1M"}),
         volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
     ),
     CompatibilityScope("mexc", "spot"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"8h", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"8h", "1w", "1M"})
     ),
     CompatibilityScope("pacifica", "perpetual"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"1h"})
+        historical_excluded_timeframes=frozenset({"1h"})
     ),
-    CompatibilityScope("xt"): CompatibilityPolicy(excluded_timeframes=frozenset({"3d"})),
+    CompatibilityScope("xt"): CompatibilityPolicy(historical_excluded_timeframes=frozenset({"3d"})),
     CompatibilityScope("woo"): CompatibilityPolicy(
-        excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
+        historical_excluded_timeframes=frozenset({"4h", "12h", "1d", "1w", "1M"})
     ),
-    CompatibilityScope("woo", "spot"): CompatibilityPolicy(excluded_timeframes=frozenset({"1h"})),
+    CompatibilityScope("woo", "spot"): CompatibilityPolicy(
+        historical_excluded_timeframes=frozenset({"1h"})
+    ),
     **{
         CompatibilityScope(client_id, "perpetual"): CompatibilityPolicy(
             volume_mode=VolumeMode.LINEAR_CONTRACT_COUNT,
@@ -256,7 +257,7 @@ _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
     # margin avoids boundary bursts in its rolling limiter.
     "bitfinex": TransportPolicy(minimum_ohlcv_interval_seconds=2.2),
     # The public indexer returns sustained 429 responses at CCXT's current
-    # cadence. A one-second interval completed the qualification campaign.
+    # cadence. A one-second interval completed the live-network campaign.
     "dydx": TransportPolicy(minimum_ohlcv_interval_seconds=1.0),
     # Hyperliquid assigns candleSnapshot a base weight of 20 plus one unit per
     # 60 returned rows. CCXT 4.5.65 prices it as four base units, so its
@@ -266,18 +267,6 @@ _TRANSPORT_POLICIES: Final[dict[str, TransportPolicy]] = {
     # rolling window for each kline request.
     "pacifica": TransportPolicy(minimum_ohlcv_interval_seconds=8.0),
 }
-
-
-_LIVE_ENDPOINT_SCOPES: Final[frozenset[LiveEndpointScope]] = frozenset(
-    {
-        LiveEndpointScope("binance", "spot", None, "1m"),
-        LiveEndpointScope("binanceusdm", "perpetual", "USDT", "1m"),
-        LiveEndpointScope("bybit", "spot", None, "1m"),
-        LiveEndpointScope("bybit", "perpetual", "USDT", "1m"),
-        LiveEndpointScope("okx", "spot", None, "1m"),
-        LiveEndpointScope("okx", "perpetual", "USDT", "1m"),
-    }
-)
 
 
 def _validated_market_family(value: str) -> MarketFamily:
@@ -304,7 +293,12 @@ def compatibility_policy(
     if specific is None:
         return shared
     return CompatibilityPolicy(
-        excluded_timeframes=shared.excluded_timeframes | specific.excluded_timeframes,
+        historical_excluded_timeframes=(
+            shared.historical_excluded_timeframes | specific.historical_excluded_timeframes
+        ),
+        live_excluded_timeframes=(
+            shared.live_excluded_timeframes | specific.live_excluded_timeframes
+        ),
         volume_mode=specific.volume_mode,
         live_volume_mode=specific.live_volume_mode or shared.live_volume_mode,
     )
@@ -324,26 +318,40 @@ def observation_profile(
     market_family: str,
     settle: str | None = None,
 ) -> ObservationProfile:
-    """Return the exact or family-wide qualified historical profile, failing closed."""
+    """Return the exact configured historical profile, failing closed."""
     family = _validated_market_family(market_family)
     exact = EndpointScope(client_id, family, settle)
     profile = _OBSERVATION_PROFILES.get(exact)
     if profile is None:
         suffix = f"/{settle}" if settle is not None else ""
         raise UnsupportedMarketError(
-            f"{client_id}/{market_family}{suffix} has no qualified exhaustive "
+            f"{client_id}/{market_family}{suffix} has no configured exhaustive "
             "fetchOHLCV pagination contract"
         )
     return profile
 
 
-def qualified_client_ids() -> tuple[str, ...]:
+def find_observation_profile(
+    client_id: str,
+    market_family: str,
+    settle: str | None = None,
+) -> ObservationProfile | None:
+    """Return a bounded paginator policy when one is known.
+
+    Absence selects conservative generic pagination; it is not an execution
+    denial and says nothing about provider trust.
+    """
+    family = _validated_market_family(market_family)
+    return _OBSERVATION_PROFILES.get(EndpointScope(client_id, family, settle))
+
+
+def profiled_client_ids() -> tuple[str, ...]:
     """Installed CCXT client IDs covered by at least one observation profile."""
     return tuple(sorted({scope.client_id for scope in _OBSERVATION_PROFILES}))
 
 
 def has_observation_profile(client_id: str, market_family: MarketFamily) -> bool:
-    """Whether any settlement scope in one endpoint family is qualified."""
+    """Whether any settlement scope in one endpoint family has a profile."""
     return any(
         scope.client_id == client_id and scope.market_family == market_family
         for scope in _OBSERVATION_PROFILES
@@ -354,7 +362,7 @@ def observation_profiles(
     client_id: str,
     market_family: MarketFamily,
 ) -> tuple[ObservationProfile, ...]:
-    """All qualified settlement profiles for one endpoint family."""
+    """All configured settlement profiles for one endpoint family."""
     return tuple(
         profile
         for scope, profile in _OBSERVATION_PROFILES.items()
@@ -363,25 +371,8 @@ def observation_profiles(
 
 
 def transport_policy(client_id: str) -> TransportPolicy:
-    """Return the qualified client-wide transport correction, if any."""
+    """Return the known client-wide transport correction, if any."""
     return _TRANSPORT_POLICIES.get(client_id, TransportPolicy())
-
-
-def require_live_endpoint(
-    client_id: str,
-    market_family: str,
-    settle: str | None,
-    timeframe: str,
-) -> None:
-    """Fail closed unless one exact CCXT Pro trade-bar scope is qualified."""
-    family = _validated_market_family(market_family)
-    scope = LiveEndpointScope(client_id, family, settle, timeframe)
-    if scope not in _LIVE_ENDPOINT_SCOPES:
-        suffix = f"/{settle}" if settle is not None else ""
-        raise UnsupportedMarketError(
-            f"{client_id}/{family}{suffix}/{timeframe} has no qualified canonical "
-            "CCXT Pro trade-bar contract"
-        )
 
 
 def validate_registries() -> None:
@@ -389,7 +380,9 @@ def validate_registries() -> None:
     for scope, policy in _COMPATIBILITY_POLICIES.items():
         if not scope.client_id:
             raise ProviderError("CCXT compatibility client ID must not be empty")
-        for timeframe in policy.excluded_timeframes:
+        for timeframe in policy.historical_excluded_timeframes:
+            TimeBar.parse(timeframe)
+        for timeframe in policy.live_excluded_timeframes:
             TimeBar.parse(timeframe)
     for scope, profile in _OBSERVATION_PROFILES.items():
         if not scope.client_id:
@@ -416,12 +409,6 @@ def validate_registries() -> None:
             raise ProviderError("CCXT transport client ID must not be empty")
         if policy.minimum_ohlcv_interval_seconds < 0:
             raise ProviderError(f"CCXT OHLCV interval must not be negative for {client_id!r}")
-    for scope in _LIVE_ENDPOINT_SCOPES:
-        if scope.market_family == "spot" and scope.settle is not None:
-            raise ProviderError(f"CCXT live spot scope cannot settle for {scope!r}")
-        if scope.market_family == "perpetual" and scope.settle is None:
-            raise ProviderError(f"CCXT live perpetual scope must settle exactly for {scope!r}")
-        TimeBar.parse(scope.timeframe)
 
 
 validate_registries()

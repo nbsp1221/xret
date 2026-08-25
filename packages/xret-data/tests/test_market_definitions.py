@@ -12,6 +12,7 @@ from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMark
 from xret.data.market_data import MarketData
 from xret.data.providers import (
     PROVIDER_API_VERSION,
+    Availability,
     BarObservation,
     BarRequest,
     DerivativeInterpretation,
@@ -19,8 +20,10 @@ from xret.data.providers import (
     MarketDefinition,
     MarketDefinitionProvider,
     MarketIdentity,
+    OperationCapability,
     ProviderDescriptor,
     ResolvedBarMarket,
+    TimeBarCapability,
 )
 
 
@@ -97,6 +100,35 @@ def test_market_definition_is_an_immutable_domain_value() -> None:
     )
     with pytest.raises(AttributeError):
         definition.active = False  # type: ignore[misc]
+
+
+def test_market_definition_accepts_independent_historical_and_live_capabilities() -> None:
+    unavailable = OperationCapability(Availability.UNAVAILABLE)
+    definition = _spot_definition(
+        bar_capabilities=(
+            TimeBarCapability(
+                timeframe="1m",
+                historical=OperationCapability(Availability.AVAILABLE),
+                live=unavailable,
+            ),
+        )
+    )
+
+    assert definition.timeframes == frozenset({"1m", "1h"})
+    assert definition.bar_capabilities[0].historical.availability is Availability.AVAILABLE
+    assert definition.bar_capabilities[0].live.availability is Availability.UNAVAILABLE
+
+
+def test_market_definition_rejects_duplicate_capability_timeframes() -> None:
+    unavailable = OperationCapability(Availability.UNAVAILABLE)
+    capability = TimeBarCapability(
+        timeframe="1m",
+        historical=unavailable,
+        live=unavailable,
+    )
+
+    with pytest.raises(InvalidRequestError, match="must not repeat"):
+        _spot_definition(bar_capabilities=(capability, capability))
 
 
 @pytest.mark.parametrize(
@@ -238,7 +270,15 @@ def test_fetch_markets_uses_optional_provider_capability_without_storage_side_ef
         market="spot",
     )
 
-    assert result == (definition,)
+    assert len(result) == 1
+    assert result[0].identity == definition.identity
+    assert result[0].timeframes == definition.timeframes
+    assert {item.timeframe for item in result[0].bar_capabilities} == {"1m", "1h"}
+    assert all(
+        item.historical.availability is Availability.AVAILABLE
+        and item.live.availability is Availability.UNAVAILABLE
+        for item in result[0].bar_capabilities
+    )
     assert provider.calls == [("coinbase", Market.SPOT)]
     assert not config.state_dir.exists()
     assert not config.data_dir.exists()

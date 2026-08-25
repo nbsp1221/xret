@@ -13,8 +13,10 @@ def test_client_wide_and_market_specific_semantics_are_merged() -> None:
     spot = compatibility.compatibility_policy("bingx", "spot")
     perpetual = compatibility.compatibility_policy("bingx", "perpetual")
 
-    assert spot.excluded_timeframes == frozenset({"6h", "12h", "1d", "3d", "1w", "1M"})
-    assert perpetual.excluded_timeframes == frozenset({"1M"})
+    assert spot.historical_excluded_timeframes == frozenset({"6h", "12h", "1d", "3d", "1w", "1M"})
+    assert perpetual.historical_excluded_timeframes == frozenset({"1M"})
+    assert spot.live_excluded_timeframes == frozenset()
+    assert perpetual.live_excluded_timeframes == frozenset()
     assert compatibility.has_explicit_compatibility_policy("bingx", "perpetual")
     assert not compatibility.has_explicit_compatibility_policy("unknown", "perpetual")
 
@@ -83,11 +85,13 @@ def test_failed_semantic_scope_is_not_enabled_by_its_spot_sibling() -> None:
 
 
 def test_native_data_violations_exclude_the_entire_affected_timeframe() -> None:
-    assert compatibility.compatibility_policy("aster", "spot").excluded_timeframes == {
+    assert compatibility.compatibility_policy("aster", "spot").historical_excluded_timeframes == {
         "1h",
         "3d",
     }
-    assert compatibility.compatibility_policy("woo", "perpetual").excluded_timeframes == {
+    assert compatibility.compatibility_policy(
+        "woo", "perpetual"
+    ).historical_excluded_timeframes == {
         "4h",
         "12h",
         "1d",
@@ -135,7 +139,7 @@ def test_dydx_uses_the_exact_official_iso_window_parameter_names() -> None:
 def test_pacifica_excludes_the_reproducibly_malformed_hourly_endpoint() -> None:
     policy = compatibility.compatibility_policy("pacifica", "perpetual")
 
-    assert policy.excluded_timeframes == frozenset({"1h"})
+    assert policy.historical_excluded_timeframes == frozenset({"1h"})
 
 
 def test_unknown_market_family_fails_before_policy_lookup() -> None:
@@ -147,7 +151,9 @@ def test_registry_validation_rejects_invalid_timeframe(monkeypatch: pytest.Monke
     monkeypatch.setitem(
         compatibility._COMPATIBILITY_POLICIES,
         compatibility.CompatibilityScope("broken"),
-        compatibility.CompatibilityPolicy(excluded_timeframes=frozenset({"not-a-timeframe"})),
+        compatibility.CompatibilityPolicy(
+            historical_excluded_timeframes=frozenset({"not-a-timeframe"})
+        ),
     )
 
     with pytest.raises(InvalidRequestError, match="invalid timeframe"):
@@ -182,16 +188,6 @@ def test_registry_validation_rejects_family_wide_perpetual_profile(
 
 def test_current_registry_is_self_consistent() -> None:
     compatibility.validate_registries()
-
-
-def test_live_endpoint_qualification_is_exact_and_fail_closed() -> None:
-    compatibility.require_live_endpoint("binance", "spot", None, "1m")
-    compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDT", "1m")
-
-    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
-        compatibility.require_live_endpoint("binance", "spot", None, "5m")
-    with pytest.raises(UnsupportedMarketError, match="no qualified canonical"):
-        compatibility.require_live_endpoint("binanceusdm", "perpetual", "USDC", "1m")
 
 
 def test_documented_candle_rate_limit_overrides_optimistic_client_default() -> None:

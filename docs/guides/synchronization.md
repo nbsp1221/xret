@@ -22,9 +22,18 @@ bars = MarketData().bars(
 
 ```python
 remote = bars.fetch(start="2025-01-01", end="2025-01-02")
+frame = remote.data
+print(remote.source)
+print(remote.gaps)
 ```
 
-`fetch` always uses the provider, returns an eager Polars `DataFrame` of completed bars, and never reads or changes canonical local state. It traverses bounded provider windows across the complete request; an empty intermediate window does not hide data in later windows.
+`fetch` always uses the provider, returns a `FetchResult` whose `data` is an eager Polars frame of completed bars, and never reads or changes canonical local state. Exact bounded policies can prove empty intervals; the conservative generic strategy proves only validated returned bars. Any unproved remainder is an explicit `missing` gap.
+
+Require completeness explicitly when the application needs the entire interval:
+
+```python
+remote.require_complete()
+```
 
 ## Synchronize canonical data
 
@@ -39,7 +48,7 @@ print(result.written_partitions)
 
 `sync` fetches only implicit `missing` intervals and commits validated monthly canonical Parquet files. Persisted `available` means canonical bars exist. A successful exhaustive provider window records each absent completed bar boundary inside that window as `unavailable`; unobserved ranges remain `missing`, and failures never create negative coverage. Repeating a fully covered request is a canonical data/coverage no-op with `changed=False`, `fetched_rows=0`, and `written_partitions=0`, while still recording operational ingestion-run provenance.
 
-Remote `fetch` and `sync` fail with `UnsupportedMarketError` when the selected CCXT endpoint family has no qualified exhaustive OHLCV pagination contract. Xret does not guess a page horizon or silently return a partial range.
+Remote `fetch` and `sync` attempt provider-advertised CCXT scopes when Xret can represent their semantics without known loss. Prior qualification is not consulted. Results may remain incomplete when the provider cannot prove exhaustive bounds, so call `require_complete()` when incomplete remote or synchronized coverage is unacceptable. Unsupported capability, known exact incompatibility, malformed data, conflicting duplicates, ignored forward bounds, and non-progress still fail rather than entering canonical storage.
 
 Syncs serialize per dataset. Different datasets may overlap provider and temporary-file work.
 
@@ -65,3 +74,4 @@ print(partial.gaps)
 `scan_partial` is local-only and returns available rows with explicit coverage and gap intervals. It is the deliberate choice for incomplete local coverage.
 
 See the [API reference](../reference/api.md) for signatures and result fields.
+See [Provider support and trust](../explanation/provider-support.md) for the difference between capability, runtime validation, coverage, and separate qualification evidence.

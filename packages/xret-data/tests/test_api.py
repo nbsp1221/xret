@@ -200,9 +200,11 @@ def test_fetch_has_no_storage_side_effect(tmp_path: Path) -> None:
     _register(exchange)
     provider_runtime._set_clock_override(lambda: _now(5))
 
-    frame = _bars(_market_data(config)).fetch(_now(0), _now(3))
+    result = _bars(_market_data(config)).fetch(_now(0), _now(3))
 
-    assert frame.height == 3
+    assert result.data.height == 3
+    assert result.is_complete
+    assert result.source.provider_name == "ccxt"
     assert len(exchange.fetch_calls) == 1
     assert not config.state_dir.exists()
     assert not config.data_dir.exists()
@@ -338,18 +340,18 @@ def test_sync_rejects_incomplete_provider_observation_before_publication(
 
     bars = _bars(MarketData(config=config, provider=IncompleteProvider()))
 
-    with pytest.raises(ProviderError, match="incomplete provider observation"):
-        bars.sync(_now(0), _now(3))
+    result = bars.sync(_now(0), _now(3))
 
     partial = bars.scan_partial(_now(0), _now(3))
-    assert partial.data.collect().height == 0
+    assert result.fetched_rows == 1
+    assert partial.data.collect().height == 1
     assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
-        (_now(0), _now(3), CoverageStatus.MISSING)
+        (_now(1), _now(3), CoverageStatus.MISSING)
     }
-    assert not list(config.data_dir.rglob("*.parquet"))
+    assert list(config.data_dir.rglob("*.parquet"))
 
 
-def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> None:
+def test_generic_pagination_leaves_unproved_sync_coverage_missing(tmp_path: Path) -> None:
     config = _configure(tmp_path)
     exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
     _register_as("kraken", exchange)
@@ -357,15 +359,15 @@ def test_unqualified_pagination_leaves_sync_coverage_missing(tmp_path: Path) -> 
         exchange="kraken", symbol="BTC/USDT", market="spot", timeframe="1h"
     )
 
-    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
-        bars.sync(_now(0), _now(3))
+    result = bars.sync(_now(0), _now(3))
 
     partial = bars.scan_partial(_now(0), _now(3))
-    assert partial.data.collect().height == 0
+    assert result.fetched_rows == 1
+    assert partial.data.collect().height == 1
     assert {(gap.start, gap.end, gap.status) for gap in partial.gaps} == {
-        (_now(0), _now(3), CoverageStatus.MISSING)
+        (_now(1), _now(3), CoverageStatus.MISSING)
     }
-    assert not list(config.data_dir.rglob("*.parquet"))
+    assert list(config.data_dir.rglob("*.parquet"))
 
 
 def test_middle_page_failure_publishes_no_partial_observation(tmp_path: Path) -> None:
@@ -413,7 +415,8 @@ def test_nonfatal_quality_warning_is_run_linked_and_rebuild_resets_it(tmp_path: 
     result = _bars(_market_data(config)).sync(_now(0), _now(3))
 
     assert [(warning.code, warning.start, warning.end) for warning in result.warnings] == [
-        ("coverage.timeframe_gap", _now(0), _now(3))
+        ("coverage.timeframe_gap", _now(0), _now(3)),
+        ("coverage.unavailable", _now(1), _now(2)),
     ]
     with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
         events = catalog.list_quality_events(result.dataset_key)

@@ -1,8 +1,6 @@
 """Public import-surface tests for `xret.data` (S5).
 
-`xret.data` exports exactly eight public names: the `MarketData` facade,
-its `MarketDataConfig`, `BarDataset`, `LiveMarketData`, live `BarUpdate` and
-`BarFinality`, and the two result types (`SyncResult`, `PartialScanResult`).
+`xret.data` exports the facade, runtime evidence contracts, and result types.
 Every exception lives in `xret.data.errors` only -- never re-exported at the
 package top level.
 """
@@ -20,7 +18,7 @@ def test_package_is_importable() -> None:
     assert xret.data.__doc__ == "Trusted market data infrastructure for Xret."
 
 
-def test_public_surface_is_exactly_eight_names() -> None:
+def test_public_surface_exposes_runtime_evidence_contracts() -> None:
     import xret.data
 
     assert set(xret.data.__all__) == {
@@ -32,6 +30,13 @@ def test_public_surface_is_exactly_eight_names() -> None:
         "LiveMarketData",
         "SyncResult",
         "PartialScanResult",
+        "Availability",
+        "CapabilityNotice",
+        "OperationCapability",
+        "TimeBarCapability",
+        "ProviderEvidence",
+        "FetchResult",
+        "LiveSubscription",
     }
 
 
@@ -46,6 +51,13 @@ def test_public_surface_is_exactly_eight_names() -> None:
         "LiveMarketData",
         "SyncResult",
         "PartialScanResult",
+        "Availability",
+        "CapabilityNotice",
+        "OperationCapability",
+        "TimeBarCapability",
+        "ProviderEvidence",
+        "FetchResult",
+        "LiveSubscription",
     ],
 )
 def test_every_declared_public_name_is_importable(name: str) -> None:
@@ -137,6 +149,10 @@ def test_provider_author_surface_is_explicit_and_importable() -> None:
         "ProviderDescriptor",
         "ProviderBarUpdate",
         "ResolvedBarMarket",
+        "Availability",
+        "CapabilityNotice",
+        "OperationCapability",
+        "TimeBarCapability",
     }
     for name in xret.data.providers.__all__:
         assert hasattr(xret.data.providers, name)

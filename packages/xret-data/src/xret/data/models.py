@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
-from xret.data.errors import InvalidRequestError, SyncError, UnsupportedMarketError
+from xret.data.errors import InvalidRequestError, ProviderError, SyncError, UnsupportedMarketError
 from xret.data.timeframe import TimeBar
 
 if TYPE_CHECKING:
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CoverageStatus",
+    "Availability",
     "BarFinality",
     "Market",
     "QualitySeverity",
@@ -30,6 +31,12 @@ __all__ = [
     "BarRequest",
     "BarUpdate",
     "DataWarning",
+    "CapabilityNotice",
+    "OperationCapability",
+    "TimeBarCapability",
+    "ProviderEvidence",
+    "FetchResult",
+    "LiveSubscription",
     "DatasetKey",
     "NONE_SETTLE_SENTINEL",
     "YearMonth",
@@ -58,6 +65,14 @@ class CoverageStatus(enum.Enum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     MISSING = "missing"
+
+
+class Availability(enum.StrEnum):
+    """Whether a provider operation can satisfy one Xret request scope."""
+
+    AVAILABLE = "available"
+    UNAVAILABLE = "unavailable"
+    INCOMPATIBLE = "incompatible"
 
 
 class BarFinality(enum.Enum):
@@ -455,6 +470,122 @@ class DataWarning:
     end: datetime | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CapabilityNotice:
+    """One stable discovery-time fact about a provider operation."""
+
+    code: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.code, str) or not self.code:
+            raise InvalidRequestError("capability notice code must be a nonempty string")
+        if not isinstance(self.message, str) or not self.message:
+            raise InvalidRequestError("capability notice message must be a nonempty string")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationCapability:
+    """Current provider availability and notices for one operation."""
+
+    availability: Availability
+    notices: tuple[CapabilityNotice, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.availability, Availability):
+            raise InvalidRequestError("operation availability must be an Availability")
+        if not isinstance(self.notices, tuple) or not all(
+            isinstance(notice, CapabilityNotice) for notice in self.notices
+        ):
+            raise InvalidRequestError("operation notices must be CapabilityNotice values")
+
+
+@dataclass(frozen=True, slots=True)
+class TimeBarCapability:
+    """Historical and live capability facts for one canonical timeframe."""
+
+    timeframe: str
+    historical: OperationCapability
+    live: OperationCapability
+
+    def __post_init__(self) -> None:
+        TimeBar.parse(self.timeframe)
+        if not isinstance(self.historical, OperationCapability):
+            raise InvalidRequestError("historical capability must be an OperationCapability")
+        if not isinstance(self.live, OperationCapability):
+            raise InvalidRequestError("live capability must be an OperationCapability")
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvidence:
+    """Provider-native provenance for one remote operation."""
+
+    provider_name: str
+    provider_version: str
+    provider_api_version: int
+    native_market_id: str
+    native_symbol: str
+    normalizations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "provider_name",
+            "provider_version",
+            "native_market_id",
+            "native_symbol",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value:
+                raise InvalidRequestError(f"{field_name} must be a nonempty string")
+        if (
+            isinstance(self.provider_api_version, bool)
+            or not isinstance(self.provider_api_version, int)
+            or self.provider_api_version <= 0
+        ):
+            raise InvalidRequestError("provider_api_version must be a positive integer")
+        if not isinstance(self.normalizations, tuple) or not all(
+            isinstance(value, str) and value for value in self.normalizations
+        ):
+            raise InvalidRequestError("provider normalizations must be nonempty strings")
+        if len(set(self.normalizations)) != len(self.normalizations):
+            raise InvalidRequestError("provider normalizations must not contain duplicates")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FetchResult:
+    """Validated remote rows, evidence, and coverage for `BarDataset.fetch`."""
+
+    dataset_key: DatasetKey
+    data: pl.DataFrame
+    covered: tuple[CoverageInterval, ...]
+    source: ProviderEvidence
+    gaps: tuple[CoverageInterval, ...] = ()
+    warnings: tuple[DataWarning, ...] = ()
+
+    @property
+    def is_complete(self) -> bool:
+        """Whether the provider observation proved the entire request."""
+        return not self.gaps
+
+    def require_complete(self) -> FetchResult:
+        """Return `self` if complete, otherwise raise `ProviderError`."""
+        if not self.is_complete:
+            raise ProviderError(
+                f"fetch of {self.dataset_key!r} did not fully complete: "
+                f"{len(self.gaps)} gap(s) remain"
+            )
+        return self
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LiveSubscription:
+    """Accepted live subscription identity, source evidence, and notices."""
+
+    dataset_key: DatasetKey
+    source: ProviderEvidence
+    warnings: tuple[DataWarning, ...] = ()
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SyncResult:
     """Outcome of `BarDataset.sync` (Decision 16).
@@ -475,6 +606,7 @@ class SyncResult:
     covered: tuple[CoverageInterval, ...]
     gaps: tuple[CoverageInterval, ...] = ()
     warnings: tuple[DataWarning, ...] = ()
+    source: ProviderEvidence | None = None
 
     @property
     def is_complete(self) -> bool:

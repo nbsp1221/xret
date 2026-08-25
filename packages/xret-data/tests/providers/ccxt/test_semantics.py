@@ -151,6 +151,16 @@ def test_proven_incompatible_endpoint_timeframes_are_removed_by_scope() -> None:
     assert semantics.canonical_timeframes("hyperliquid", {"1m", "1w", "1M"}) == frozenset({"1m"})
 
 
+def test_historical_incompatibility_does_not_block_live_without_live_evidence() -> None:
+    advertised = {"1m", "3d", "1w"}
+
+    assert semantics.canonical_timeframes(
+        "binanceusdm",
+        advertised,
+        operation="live",
+    ) == frozenset(advertised)
+
+
 def test_market_specific_timeframe_mismatch_does_not_hide_valid_sibling_scope() -> None:
     advertised = {"1m", "2h", "4h"}
 

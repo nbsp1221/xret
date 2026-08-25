@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from xret.data.errors import UnsupportedMarketError
 from xret.data.providers.ccxt.compatibility import (
@@ -35,10 +35,16 @@ def canonical_timeframes(
     market: Mapping[str, Any] | None = None,
     *,
     policy: CompatibilityPolicy | None = None,
+    operation: Literal["historical", "live"] = "historical",
 ) -> frozenset[str]:
     """Remove only endpoint/timeframe pairs proven incompatible with Xret."""
     effective = policy or compatibility_policy(client_id, _market_family(market))
-    return frozenset(advertised - effective.excluded_timeframes)
+    excluded = (
+        effective.historical_excluded_timeframes
+        if operation == "historical"
+        else effective.live_excluded_timeframes
+    )
+    return frozenset(advertised - excluded)
 
 
 def supports_canonical_volume(
@@ -67,7 +73,7 @@ def normalize_ohlcv(
     *,
     policy: CompatibilityPolicy | None = None,
 ) -> tuple[tuple[float, ...], ...]:
-    """Convert a qualified native candle volume unit to base quantity."""
+    """Convert a known native candle volume unit to base quantity."""
     effective = policy or compatibility_policy(client_id, _market_family(market))
     if effective.volume_mode is VolumeMode.BASE_ASSET:
         return rows
@@ -88,11 +94,11 @@ def normalize_live_volume(
     market: ResolvedBarMarket,
     volume: float,
 ) -> float:
-    """Convert a qualified CCXT Pro candle volume to base quantity.
+    """Convert a known CCXT Pro candle volume to base quantity.
 
     Historical and WebSocket adapters can select different native fields. The
-    live channel inherits the historical representation unless qualification
-    records an explicit delivery-channel override.
+    live channel inherits the historical representation unless the
+    compatibility policy records an explicit delivery-channel override.
     """
     policy = compatibility_policy(client_id, market.identity.market.value)
     live_volume_mode = policy.live_volume_mode or policy.volume_mode

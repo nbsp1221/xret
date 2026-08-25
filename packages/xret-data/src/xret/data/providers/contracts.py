@@ -11,7 +11,7 @@ from typing import Final, Protocol, Self
 
 import polars as pl
 from xret.data.errors import InvalidRequestError, ProviderError
-from xret.data.models import BarRequest, Market, MarketIdentity
+from xret.data.models import BarRequest, Market, MarketIdentity, TimeBarCapability
 from xret.data.timeframe import TimeBar
 
 __all__ = [
@@ -139,7 +139,7 @@ class MarketDefinition:
     """One provider-advertised market translated into Xret vocabulary.
 
     `timeframes` contains provider-advertised bar types that Xret can express;
-    it is not an Xret verification or exhaustive-pagination claim. `tick_size`
+    it is not an Xret qualification or exhaustive-pagination claim. `tick_size`
     and `size_increment` are exact fixed increments when the provider exposes
     them with unambiguous semantics, otherwise `None`.
     """
@@ -150,6 +150,7 @@ class MarketDefinition:
     tick_size: Decimal | None
     size_increment: Decimal | None
     derivative: DerivativeInterpretation | None = None
+    bar_capabilities: tuple[TimeBarCapability, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, MarketIdentity):
@@ -163,6 +164,17 @@ class MarketDefinition:
         _validate_increment(self.tick_size, field_name="tick_size")
         _validate_increment(self.size_increment, field_name="size_increment")
         _validate_derivative(self.derivative, owner="market definition")
+        if not isinstance(self.bar_capabilities, tuple) or not all(
+            isinstance(capability, TimeBarCapability) for capability in self.bar_capabilities
+        ):
+            raise InvalidRequestError(
+                "market definition bar_capabilities must be TimeBarCapability values"
+            )
+        capability_timeframes = [capability.timeframe for capability in self.bar_capabilities]
+        if len(set(capability_timeframes)) != len(capability_timeframes):
+            raise InvalidRequestError(
+                "market definition bar_capabilities must not repeat a timeframe"
+            )
         if self.identity.market is Market.PERPETUAL and self.identity.settle is None:
             raise InvalidRequestError("perpetual market definition must include settle")
         if self.identity.market is Market.SPOT and self.derivative is not None:
@@ -180,7 +192,11 @@ def _validate_increment(value: Decimal | None, *, field_name: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class ObservedWindow:
-    """One exhaustively observed UTC half-open provider time window."""
+    """One exhaustively observed UTC half-open provider time window.
+
+    A provider observation may contain an ordered, non-overlapping subset of
+    its request. Absence has meaning only inside these windows.
+    """
 
     start: datetime
     end: datetime
@@ -203,7 +219,9 @@ class BarObservation:
 
     Rows use inclusive UTC interval starts, trade-derived OHLC values, and
     base-asset volume. A provider must fail before constructing an observation
-    when its native source cannot satisfy those meanings losslessly.
+    when its native source cannot satisfy those meanings losslessly. `observed`
+    may be a partial subset of the request, but every returned row must fall
+    inside one of its exhaustive windows.
     """
 
     frame: pl.DataFrame

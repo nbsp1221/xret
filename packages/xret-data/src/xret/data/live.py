@@ -11,9 +11,16 @@ from types import TracebackType
 
 from xret.data.dataset import BarDataset
 from xret.data.errors import InvalidRequestError, ProviderError
-from xret.data.models import BarUpdate, MarketIdentity
+from xret.data.models import (
+    BarUpdate,
+    DatasetKey,
+    DataWarning,
+    LiveSubscription,
+    MarketIdentity,
+)
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.live_runtime import LiveBarRuntime
+from xret.data.warnings import normalized_warnings
 
 _DEFAULT_QUEUE_SIZE = 1024
 
@@ -142,7 +149,7 @@ class LiveMarketData:
         bars: BarDataset,
         *,
         bootstrap: bool = False,
-    ) -> None:
+    ) -> LiveSubscription:
         if self._state is not _State.OPEN or self._runtime is None:
             raise InvalidRequestError("live subscriptions require an open session")
         if not isinstance(bars, BarDataset):
@@ -180,8 +187,26 @@ class LiveMarketData:
         self._requested.add(requested)
         if self._reader is None:
             self._reader = asyncio.create_task(self._read_updates())
+        bootstrap_partial = False
         if gate is not None:
-            await self._bootstrap(key, gate)
+            bootstrap_partial = await self._bootstrap(key, gate)
+        evidence = self._runtime.subscription_evidence(resolved, bars.timeframe)
+        warnings = list(self._runtime.subscription_warnings(resolved, bars.timeframe))
+        if bootstrap_partial:
+            warnings.append(
+                DataWarning(
+                    "live.bootstrap_partial",
+                    "The recent historical bootstrap did not prove every requested interval",
+                )
+            )
+        return LiveSubscription(
+            dataset_key=DatasetKey.from_identity(
+                resolved.identity,
+                timeframe=bars.timeframe,
+            ),
+            source=evidence,
+            warnings=normalized_warnings(warnings),
+        )
 
     def __aiter__(self) -> LiveMarketData:
         return self
@@ -223,7 +248,7 @@ class LiveMarketData:
         self,
         key: tuple[MarketIdentity, str],
         gate: _BootstrapGate,
-    ) -> None:
+    ) -> bool:
         assert self._runtime is not None
         try:
             await gate.ready.wait()
@@ -232,7 +257,7 @@ class LiveMarketData:
             snapshot = await self._runtime.recent_closed(key, count=2)
             if gate.failure is not None:
                 raise gate.failure
-            merged = {update.timestamp: update for update in snapshot}
+            merged = {update.timestamp: update for update in snapshot.updates}
             for update in gate.buffer:
                 merged[update.timestamp] = update
             for timestamp in sorted(merged):
@@ -240,6 +265,7 @@ class LiveMarketData:
                     assert self._failure is not None
                     raise self._failure
             self._routes[key] = None
+            return not snapshot.is_complete
         except asyncio.CancelledError:
             self._publish_failure(
                 ProviderError("live bootstrap was cancelled after subscription activation")

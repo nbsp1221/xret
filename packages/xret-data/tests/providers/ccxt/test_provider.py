@@ -16,11 +16,16 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import BarRequest, Market, MarketIdentity
-from xret.data.providers import DerivativeInterpretation, MarketDefinition, ResolvedBarMarket
+from xret.data.models import Availability, BarRequest, Market, MarketIdentity
+from xret.data.providers import (
+    DerivativeInterpretation,
+    ObservedWindow,
+    ResolvedBarMarket,
+)
 from xret.data.providers import runtime as provider_runtime
 from xret.data.providers.ccxt import CcxtProvider, client, compatibility, markets
 from xret.data.providers.ccxt import provider as ccxt_provider
+from xret.data.providers.ccxt.capabilities import LiveOHLCVCapability
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_COLUMNS
 from xret.data.timeframe import TimeBar
@@ -53,12 +58,14 @@ class FakeExchange:
         fetch_override=None,
         page_size: int | None = None,
         precision_mode: int = 4,
+        features: dict | None = None,
     ) -> None:
         self.id = client_id
         self.has = {"fetchOHLCV": has_fetch_ohlcv}
         self.markets = markets if markets is not None else _default_markets()
         self.timeframes = timeframes if timeframes is not None else {"1m": "1m", "1h": "1h"}
         self.precisionMode = precision_mode
+        self.features = features
         self._candles = candles or []
         self._fetch_override = fetch_override
         self._page_size = page_size
@@ -148,6 +155,10 @@ def _exchange_factory(client_id: str) -> FakeExchange:
 
 
 def _ccxt_provider(**options) -> CcxtProvider:
+    options.setdefault(
+        "live_capability_provider",
+        lambda _: LiveOHLCVCapability(False, None),
+    )
     return CcxtProvider(
         exchange_factory=_exchange_factory,
         version_provider=lambda: "4.5.0",
@@ -337,23 +348,22 @@ def test_fetch_markets_translates_all_selected_perpetuals_without_ui_filtering()
     by_symbol = {definition.identity.symbol: definition for definition in definitions}
     btc = by_symbol["BTC/USDT"]
     eth = by_symbol["ETH/USDT"]
-    assert btc == MarketDefinition(
-        identity=MarketIdentity(
-            exchange="binance",
-            symbol="BTC/USDT",
-            market="perpetual",
-            settle="USDT",
-        ),
-        active=True,
-        timeframes=frozenset({"1m", "1h"}),
-        tick_size=Decimal("0.1"),
-        size_increment=Decimal("0.001"),
-        derivative=DerivativeInterpretation(
-            linear=True,
-            inverse=False,
-            contract_size="1",
-        ),
+    assert btc.identity == MarketIdentity(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market="perpetual",
+        settle="USDT",
     )
+    assert btc.active is True
+    assert btc.timeframes == frozenset({"1m", "1h"})
+    assert btc.tick_size == Decimal("0.1")
+    assert btc.size_increment == Decimal("0.001")
+    assert btc.derivative == DerivativeInterpretation(
+        linear=True,
+        inverse=False,
+        contract_size="1",
+    )
+    assert {item.timeframe for item in btc.bar_capabilities} == {"1m", "1h"}
     assert eth.active is False
     assert eth.tick_size == Decimal("0.01")
     assert not hasattr(btc, "native_market_id")
@@ -383,6 +393,78 @@ def test_fetch_markets_does_not_require_bar_observation_capability() -> None:
     definitions = _market_data().fetch_markets(exchange="binance", market="spot")
 
     assert [definition.identity.symbol for definition in definitions] == ["BTC/USDT"]
+
+
+def test_fetch_markets_reports_historical_and_live_availability() -> None:
+    exchange = FakeExchange(
+        client_id="kraken",
+        timeframes={"1m": "1m", "1h": "1h"},
+    )
+    _register_as("kraken", exchange)
+    provider = _ccxt_provider(
+        live_capability_provider=lambda _: LiveOHLCVCapability(
+            True,
+            frozenset({"1m"}),
+        )
+    )
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="kraken",
+        market="spot",
+    )
+
+    capabilities_by_timeframe = {item.timeframe: item for item in definition.bar_capabilities}
+    one_minute = capabilities_by_timeframe["1m"]
+    one_hour = capabilities_by_timeframe["1h"]
+    assert one_minute.historical.availability is Availability.AVAILABLE
+    assert one_minute.live.availability is Availability.AVAILABLE
+    assert one_hour.historical.availability is Availability.AVAILABLE
+    assert one_hour.live.availability is Availability.UNAVAILABLE
+
+
+def test_historical_incompatibility_does_not_hide_live_capability() -> None:
+    exchange = FakeExchange(
+        client_id="binance",
+        timeframes={"3d": "3d"},
+    )
+    _register_spot(exchange)
+    provider = _ccxt_provider(
+        live_capability_provider=lambda _: LiveOHLCVCapability(
+            True,
+            frozenset({"3d"}),
+        )
+    )
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="binance",
+        market="spot",
+    )
+
+    (capability,) = definition.bar_capabilities
+    assert capability.timeframe == "3d"
+    assert capability.historical.availability is Availability.INCOMPATIBLE
+    assert capability.live.availability is Availability.AVAILABLE
+
+
+def test_unreported_live_timeframes_are_available_with_notice() -> None:
+    exchange = FakeExchange(client_id="kraken", timeframes={"1m": "1m"})
+    _register_as("kraken", exchange)
+    provider = _ccxt_provider(live_capability_provider=lambda _: LiveOHLCVCapability(True, None))
+
+    (definition,) = MarketData(provider=provider).fetch_markets(
+        exchange="kraken",
+        market="spot",
+    )
+    (capability,) = definition.bar_capabilities
+    resolved = provider.resolve_market(definition.identity)
+
+    assert capability.live.availability is Availability.AVAILABLE
+    assert [notice.code for notice in capability.live.notices] == [
+        "provider.live_timeframes_unreported",
+    ]
+    assert [warning.code for warning in provider._live_warnings(resolved, "1m")] == [
+        "provider.live_timeframes_unreported"
+    ]
 
 
 def test_shared_client_reloads_market_metadata_for_discovery_and_resolution() -> None:
@@ -674,7 +756,7 @@ def test_omitted_settle_infers_the_single_safe_candidate() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert (frame["settle"] == "USDT").all()
+    assert (frame.data["settle"] == "USDT").all()
     assert exchange.fetch_calls[0][0] == "BTC/USDT:USDT"
 
 
@@ -792,7 +874,7 @@ def test_explicit_settle_never_reads_other_candidates() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert (frame["settle"] == "USDT").all()
+    assert (frame.data["settle"] == "USDT").all()
     assert exchange.fetch_calls[0][0] == "BTC/USDT:USDT"
 
 
@@ -813,8 +895,8 @@ def test_spot_fetch_uses_the_public_symbol_as_the_native_symbol() -> None:
     )
 
     assert exchange.fetch_calls[0][0] == "BTC/USDT"
-    assert frame["settle"].null_count() == frame.height
-    assert (frame["market"] == "spot").all()
+    assert frame.data["settle"].null_count() == frame.data.height
+    assert (frame.data["market"] == "spot").all()
 
 
 def test_observation_spot_metadata_uses_the_resolved_ccxt_market() -> None:
@@ -1072,9 +1154,9 @@ def test_fetch_returns_canonical_schema_with_no_run_id() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     )
 
-    assert tuple(frame.columns) == OHLCV_COLUMNS
-    assert "run_id" not in frame.columns
-    row = frame.row(0, named=True)
+    assert tuple(frame.data.columns) == OHLCV_COLUMNS
+    assert "run_id" not in frame.data.columns
+    row = frame.data.row(0, named=True)
     assert row["exchange"] == "binance"
     assert row["symbol"] == "BTC/USDT"
     assert row["market"] == "spot"
@@ -1089,7 +1171,7 @@ def test_fetch_has_no_local_side_effects_and_is_repeatable() -> None:
     first = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
     second = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
 
-    assert first.equals(second)
+    assert first.data.equals(second.data)
     assert exchange.load_markets_calls == 1
     assert len(exchange.fetch_calls) == 2
 
@@ -1509,18 +1591,166 @@ def test_qualified_closed_native_window_discards_only_its_end_boundary(monkeypat
     assert exchange.fetch_calls == [("BTC/USDT", "1m", _BASE_MS, 2)]
 
 
-def test_unqualified_exchange_pagination_fails_closed() -> None:
+def test_unprofiled_exchange_uses_presence_only_generic_pagination() -> None:
     identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
-    exchange = FakeExchange(client_id="kraken")
+    exchange = FakeExchange(client_id="kraken", candles=[_row(0)])
     _exchanges["kraken"] = exchange
 
-    with pytest.raises(UnsupportedMarketError, match="no qualified exhaustive"):
-        _fetch_bars(
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+    )
+
+    assert observation.frame.height == 1
+    assert observation.observed == (
+        ObservedWindow(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        ),
+    )
+
+
+def test_generic_pagination_uses_advertised_ccxt_feature_limit() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        candles=[_row(0), _row(60_000)],
+        features={"spot": {"fetchOHLCV": {"limit": 2}}},
+    )
+    _register_as("kraken", exchange)
+
+    _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+    )
+
+    assert exchange.fetch_calls[0][3] == 2
+
+
+def test_generic_pagination_rejects_ignored_since() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=lambda *_: [_row(-60_000)],
+    )
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="ignored since"):
+        _observe(
             identity,
             "1m",
             datetime(2024, 1, 1, tzinfo=UTC),
-            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
         )
+
+
+def test_generic_pagination_rejects_conflicting_boundary_overlap() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def conflicting(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        if since == _BASE_MS:
+            return [_row(0), _row(60_000)]
+        return [_row(60_000, price=200), _row(120_000)]
+
+    exchange = FakeExchange(client_id="kraken", fetch_override=conflicting)
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="conflicting candles"):
+        _observe(
+            identity,
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+            page_limit=2,
+        )
+
+
+def test_generic_empty_first_page_probe_proves_only_returned_bar() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def empty_then_latest(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        return [_row(60_000)] if since is None else []
+
+    exchange = FakeExchange(client_id="kraken", fetch_override=empty_then_latest)
+    _register_as("kraken", exchange)
+
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+    )
+
+    assert observation.observed == (
+        ObservedWindow(
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
+        ),
+    )
+
+
+def test_generic_empty_first_page_probe_rejects_conflicting_duplicates() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def empty_then_conflicting_latest(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        if since is not None:
+            return []
+        return [_row(60_000), _row(60_000, price=200)]
+
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=empty_then_conflicting_latest,
+    )
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="conflicting candles"):
+        _observe(
+            identity,
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+        )
+
+
+def test_generic_right_tail_does_not_prove_requested_absence() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=lambda *_: [_row(180_000)],
+    )
+    _register_as("kraken", exchange)
+
+    observation = _observe(
+        identity,
+        "1m",
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+    )
+
+    assert observation.frame.is_empty()
+    assert observation.observed == ()
 
 
 def test_qualified_profile_can_be_restricted_to_one_market_family() -> None:
@@ -1893,7 +2123,7 @@ def test_request_range_filter_is_half_open() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 3, tzinfo=UTC))
     )
 
-    assert frame.height == 3
+    assert frame.data.height == 3
 
 
 def test_nonpositive_page_limit_raises_provider_error() -> None:
@@ -1964,7 +2194,7 @@ def test_candle_within_grace_window_is_dropped() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
     )
 
-    assert frame["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+    assert frame.data["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
 
 
 def test_candle_past_grace_window_is_included() -> None:
@@ -1980,7 +2210,7 @@ def test_candle_past_grace_window_is_included() -> None:
         .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
     )
 
-    assert frame.height == 2
+    assert frame.data.height == 2
 
 
 # --------------------------------------------------------------------------
@@ -2006,7 +2236,7 @@ def test_fetch_with_omitted_end_uses_provider_grace_boundary() -> None:
         .fetch(datetime(2023, 12, 31, 23, 59, tzinfo=UTC))
     )
 
-    assert frame.height == 0  # [23:59, 00:00) excludes the t=0 candle
+    assert frame.data.height == 0  # [23:59, 00:00) excludes the t=0 candle
 
 
 # --------------------------------------------------------------------------
@@ -2046,7 +2276,7 @@ def test_transient_error_retries_and_recovers(monkeypatch: pytest.MonkeyPatch) -
         )
     )
 
-    assert frame.height == 1
+    assert frame.data.height == 1
     assert attempts["count"] == 3
     assert len(sleeps) == 2
 

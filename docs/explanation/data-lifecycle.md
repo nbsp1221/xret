@@ -8,9 +8,9 @@ A dataset is identified by exchange, `BASE/QUOTE` symbol, market family, settlem
 
 ## Remote observation: `fetch`
 
-`fetch` gets completed bars from the provider and returns an eager Polars `DataFrame`. It does not read or change canonical local state.
+`fetch` gets completed bars from the provider and returns a `FetchResult` containing an eager Polars `DataFrame`, coverage, gaps, provider evidence, and warnings. It does not read or change canonical local state.
 
-Returned rows and observation evidence are separate facts. Xret traverses qualified, bounded provider windows across the requested range. A successful empty window proves only that window contains no returned candles; it does not terminate traversal or imply that later history is empty. If exhaustive window semantics are not qualified for an endpoint family, the remote operation fails closed.
+Returned rows and observation evidence are separate facts. Xret traverses exact bounded windows when their behavior is established; a successful empty exact window proves only that window contains no returned candles and does not hide later history. Otherwise Xret uses a conservative presence-only strategy: valid returned bars prove their intervals, while an empty or partial response leaves all unproved time `missing`. Qualification is maintained outside this runtime lifecycle as historical QA evidence.
 
 ## Canonical reconciliation: `sync`
 

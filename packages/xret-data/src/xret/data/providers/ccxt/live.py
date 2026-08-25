@@ -18,6 +18,7 @@ DEFAULT_LIVE_QUEUE_SIZE = 1024
 class AsyncCcxtExchange(Protocol):
     id: str
     has: dict[str, object]
+    timeframes: dict[str, object] | None
 
     async def load_markets(self) -> object: ...
 
@@ -128,13 +129,8 @@ class CcxtLiveBarSession:
         if key in self._subscriptions:
             raise ProviderError(f"duplicate CCXT live subscription: {key!r}")
         client_id = markets.client_id(market.identity)
-        compatibility.require_live_endpoint(
-            client_id,
-            market.identity.market.value,
-            market.identity.settle,
-            timeframe,
-        )
         client = self._clients.get(client_id)
+        new_client = client is None
         if client is None:
             client = self._exchange_factory(client_id)
             try:
@@ -155,6 +151,26 @@ class CcxtLiveBarSession:
                 raise UnsupportedMarketError(
                     f"CCXT Pro client {client_id!r} does not support watchOHLCV"
                 )
+        advertised = getattr(client, "timeframes", None)
+        if isinstance(advertised, dict):
+            canonical = semantics.canonical_timeframes(
+                client_id,
+                {str(value) for value in advertised},
+                policy=compatibility.compatibility_policy(
+                    client_id,
+                    market.identity.market.value,
+                ),
+                operation="live",
+            )
+            if timeframe not in canonical:
+                if new_client:
+                    with contextlib.suppress(Exception):
+                        await client.close()
+                raise UnsupportedMarketError(
+                    f"CCXT Pro client {client_id!r} does not advertise "
+                    f"watchOHLCV timeframe {timeframe!r}"
+                )
+        if new_client:
             self._clients[client_id] = client
         self._subscriptions.add(key)
         task = asyncio.create_task(self._watch(client_id, client, market, timeframe))

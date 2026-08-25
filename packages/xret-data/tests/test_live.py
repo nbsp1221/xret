@@ -8,7 +8,13 @@ from typing import cast
 
 import polars as pl
 import pytest
-from xret.data import BarDataset, BarFinality, BarUpdate, MarketData
+from xret.data import (
+    BarDataset,
+    BarFinality,
+    BarUpdate,
+    LiveSubscription,
+    MarketData,
+)
 from xret.data.config import MarketDataConfig
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.live import LiveMarketData
@@ -122,11 +128,13 @@ def test_live_binding_performs_no_io_and_happy_path_allows_same_timestamp() -> N
         async with live:
             assert provider.open_calls == 1
             assert provider.resolve_calls == 0
-            await live.subscribe_bar_updates(bars)
+            receipt = await live.subscribe_bar_updates(bars)
             first = await anext(live)
             second = await anext(live)
 
         assert isinstance(first, BarUpdate)
+        assert isinstance(receipt, LiveSubscription)
+        assert receipt.warnings == ()
         assert first.timestamp == second.timestamp == T0
         assert first.close == 101.0
         assert second.close == 102.0
@@ -364,6 +372,30 @@ class RecentSnapshotProvider(FakeProvider):
         )
 
 
+class PartialRecentSnapshotProvider(FakeProvider):
+    def observe_bars(
+        self,
+        request: BarRequest,
+        market: ResolvedBarMarket,
+    ) -> BarObservation:
+        del market
+        timestamp = request.start
+        return BarObservation(
+            frame=pl.DataFrame(
+                {
+                    "timestamp": [timestamp],
+                    "open": [100.0],
+                    "high": [102.0],
+                    "low": [99.0],
+                    "close": [101.0],
+                    "volume": [5.0],
+                },
+                schema=PROVIDER_BAR_SCHEMA,
+            ),
+            observed=(ObservedWindow(timestamp, timestamp + timedelta(minutes=1)),),
+        )
+
+
 def _bootstrap_live(
     provider: FakeProvider,
     bars: BarDataset,
@@ -445,6 +477,29 @@ def test_bootstrap_live_overlap_wins_deterministically() -> None:
         assert [update.timestamp for update in updates] == [T0 - timedelta(minutes=1), T0]
         assert updates[-1].close == 110.0
         assert updates[-1].received_at == now
+
+    asyncio.run(scenario())
+
+
+def test_bootstrap_receipt_reports_partial_historical_evidence() -> None:
+    async def scenario() -> None:
+        now = T1 + timedelta(seconds=2)
+        provider = PartialRecentSnapshotProvider(FakeLiveSession([_raw(T1)]))
+        market_data = MarketData(provider=provider)
+        bars = market_data.bars(
+            exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
+        )
+        live = _bootstrap_live(provider, bars, now=now)
+
+        async with live:
+            receipt = await live.subscribe_bar_updates(bars, bootstrap=True)
+            updates = [await anext(live) for _ in range(2)]
+
+        assert [warning.code for warning in receipt.warnings] == ["live.bootstrap_partial"]
+        assert [update.timestamp for update in updates] == [
+            T0 - timedelta(minutes=1),
+            T1,
+        ]
 
     asyncio.run(scenario())
 

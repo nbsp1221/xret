@@ -5,11 +5,20 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarFinality, BarRequest, BarUpdate, MarketIdentity
+from xret.data.models import (
+    BarFinality,
+    BarRequest,
+    BarUpdate,
+    DataWarning,
+    MarketIdentity,
+    ProviderEvidence,
+)
+from xret.data.observation_coverage import evaluate_observation_coverage
 from xret.data.providers.contracts import (
     HistoricalBarProvider,
     LiveBarSession,
@@ -47,6 +56,12 @@ def _bar_finality(
 
 def _previous_boundary(time_bar: TimeBar, boundary: datetime) -> datetime:
     return time_bar.floor(boundary - timedelta(microseconds=1))
+
+
+@dataclass(frozen=True, slots=True)
+class RecentClosedBars:
+    updates: tuple[BarUpdate, ...]
+    is_complete: bool
 
 
 class LiveBarRuntime:
@@ -139,10 +154,20 @@ class LiveBarRuntime:
             raise
         if resolved.identity.exchange != self._exchange:
             raise ProviderError("provider resolved a live market outside the session exchange")
-        if timeframe not in resolved.timeframes:
+        live_supports = getattr(self._provider, "_live_supports_timeframe", None)
+        if callable(live_supports):
+            supported = live_supports(resolved, timeframe)
+            if not isinstance(supported, bool):
+                raise ProviderError("provider live timeframe hook must return bool")
+        else:
+            # Provider SPI v1 has no separate live-capability object. Existing
+            # custom providers therefore use their resolved timeframe catalog
+            # for both operations unless they opt into the private richer hook.
+            supported = timeframe in resolved.timeframes
+        if not supported:
             raise UnsupportedMarketError(
                 f"provider {self._descriptor.name!r} does not support timeframe "
-                f"{timeframe!r} for {identity.exchange}/{identity.symbol}"
+                f"{timeframe!r} for live {identity.exchange}/{identity.symbol}"
             )
         key = (resolved.identity, str(time_bar))
         if key in self._active:
@@ -172,12 +197,53 @@ class LiveBarRuntime:
             ) from exc
         return key
 
+    def subscription_evidence(
+        self,
+        resolved: ResolvedBarMarket,
+        timeframe: str,
+    ) -> ProviderEvidence:
+        """Return provider provenance for one live subscription."""
+        normalizations: tuple[str, ...] = ()
+        normalizations_method = getattr(self._provider, "_live_normalizations", None)
+        if callable(normalizations_method):
+            candidate = normalizations_method(resolved)
+            if not isinstance(candidate, tuple) or not all(
+                isinstance(value, str) and value for value in candidate
+            ):
+                raise ProviderError(
+                    "provider live normalizations hook must return nonempty strings"
+                )
+            normalizations = candidate
+        return ProviderEvidence(
+            provider_name=self._descriptor.name,
+            provider_version=self._descriptor.version,
+            provider_api_version=self._descriptor.api_version,
+            native_market_id=resolved.native_market_id,
+            native_symbol=resolved.native_symbol,
+            normalizations=normalizations,
+        )
+
+    def subscription_warnings(
+        self,
+        resolved: ResolvedBarMarket,
+        timeframe: str,
+    ) -> tuple[DataWarning, ...]:
+        warnings_method = getattr(self._provider, "_live_warnings", None)
+        if not callable(warnings_method):
+            return ()
+        candidate = warnings_method(resolved, timeframe)
+        if not isinstance(candidate, tuple) or not all(
+            isinstance(value, DataWarning) for value in candidate
+        ):
+            raise ProviderError("provider live warnings hook must return DataWarning values")
+        return candidate
+
     async def recent_closed(
         self,
         key: tuple[MarketIdentity, str],
         *,
         count: int,
-    ) -> tuple[BarUpdate, ...]:
+    ) -> RecentClosedBars:
         """Observe a small closed window for an active live subscription."""
         market = self._active.get(key)
         if market is None:
@@ -219,7 +285,15 @@ class LiveBarRuntime:
                     finality=_bar_finality(timestamp, timeframe, received_at),
                 )
             )
-        return tuple(updates)
+        coverage = evaluate_observation_coverage(
+            time_bar=time_bar,
+            start=start,
+            end=cutover,
+            finalizable_end=cutover,
+            timestamps=observation.frame.get_column("timestamp").to_list(),
+            observed=observation.observed,
+        )
+        return RecentClosedBars(tuple(updates), coverage.is_complete)
 
     async def updates(self) -> AsyncIterator[BarUpdate]:
         session = self._require_session()

@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, Market, MarketIdentity
+from xret.data.models import (
+    Availability,
+    BarRequest,
+    CapabilityNotice,
+    Market,
+    MarketIdentity,
+    OperationCapability,
+    TimeBarCapability,
+)
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -32,6 +40,7 @@ class ProviderSnapshot:
     descriptor: ProviderDescriptor
     native_market_id: str
     native_symbol: str
+    normalizations: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +98,7 @@ class MarketDefinitionRuntime:
         if not isinstance(result, tuple):
             raise ProviderError("provider fetch_markets() must return a tuple")
         identities: set[MarketIdentity] = set()
+        normalized: list[MarketDefinition] = []
         for definition in result:
             if not isinstance(definition, MarketDefinition):
                 raise ProviderError("provider market entries must be MarketDefinition values")
@@ -98,7 +108,33 @@ class MarketDefinitionRuntime:
             if identity in identities:
                 raise ProviderError(f"provider returned duplicate canonical identity: {identity!r}")
             identities.add(identity)
-        return result
+            normalized.append(self._with_default_capabilities(definition))
+        return tuple(normalized)
+
+    @staticmethod
+    def _with_default_capabilities(definition: MarketDefinition) -> MarketDefinition:
+        if definition.bar_capabilities:
+            return definition
+        live_unavailable = OperationCapability(
+            Availability.UNAVAILABLE,
+            notices=(
+                CapabilityNotice(
+                    "provider.live_unavailable",
+                    "The provider did not declare live OHLCV capability metadata",
+                ),
+            ),
+        )
+        return replace(
+            definition,
+            bar_capabilities=tuple(
+                TimeBarCapability(
+                    timeframe=timeframe,
+                    historical=OperationCapability(Availability.AVAILABLE),
+                    live=live_unavailable,
+                )
+                for timeframe in sorted(definition.timeframes)
+            ),
+        )
 
 
 def _default_clock() -> datetime:
@@ -166,26 +202,25 @@ def _validate_windows(
 ) -> None:
     if not isinstance(windows, tuple):
         raise ProviderError("provider observed windows must be a tuple")
-    expected = request.start
+    previous_end: datetime | None = None
     for window in windows:
         if not isinstance(window, ObservedWindow):
             raise ProviderError("provider observed entries must be ObservedWindow values")
-        if window.start != expected or window.end > request.end:
+        if window.start < request.start or window.end > request.end:
             raise ProviderError(
-                "incomplete provider observation: observed windows do not "
-                f"contiguously cover [{request.start.isoformat()}, {request.end.isoformat()})"
+                "invalid provider observation: observed window falls outside "
+                f"[{request.start.isoformat()}, {request.end.isoformat()})"
             )
         if time_bar.floor(window.start) != window.start or time_bar.floor(window.end) != window.end:
             raise ProviderError(
                 "invalid provider observation: window boundaries are not aligned to "
                 f"{request.timeframe}"
             )
-        expected = window.end
-    if expected != request.end:
-        raise ProviderError(
-            "incomplete provider observation: observed windows end at "
-            f"{expected.isoformat()}, expected {request.end.isoformat()}"
-        )
+        if previous_end is not None and window.start < previous_end:
+            raise ProviderError(
+                "invalid provider observation: observed windows must be ordered and non-overlapping"
+            )
+        previous_end = window.end
 
 
 def _validate_provider_frame(frame: object) -> pl.DataFrame:
@@ -353,6 +388,17 @@ class ProviderRuntime:
         raw: _ValidatedProviderObservation,
         frame: pl.DataFrame,
     ) -> ValidatedBarObservation:
+        normalizations: tuple[str, ...] = ()
+        normalizations_method = getattr(self._provider, "_historical_normalizations", None)
+        if callable(normalizations_method):
+            candidate = normalizations_method(raw.market)
+            if not isinstance(candidate, tuple) or not all(
+                isinstance(value, str) and value for value in candidate
+            ):
+                raise ProviderError(
+                    "provider historical normalizations hook must return nonempty strings"
+                )
+            normalizations = candidate
         return ValidatedBarObservation(
             frame=frame,
             observed=raw.observed,
@@ -361,6 +407,7 @@ class ProviderRuntime:
                 descriptor=self._descriptor,
                 native_market_id=raw.market.native_market_id,
                 native_symbol=raw.market.native_symbol,
+                normalizations=normalizations,
             ),
             evidence_at=raw.evidence_at,
             completed_at=raw.completed_at,

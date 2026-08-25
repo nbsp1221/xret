@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
 
 from xret.data.errors import InvalidRequestError, UnsupportedMarketError
-from xret.data.models import Market, MarketIdentity
+from xret.data.models import (
+    Availability,
+    CapabilityNotice,
+    Market,
+    MarketIdentity,
+    OperationCapability,
+    TimeBarCapability,
+)
+from xret.data.providers.ccxt import capabilities, compatibility
 from xret.data.providers.ccxt.client import CCXTExchange
 from xret.data.providers.ccxt.semantics import canonical_timeframes
 from xret.data.providers.contracts import (
@@ -139,8 +147,6 @@ def resolve(
     *,
     reload: bool = False,
 ) -> CcxtMarket:
-    if not exchange.has.get("fetchOHLCV"):
-        raise UnsupportedMarketError(f"{exchange.id} does not support fetchOHLCV")
     native_markets = exchange.load_markets(reload=reload)
     return (
         _spot(identity, native_markets)
@@ -161,6 +167,8 @@ def supported_timeframes(exchange: CCXTExchange) -> frozenset[str]:
     non-canonical input, and `ProviderRuntime` raises
     `UnsupportedMarketError` for a canonical timeframe this venue omits.
     """
+    if not exchange.has.get("fetchOHLCV"):
+        return frozenset()
     timeframes = getattr(exchange, "timeframes", None)
     if not isinstance(timeframes, Mapping):
         return frozenset()
@@ -182,6 +190,8 @@ def market_definitions(
     native_markets: Mapping[str, Any],
     exchange: CCXTExchange,
     tick_size_precision_mode: int,
+    client_id: str,
+    live_capability: capabilities.LiveOHLCVCapability,
 ) -> tuple[MarketDefinition, ...]:
     """Translate safely representable entries from one CCXT market snapshot.
 
@@ -191,6 +201,8 @@ def market_definitions(
     arbitrary provider-native target being selected.
     """
     timeframes = supported_timeframes(exchange)
+    raw_timeframes = capabilities.canonical_timeframes(getattr(exchange, "timeframes", None))
+    raw_timeframes = raw_timeframes or frozenset()
     definitions: dict[MarketIdentity, MarketDefinition] = {}
     collisions: set[MarketIdentity] = set()
     for raw in native_markets.values():
@@ -206,6 +218,16 @@ def market_definitions(
         )
         if definition is None:
             continue
+        definition = replace(
+            definition,
+            bar_capabilities=_bar_capabilities(
+                client_id=client_id,
+                market_family=market_family,
+                historical_available=bool(exchange.has.get("fetchOHLCV")),
+                historical_timeframes=raw_timeframes,
+                live_capability=live_capability,
+            ),
+        )
         identity = definition.identity
         if identity in collisions:
             continue
@@ -215,6 +237,87 @@ def market_definitions(
             continue
         definitions[identity] = definition
     return tuple(definitions.values())
+
+
+def _bar_capabilities(
+    *,
+    client_id: str,
+    market_family: Market,
+    historical_available: bool,
+    historical_timeframes: frozenset[str],
+    live_capability: capabilities.LiveOHLCVCapability,
+) -> tuple[TimeBarCapability, ...]:
+    policy = compatibility.compatibility_policy(client_id, market_family.value)
+    live_timeframes = live_capability.timeframes
+    union = set(historical_timeframes)
+    if live_timeframes is not None:
+        union.update(live_timeframes)
+    elif live_capability.available:
+        union.update(historical_timeframes)
+
+    result: list[TimeBarCapability] = []
+    for timeframe in sorted(union, key=_timeframe_sort_key):
+        historical_excluded = timeframe in policy.historical_excluded_timeframes
+        historical = _operation_capability(
+            advertised=historical_available and timeframe in historical_timeframes,
+            excluded=historical_excluded,
+            operation="historical",
+        )
+        live_advertised = live_capability.available and (
+            live_timeframes is None or timeframe in live_timeframes
+        )
+        live_notices: tuple[CapabilityNotice, ...] = ()
+        if live_advertised and live_timeframes is None:
+            live_notices += (
+                CapabilityNotice(
+                    "provider.live_timeframes_unreported",
+                    "CCXT Pro advertises watchOHLCV without a timeframe catalog",
+                ),
+            )
+        live = _operation_capability(
+            advertised=live_advertised,
+            excluded=timeframe in policy.live_excluded_timeframes,
+            operation="live",
+            notices=live_notices,
+        )
+        result.append(TimeBarCapability(timeframe, historical, live))
+    return tuple(result)
+
+
+def _operation_capability(
+    *,
+    advertised: bool,
+    excluded: bool,
+    operation: str,
+    notices: tuple[CapabilityNotice, ...] = (),
+) -> OperationCapability:
+    if not advertised:
+        return OperationCapability(
+            Availability.UNAVAILABLE,
+            notices=(
+                CapabilityNotice(
+                    f"provider.{operation}_unavailable",
+                    f"CCXT does not advertise {operation} OHLCV for this timeframe",
+                ),
+            ),
+        )
+    if excluded:
+        return OperationCapability(
+            Availability.INCOMPATIBLE,
+            notices=(
+                CapabilityNotice(
+                    "provider.known_incompatible",
+                    "This exact timeframe cannot satisfy Xret's canonical bar contract",
+                ),
+            ),
+        )
+    return OperationCapability(Availability.AVAILABLE, notices=notices)
+
+
+def _timeframe_sort_key(value: str) -> tuple[int, int, str]:
+    bar = TimeBar.parse(value)
+    units = {"s": 0, "m": 1, "h": 2, "d": 3, "w": 4, "M": 5}
+    return (units[bar.unit], bar.amount, value)
 
 
 def _matches_market_family(metadata: Mapping[str, Any], market: Market) -> bool:
