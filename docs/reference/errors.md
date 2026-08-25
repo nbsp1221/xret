@@ -15,6 +15,8 @@ Every public domain or operational error inherits from `xret.data.errors.XretDat
 
 Underlying provider, SQLite, and filesystem failures are chained as causes where applicable. A provider or validation failure does not mark coverage unavailable. If a live operation and context cleanup both fail, Python 3.12 reports a `BaseExceptionGroup` preserving the primary Xret error and the chained cleanup `ProviderError`.
 
+Do not use exceptions as a proxy for qualification. An available unverified operation is allowed to run and emits `UnverifiedProviderWarning`; it raises only if the actual request, response, or known compatibility boundary cannot be handled safely. See [Provider support and trust](../explanation/provider-support.md).
+
 ```python
 from xret.data.errors import CoverageError
 

@@ -83,6 +83,8 @@ Each `MarketDefinition` contains:
 
 `active=True` is not a guarantee that every venue operation is currently available. `timeframes` remains the concise historical catalog and is not a verification claim. Inspect `bar_capabilities` to distinguish `available`, `unavailable`, and `incompatible`, then inspect the independent `verified` or `unverified` evidence for an available operation. Xret attempts available operations regardless of verification status.
 
+These fields answer discovery-time questions, not whether a later network request succeeded. See [Provider support and trust](../explanation/provider-support.md) for the state model.
+
 ```python
 from xret.data import Availability, VerificationStatus
 
@@ -161,6 +163,8 @@ Always calls the provider and returns validated completed bars in `result.data`,
 An endpoint with a maintained bounded-window policy traverses explicit half-open windows and can prove both present and absent bars. An endpoint without that policy uses conservative forward pagination: validated returned bars prove only their own intervals, and every unproved remainder stays `missing`. Missing qualification does not deny execution. Ignored bounds, malformed rows, conflicting duplicates, non-progress, unsupported provider capability, or known exact incompatibility still fails explicitly.
 
 `FetchResult` exposes `dataset_key`, `data`, `covered`, `gaps`, `source`, `warnings`, `is_complete`, and `require_complete()`. `source.verification` distinguishes current qualification from an available unverified operation. Unverified use emits one `UnverifiedProviderWarning` and records `provider.unverified`; partial evidence records `coverage.partial_observation`. Call `require_complete()` when the application requires complete remote coverage.
+
+`source.verification` and `is_complete` are orthogonal: the former describes independent qualification of the provider scope, while the latter describes evidence for this requested range.
 
 ## `BarDataset.sync`
 

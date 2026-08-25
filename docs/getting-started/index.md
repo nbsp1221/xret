@@ -31,7 +31,14 @@ print(result.source.verification if result.source else "local no-op")
 result.require_complete()
 ```
 
-A spot dataset uses `market="spot"` and no `settle`. `sync` checks local coverage, fetches only missing intervals, validates bars, and commits canonical Parquet. Available coverage is persisted; only an exhaustive observation can record an absent completed bar boundary as unavailable. An unproved interval stays missing, and a failed request does not mark data unavailable. Provider-advertised but unqualified CCXT scopes may run with explicit unverified evidence. Repeating a fully covered request is a canonical data/coverage no-op that still records operational ingestion-run provenance.
+A spot dataset uses `market="spot"` and no `settle`. `sync` checks local coverage, fetches only missing intervals, validates bars, and commits canonical Parquet. `result.require_complete()` makes the example reject any remaining coverage gap.
+
+The result answers two different trust questions:
+
+- `result.source.verification` says whether Xret has independently qualified the exact remote scope. It is `None` only when the sync was already complete and made no remote call.
+- `result.is_complete` says whether this requested time range has no remaining gap.
+
+Provider-advertised but unqualified CCXT scopes may run with explicit unverified evidence. The warning does not mean Xret skipped validation, and a verified scope can still suffer a current provider or network failure. Read [Provider support and trust](../explanation/provider-support.md) before treating these states as an exchange-wide approval or rejection.
 
 ## Read complete local data
 
@@ -47,4 +54,5 @@ print(frame)
 - [Synchronize and read bars](../guides/synchronization.md)
 - [Market data API reference](../reference/api.md)
 - [Data lifecycle](../explanation/data-lifecycle.md)
+- [Provider support and trust](../explanation/provider-support.md)
 - [Verified support](../quality/verified-support.md)

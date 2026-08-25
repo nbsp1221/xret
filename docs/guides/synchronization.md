@@ -29,6 +29,13 @@ print(remote.gaps)
 
 `fetch` always uses the provider, returns a `FetchResult` whose `data` is an eager Polars frame of completed bars, and never reads or changes canonical local state. Exact bounded policies can prove empty intervals; the conservative generic strategy proves only validated returned bars. Any unproved remainder is an explicit `missing` gap.
 
+Do not infer completeness from verification or verification from completeness. Check both when both matter:
+
+```python
+remote.require_complete()
+verification = remote.source.verification.status
+```
+
 ## Synchronize canonical data
 
 ```python
@@ -68,3 +75,4 @@ print(partial.gaps)
 `scan_partial` is local-only and returns available rows with explicit coverage and gap intervals. It is the deliberate choice for incomplete local coverage.
 
 See the [API reference](../reference/api.md) for signatures and result fields.
+See [Provider support and trust](../explanation/provider-support.md) for the difference between capability, runtime validation, qualification, and coverage.

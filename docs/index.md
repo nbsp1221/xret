@@ -7,6 +7,7 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 ## Start here
 
 - [Getting started](getting-started/index.md) — install `xret-data`, synchronize a market, and read it locally.
+- [Provider support and trust](explanation/provider-support.md) — understand what “available,” “verified,” “unverified,” and “incompatible” mean before choosing an exchange.
 - [Roadmap](roadmap.md) — see how Xret plans to connect trusted data, research, backtesting, and eventual live operation.
 - [Synchronize and read bars](guides/synchronization.md) — choose between `fetch`, `sync`, `scan`, and `scan_partial`.
 - [Consume live bar updates](guides/live-bars.md) — subscribe to typed bar observations and optionally bridge recent history into the live stream.
@@ -14,6 +15,18 @@ Xret is an ecosystem for individual quant researchers. Each package owns a focus
 - [Market data API](reference/api.md) — exact public contracts.
 - [Market-data providers](reference/providers.md) — implement historical and optional live capabilities.
 - [Verified support](quality/verified-support.md) — combinations exercised against real providers.
+
+## What is available today
+
+| Capability | Current boundary |
+|---|---|
+| Markets | Crypto spot and perpetual markets representable through the selected provider |
+| Historical data | Completed trade OHLCV time bars through `fetch` and `sync` |
+| Live data | Transient time-bar updates through providers with live capability |
+| Local data | Canonical Parquet storage, strict `scan`, explicit `scan_partial`, validation, and catalog rebuild |
+| Built-in provider | CCXT for historical data and CCXT Pro for live bars |
+
+Xret does not use qualification as an allowlist. Provider-advertised scopes may run as `unverified`; all returned observations still pass the same runtime contract. See [Provider support and trust](explanation/provider-support.md) for the complete decision model and [Verified support](quality/verified-support.md) for exact qualification evidence.
 
 ## Browse by intent
 

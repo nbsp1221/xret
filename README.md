@@ -69,6 +69,17 @@ df = bars.scan("2024-01-01", "2024-06-01").collect()
 
 `scan` never returns incomplete data. Remote operations are capability-based: Xret attempts provider-advertised CCXT markets, validates every response, and reports whether the exact scope has independent Xret verification. Unverified does not mean blocked; malformed, conflicting, or semantically incompatible data still fails before return or storage. This is the Xret contract: **the tool refuses to lie to you.**
 
+## What `xret-data` supports
+
+| Surface | Available today | Important boundary |
+|---|---|---|
+| Markets | Crypto spot and perpetual | Futures with expiry, options, and non-crypto identities are not part of the current contract. |
+| Historical bars | Provider fetch, incremental sync, canonical Parquet, strict and partial local reads | Complete coverage is reported separately; Xret never fills unexplained gaps. |
+| Live bars | Provider-advertised time-bar streams and optional recent-history bootstrap | Live observations are transient; Xret does not promise automatic reconnect or persistence. |
+| Providers | Built-in CCXT/CCXT Pro and an experimental custom-provider API | Provider capability permits an attempt; Xret qualification is separate confidence evidence. |
+
+Xret does not restrict CCXT to a small approved-exchange list. For an exact venue, market, settlement, timeframe, and operation, it reports two independent facts: whether the operation is available and whether Xret has independently verified it. Available but unverified operations are attempted with an explicit warning and the same runtime validation. Known incompatible or unsafe data fails explicitly. Read [Provider support and trust](docs/explanation/provider-support.md) for the mental model and [Verified support](docs/quality/verified-support.md) for the exact evidence matrix.
+
 ## Principles
 
 **Prove it or fail.** Data is validated on ingestion. Backtests require out-of-sample splits. Results that don't survive statistical scrutiny are labeled noise, not alpha.
@@ -86,6 +97,7 @@ df = bars.scan("2024-01-01", "2024-06-01").collect()
 - [Synchronization guide](docs/guides/synchronization.md)
 - [API reference](docs/reference/api.md)
 - [Data lifecycle](docs/explanation/data-lifecycle.md)
+- [Provider support and trust](docs/explanation/provider-support.md)
 - [Verified support](docs/quality/verified-support.md)
 
 ## Development
