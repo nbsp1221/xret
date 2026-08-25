@@ -192,8 +192,23 @@ def test_current_registry_is_self_consistent() -> None:
 
 
 def test_qualification_evidence_is_independent_and_exact() -> None:
-    assert verification.historical("binance", "spot", None).status is VerificationStatus.VERIFIED
-    assert verification.historical("kraken", "spot", None).status is VerificationStatus.UNVERIFIED
+    assert len(verification._HISTORICAL_TIMEFRAMES) == 45
+    assert set(verification._HISTORICAL_TIMEFRAMES).issubset(compatibility._OBSERVATION_PROFILES)
+    for scope, timeframes in verification._HISTORICAL_TIMEFRAMES.items():
+        assert timeframes
+        policy = compatibility.compatibility_policy(scope.client_id, scope.market_family)
+        assert timeframes.isdisjoint(policy.historical_excluded_timeframes)
+    assert (
+        verification.historical("binance", "spot", None, "1m").status is VerificationStatus.VERIFIED
+    )
+    assert (
+        verification.historical("binance", "spot", None, "2m").status
+        is VerificationStatus.UNVERIFIED
+    )
+    assert (
+        verification.historical("kraken", "spot", None, "1m").status
+        is VerificationStatus.UNVERIFIED
+    )
     assert verification.live("binance", "spot", None, "1m").status is VerificationStatus.VERIFIED
     assert verification.live("binance", "spot", None, "5m").status is VerificationStatus.UNVERIFIED
 

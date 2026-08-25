@@ -269,6 +269,7 @@ def _bar_capabilities(
                 client_id,
                 market_family.value,
                 settle,
+                timeframe,
             ),
             operation="historical",
         )

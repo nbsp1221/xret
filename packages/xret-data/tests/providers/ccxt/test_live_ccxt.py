@@ -112,6 +112,23 @@ def test_ccxt_live_session_reuses_client_and_normalizes_rows() -> None:
     asyncio.run(scenario())
 
 
+def test_ccxt_live_session_validates_timeframe_on_reused_client() -> None:
+    async def scenario() -> None:
+        client = FakeExchange(None)
+        client.timeframes = {"1m": "1m"}
+        session = CcxtLiveBarSession(exchange="binance", exchange_factory=lambda _: client)
+
+        async with session:
+            await session.subscribe_bar_updates(_market(), "1m")
+            with pytest.raises(UnsupportedMarketError, match="timeframe '2m'"):
+                await session.subscribe_bar_updates(_market("ETH/USDT"), "2m")
+            assert client.closed == 0
+
+        assert client.closed == 1
+
+    asyncio.run(scenario())
+
+
 def test_ccxt_live_session_allows_unqualified_mexc_scope() -> None:
     async def scenario() -> None:
         client = FakeExchange([[1786060800000, 100, 102, 99, 101, 250]])

@@ -540,6 +540,41 @@ class BarDataset:
                     new_rows = _filter_frame_to_ranges(observation.frame, window.gaps)
                     observations.append((window, observation, new_rows))
 
+                source = None
+                result_warnings = [
+                    DataWarning(finding.code, finding.message, gap.start, gap.end)
+                    for gap, finding in quality_warnings
+                ]
+                if observations:
+                    snapshot = observations[0][1].source
+                    source = ProviderEvidence(
+                        provider_name=snapshot.descriptor.name,
+                        provider_version=snapshot.descriptor.version,
+                        provider_api_version=snapshot.descriptor.api_version,
+                        native_market_id=snapshot.native_market_id,
+                        native_symbol=snapshot.native_symbol,
+                        verification=snapshot.verification,
+                        normalizations=snapshot.normalizations,
+                    )
+                    if source.verification.status is VerificationStatus.UNVERIFIED:
+                        message = (
+                            f"{source.provider_name} has no current Xret qualification evidence "
+                            "for this historical scope"
+                        )
+                        result_warnings.append(
+                            DataWarning(
+                                "provider.unverified",
+                                message,
+                                start_dt,
+                                end_dt,
+                            )
+                        )
+                        python_warnings.warn(
+                            message,
+                            UnverifiedProviderWarning,
+                            stacklevel=2,
+                        )
+
                 monthly_batches: dict[YearMonth, list[pl.DataFrame]] = {}
                 monthly_observations: dict[YearMonth, ValidatedBarObservation] = {}
                 source_name = observations[0][1].source.descriptor.name if observations else None
@@ -749,40 +784,6 @@ class BarDataset:
                 )
                 raise
 
-        source = None
-        result_warnings = [
-            DataWarning(finding.code, finding.message, gap.start, gap.end)
-            for gap, finding in quality_warnings
-        ]
-        if observations:
-            snapshot = observations[0][1].source
-            source = ProviderEvidence(
-                provider_name=snapshot.descriptor.name,
-                provider_version=snapshot.descriptor.version,
-                provider_api_version=snapshot.descriptor.api_version,
-                native_market_id=snapshot.native_market_id,
-                native_symbol=snapshot.native_symbol,
-                verification=snapshot.verification,
-                normalizations=snapshot.normalizations,
-            )
-            if source.verification.status is VerificationStatus.UNVERIFIED:
-                message = (
-                    f"{source.provider_name} has no current Xret qualification evidence "
-                    "for this historical scope"
-                )
-                result_warnings.append(
-                    DataWarning(
-                        "provider.unverified",
-                        message,
-                        start_dt,
-                        end_dt,
-                    )
-                )
-                python_warnings.warn(
-                    message,
-                    UnverifiedProviderWarning,
-                    stacklevel=2,
-                )
         result_warnings.extend(
             DataWarning(
                 (

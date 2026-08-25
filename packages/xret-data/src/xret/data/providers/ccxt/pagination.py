@@ -304,6 +304,7 @@ def _generic_ohlcv(
             if first_page:
                 latest = fetch_page(None, 1, {})
                 latest_in_range: list[int] = []
+                latest_previous: int | None = None
                 for raw in latest:
                     row = _coerce_row(
                         raw,
@@ -311,7 +312,20 @@ def _generic_ohlcv(
                         exchange_id=exchange_id,
                     )
                     timestamp_ms = int(row[0])
+                    if latest_previous is not None and timestamp_ms < latest_previous:
+                        raise ProviderError(
+                            f"fetchOHLCV returned non-ascending candles for "
+                            f"{native_symbol} on {exchange_id}"
+                        )
+                    latest_previous = timestamp_ms
                     if start_ms <= timestamp_ms < end_ms:
+                        existing = collected.get(timestamp_ms)
+                        if existing is not None and existing != row:
+                            raise ProviderError(
+                                f"fetchOHLCV returned conflicting candles at "
+                                f"{_describe_ms(timestamp_ms)} for "
+                                f"{native_symbol} on {exchange_id}"
+                            )
                         collected[timestamp_ms] = row
                         latest_in_range.append(timestamp_ms)
                 if latest_in_range:

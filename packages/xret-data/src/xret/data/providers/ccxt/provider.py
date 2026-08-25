@@ -229,11 +229,11 @@ class CcxtProvider:
         market: ResolvedBarMarket,
         timeframe: str,
     ) -> Verification:
-        del timeframe
         return verification.historical(
             markets.client_id(market.identity),
             market.identity.market.value,
             market.identity.settle,
+            timeframe,
         )
 
     def _historical_normalizations(

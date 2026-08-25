@@ -426,6 +426,24 @@ def test_fetch_markets_reports_availability_separately_from_verification() -> No
     assert one_hour.live.availability is Availability.UNAVAILABLE
 
 
+def test_historical_verification_requires_the_exact_qualified_timeframe() -> None:
+    exchange = FakeExchange(
+        client_id="binance",
+        timeframes={"1m": "1m", "2m": "2m"},
+    )
+    _register_spot(exchange)
+
+    (definition,) = _market_data().fetch_markets(exchange="binance", market="spot")
+
+    capabilities = {item.timeframe: item for item in definition.bar_capabilities}
+    one_minute = capabilities["1m"].historical.verification
+    two_minutes = capabilities["2m"].historical.verification
+    assert one_minute is not None
+    assert one_minute.status is VerificationStatus.VERIFIED
+    assert two_minutes is not None
+    assert two_minutes.status is VerificationStatus.UNVERIFIED
+
+
 def test_historical_incompatibility_does_not_hide_live_capability() -> None:
     exchange = FakeExchange(
         client_id="binance",
@@ -1711,6 +1729,35 @@ def test_generic_empty_first_page_probe_proves_only_returned_bar() -> None:
             datetime(2024, 1, 1, 0, 2, tzinfo=UTC),
         ),
     )
+
+
+def test_generic_empty_first_page_probe_rejects_conflicting_duplicates() -> None:
+    identity = MarketIdentity(exchange="kraken", symbol="BTC/USDT", market="spot")
+
+    def empty_then_conflicting_latest(
+        _symbol: str,
+        _timeframe: str,
+        since: int | None,
+        _limit: int | None,
+        _params: dict | None,
+    ) -> list[list[float]]:
+        if since is not None:
+            return []
+        return [_row(60_000), _row(60_000, price=200)]
+
+    exchange = FakeExchange(
+        client_id="kraken",
+        fetch_override=empty_then_conflicting_latest,
+    )
+    _register_as("kraken", exchange)
+
+    with pytest.raises(ProviderError, match="conflicting candles"):
+        _observe(
+            identity,
+            "1m",
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+        )
 
 
 def test_generic_right_tail_does_not_prove_requested_absence() -> None:

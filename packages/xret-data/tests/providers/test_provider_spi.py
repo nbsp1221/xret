@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ import pytest
 from xret.data.config import MarketDataConfig
 from xret.data.errors import (
     CatalogError,
+    CoverageError,
     InvalidRequestError,
     ProviderError,
     UnsupportedMarketError,
@@ -31,6 +33,7 @@ from xret.data.providers import (
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_SCHEMA
 from xret.data.storage.catalog import CATALOG_FILE_NAME, Catalog
+from xret.data.warnings import UnverifiedProviderWarning
 
 START = datetime(2024, 1, 1, tzinfo=UTC)
 END = datetime(2024, 1, 1, 3, tzinfo=UTC)
@@ -715,6 +718,23 @@ def test_custom_provider_sync_persists_generic_provenance_and_repeats_as_noop(
     assert "ccxt_version" not in metadata
     with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
         assert catalog.get_source_lineage(first.dataset_key) == "acme"
+
+
+def test_escalated_unverified_warning_fails_before_sync_publication(tmp_path: Path) -> None:
+    provider = RangeProvider("acme", "git:abc")
+    config, bars = _custom_bars(tmp_path, provider)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnverifiedProviderWarning)
+        with pytest.raises(UnverifiedProviderWarning):
+            bars.sync(START, END)
+
+    assert not list(config.data_dir.rglob("*.parquet"))
+    with pytest.raises(CoverageError):
+        bars.scan(START, END)
+    with Catalog.open(config.state_dir / CATALOG_FILE_NAME) as catalog:
+        (status,) = catalog.connection.execute("SELECT status FROM ingestion_runs").fetchone()
+        assert status == "failed"
 
 
 def test_same_source_lineage_allows_provider_version_change(tmp_path: Path) -> None:
