@@ -11,13 +11,35 @@ from typing import Final, Protocol, Self
 
 import polars as pl
 from xret.data.errors import InvalidRequestError, ProviderError
-from xret.data.models import BarRequest, Market, MarketIdentity, TimeBarCapability
+from xret.data.models import (
+    Availability,
+    BarRequest,
+    Market,
+    MarketIdentity,
+    OperationCapability,
+    ReferenceBarCapability,
+    ReferencePriceKind,
+    TimeBarCapability,
+)
 from xret.data.timeframe import TimeBar
 
 __all__ = [
     "PROVIDER_API_VERSION",
     "PROVIDER_BAR_SCHEMA",
+    "PROVIDER_FUNDING_SCHEMA",
+    "PROVIDER_REFERENCE_BAR_SCHEMA",
+    "PROVIDER_OPEN_INTEREST_SCHEMA",
     "BarObservation",
+    "FundingObservation",
+    "ReferenceBarObservation",
+    "OpenInterestObservation",
+    "OpenInterestSourceEvidence",
+    "FundingRequest",
+    "ReferenceBarRequest",
+    "OpenInterestRequest",
+    "HistoricalFundingProvider",
+    "HistoricalReferenceBarProvider",
+    "HistoricalOpenInterestProvider",
     "BarRequest",
     "DerivativeInterpretation",
     "HistoricalBarProvider",
@@ -31,6 +53,9 @@ __all__ = [
     "ProviderDescriptor",
     "ProviderBarUpdate",
     "ResolvedBarMarket",
+    "ResolvedFundingMarket",
+    "ResolvedReferenceMarket",
+    "ResolvedOpenInterestMarket",
 ]
 
 PROVIDER_API_VERSION: Final[int] = 1
@@ -48,6 +73,40 @@ PROVIDER_BAR_SCHEMA: Final[pl.Schema] = pl.Schema(
         "low": pl.Float64(),
         "close": pl.Float64(),
         "volume": pl.Float64(),
+    }
+)
+
+#: Provider reference values before canonical identity columns are attached. This is
+#: intentionally independent from volume-bearing trade OHLCV.
+PROVIDER_REFERENCE_BAR_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "open": pl.Float64(),
+        "high": pl.Float64(),
+        "low": pl.Float64(),
+        "close": pl.Float64(),
+    }
+)
+
+#: Provider funding values before canonical identity columns are attached.
+PROVIDER_FUNDING_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "effective_at": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "funding_rate": pl.Float64(),
+        "funding_interval_seconds": pl.Int64(),
+        "mark_price": pl.Float64(),
+    }
+)
+
+
+#: Provider open-interest values before canonical identity columns are attached.
+#: Amount is already normalized to base-asset-equivalent outstanding exposure;
+#: value is optional quote-currency notional.
+PROVIDER_OPEN_INTEREST_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "open_interest_amount": pl.Float64(),
+        "open_interest_value": pl.Float64(),
     }
 )
 
@@ -134,6 +193,43 @@ class ResolvedBarMarket:
             raise InvalidRequestError("spot market must not include derivative interpretation")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FundingRequest:
+    """Arbitrary UTC half-open request for final public funding events."""
+
+    identity: MarketIdentity
+    start: datetime
+    end: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("funding request identity must be a MarketIdentity")
+        if self.identity.market is not Market.PERPETUAL:
+            raise InvalidRequestError("settled funding requires market='perpetual'")
+        for name, value in (("start", self.start), ("end", self.end)):
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise InvalidRequestError(f"funding request {name} must be UTC-aware")
+        if self.start >= self.end:
+            raise InvalidRequestError("funding request start must be before end")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedFundingMarket:
+    """Canonical perpetual resolved to one native settled-history target."""
+
+    identity: MarketIdentity
+    native_market_id: str
+    native_symbol: str
+
+    def __post_init__(self) -> None:
+        if self.identity.market is not Market.PERPETUAL or self.identity.settle is None:
+            raise InvalidRequestError("resolved funding market requires a settled perpetual")
+        if not isinstance(self.native_market_id, str) or not self.native_market_id:
+            raise InvalidRequestError("native_market_id must be a nonempty string")
+        if not isinstance(self.native_symbol, str) or not self.native_symbol:
+            raise InvalidRequestError("native_symbol must be a nonempty string")
+
+
 @dataclass(frozen=True, slots=True)
 class MarketDefinition:
     """One provider-advertised market translated into Xret vocabulary.
@@ -151,6 +247,9 @@ class MarketDefinition:
     size_increment: Decimal | None
     derivative: DerivativeInterpretation | None = None
     bar_capabilities: tuple[TimeBarCapability, ...] = ()
+    funding_history: OperationCapability = OperationCapability(Availability.UNAVAILABLE)
+    reference_bar_capabilities: tuple[ReferenceBarCapability, ...] = ()
+    open_interest_capabilities: tuple[TimeBarCapability, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.identity, MarketIdentity):
@@ -174,6 +273,37 @@ class MarketDefinition:
         if len(set(capability_timeframes)) != len(capability_timeframes):
             raise InvalidRequestError(
                 "market definition bar_capabilities must not repeat a timeframe"
+            )
+        if not isinstance(self.funding_history, OperationCapability):
+            raise InvalidRequestError(
+                "market definition funding_history must be an OperationCapability"
+            )
+        if not isinstance(self.reference_bar_capabilities, tuple) or not all(
+            isinstance(capability, ReferenceBarCapability)
+            for capability in self.reference_bar_capabilities
+        ):
+            raise InvalidRequestError(
+                "market definition reference_bar_capabilities must be ReferenceBarCapability values"
+            )
+        reference_keys = [
+            (capability.kind, capability.timeframe)
+            for capability in self.reference_bar_capabilities
+        ]
+        if len(set(reference_keys)) != len(reference_keys):
+            raise InvalidRequestError(
+                "market definition reference_bar_capabilities must not repeat a kind/timeframe"
+            )
+        if not isinstance(self.open_interest_capabilities, tuple) or not all(
+            isinstance(capability, TimeBarCapability)
+            for capability in self.open_interest_capabilities
+        ):
+            raise InvalidRequestError(
+                "market definition open_interest_capabilities must be TimeBarCapability values"
+            )
+        oi_timeframes = [capability.timeframe for capability in self.open_interest_capabilities]
+        if len(set(oi_timeframes)) != len(oi_timeframes):
+            raise InvalidRequestError(
+                "market definition open_interest_capabilities must not repeat a timeframe"
             )
         if self.identity.market is Market.PERPETUAL and self.identity.settle is None:
             raise InvalidRequestError("perpetual market definition must include settle")
@@ -226,6 +356,29 @@ class BarObservation:
 
     frame: pl.DataFrame
     observed: tuple[ObservedWindow, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class FundingObservation:
+    """Untrusted settled-funding rows and exhaustively observed spans."""
+
+    frame: pl.DataFrame
+    observed: tuple[ObservedWindow, ...]
+
+
+class HistoricalFundingProvider(Protocol):
+    """Structural SPI for settled public funding history."""
+
+    @property
+    def descriptor(self) -> ProviderDescriptor: ...
+
+    def resolve_funding_market(self, identity: MarketIdentity) -> ResolvedFundingMarket: ...
+
+    def observe_funding(
+        self,
+        request: FundingRequest,
+        market: ResolvedFundingMarket,
+    ) -> FundingObservation: ...
 
 
 class HistoricalBarProvider(Protocol):
@@ -299,3 +452,213 @@ class MarketDefinitionProvider(Protocol):
         exchange: str,
         market: Market,
     ) -> tuple[MarketDefinition, ...]: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReferenceBarRequest:
+    """Aligned UTC half-open request for one reference-price bar series."""
+
+    identity: MarketIdentity
+    kind: ReferencePriceKind
+    timeframe: str
+    start: datetime
+    end: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("reference request identity must be a MarketIdentity")
+        if self.identity.market is not Market.PERPETUAL:
+            raise InvalidRequestError("reference bars require market='perpetual'")
+        try:
+            object.__setattr__(self, "kind", ReferencePriceKind(self.kind))
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"unrecognized reference price kind: {self.kind!r}") from exc
+        time_bar = TimeBar.parse(self.timeframe)
+        for name, value in (("start", self.start), ("end", self.end)):
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise InvalidRequestError(f"reference request {name} must be UTC-aware")
+            if time_bar.floor(value) != value:
+                raise InvalidRequestError(
+                    f"reference request {name} must align to {self.timeframe}"
+                )
+        if self.start >= self.end:
+            raise InvalidRequestError("reference request start must be before end")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedReferenceMarket:
+    """Canonical perpetual resolved to one native reference-series target."""
+
+    identity: MarketIdentity
+    native_market_id: str
+    native_symbol: str
+    kind: ReferencePriceKind
+    timeframes: frozenset[str]
+    reference_target_scope: str = "contract"
+
+    def __post_init__(self) -> None:
+        if self.identity.market is not Market.PERPETUAL or self.identity.settle is None:
+            raise InvalidRequestError("resolved reference market requires a settled perpetual")
+        if not isinstance(self.native_market_id, str) or not self.native_market_id:
+            raise InvalidRequestError("native_market_id must be a nonempty string")
+        if not isinstance(self.native_symbol, str) or not self.native_symbol:
+            raise InvalidRequestError("native_symbol must be a nonempty string")
+        try:
+            object.__setattr__(self, "kind", ReferencePriceKind(self.kind))
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"unrecognized reference price kind: {self.kind!r}") from exc
+        if not isinstance(self.timeframes, frozenset):
+            raise InvalidRequestError("resolved reference timeframes must be a frozenset")
+        for timeframe in self.timeframes:
+            TimeBar.parse(timeframe)
+        if self.reference_target_scope not in ("contract", "pair"):
+            raise InvalidRequestError("reference_target_scope must be 'contract' or 'pair'")
+        if self.kind is not ReferencePriceKind.INDEX and self.reference_target_scope != "contract":
+            raise InvalidRequestError("only index reference targets may be pair-scoped")
+
+
+@dataclass(frozen=True, slots=True)
+class ReferenceBarObservation:
+    """Untrusted no-volume reference OHLC rows and exhaustive windows."""
+
+    frame: pl.DataFrame
+    observed: tuple[ObservedWindow, ...]
+
+
+class HistoricalReferenceBarProvider(Protocol):
+    """Structural SPI for historical mark/index/premium-index bars."""
+
+    @property
+    def descriptor(self) -> ProviderDescriptor: ...
+
+    def resolve_reference_market(
+        self, identity: MarketIdentity, kind: ReferencePriceKind
+    ) -> ResolvedReferenceMarket: ...
+
+    def observe_reference_bars(
+        self,
+        request: ReferenceBarRequest,
+        market: ResolvedReferenceMarket,
+    ) -> ReferenceBarObservation: ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OpenInterestRequest:
+    """Aligned UTC half-open request for sampled historical open interest."""
+
+    identity: MarketIdentity
+    timeframe: str
+    start: datetime
+    end: datetime
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("open-interest request identity must be a MarketIdentity")
+        if self.identity.market is not Market.PERPETUAL:
+            raise InvalidRequestError("open interest requires market='perpetual'")
+        time_bar = TimeBar.parse(self.timeframe)
+        for name, value in (("start", self.start), ("end", self.end)):
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise InvalidRequestError(f"open-interest request {name} must be UTC-aware")
+            if time_bar.floor(value) != value:
+                raise InvalidRequestError(
+                    f"open-interest request {name} must align to {self.timeframe}"
+                )
+        if self.start >= self.end:
+            raise InvalidRequestError("open-interest request start must be before end")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedOpenInterestMarket:
+    """Canonical perpetual resolved to one losslessly interpretable OI target."""
+
+    identity: MarketIdentity
+    native_market_id: str
+    native_symbol: str
+    timeframes: frozenset[str]
+    derivative: DerivativeInterpretation
+
+    def __post_init__(self) -> None:
+        if self.identity.market is not Market.PERPETUAL or self.identity.settle is None:
+            raise InvalidRequestError("resolved open-interest market requires a settled perpetual")
+        if not isinstance(self.native_market_id, str) or not self.native_market_id:
+            raise InvalidRequestError("native_market_id must be a nonempty string")
+        if not isinstance(self.native_symbol, str) or not self.native_symbol:
+            raise InvalidRequestError("native_symbol must be a nonempty string")
+        if not isinstance(self.timeframes, frozenset):
+            raise InvalidRequestError("resolved open-interest timeframes must be a frozenset")
+        for timeframe in self.timeframes:
+            TimeBar.parse(timeframe)
+        if not isinstance(self.derivative, DerivativeInterpretation):
+            raise InvalidRequestError("resolved open-interest derivative is required")
+
+
+@dataclass(frozen=True, slots=True)
+class OpenInterestSourceEvidence:
+    """One immutable source revision contributing an OI observation interval."""
+
+    start: datetime
+    end: datetime
+    source_route: str
+    source_revision: str
+    object_key: str = ""
+    checksum_algorithm: str = ""
+    checksum_value: str = ""
+    retrieved_at: datetime | None = None
+    source_rows: int = 0
+    canonical_rows: int = 0
+    duplicate_rows: int = 0
+    normalizations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name, value in (("start", self.start), ("end", self.end)):
+            if value.tzinfo is None or value.utcoffset() != timedelta(0):
+                raise InvalidRequestError(f"OI source {name} must be UTC-aware")
+        if self.start >= self.end:
+            raise InvalidRequestError("OI source range must be nonempty")
+        for name in ("source_route", "source_revision"):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name):
+                raise InvalidRequestError(f"OI source {name} must be a nonempty string")
+        if bool(self.checksum_algorithm) != bool(self.checksum_value):
+            raise InvalidRequestError("OI source checksum algorithm/value must be paired")
+        if self.retrieved_at is not None and (
+            self.retrieved_at.tzinfo is None or self.retrieved_at.utcoffset() != timedelta(0)
+        ):
+            raise InvalidRequestError("OI source retrieved_at must be UTC-aware")
+        counts = (self.source_rows, self.canonical_rows, self.duplicate_rows)
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in counts
+        ):
+            raise InvalidRequestError("OI source row counts must be nonnegative integers")
+        if self.canonical_rows + self.duplicate_rows != self.source_rows:
+            raise InvalidRequestError("OI source row counts are inconsistent")
+        if not isinstance(self.normalizations, tuple) or not all(
+            isinstance(value, str) and value for value in self.normalizations
+        ):
+            raise InvalidRequestError("OI source normalizations must be nonempty strings")
+
+
+@dataclass(frozen=True, slots=True)
+class OpenInterestObservation:
+    """Untrusted sampled gauge rows, source-exhaustive windows, and revisions."""
+
+    frame: pl.DataFrame
+    observed: tuple[ObservedWindow, ...]
+    sources: tuple[OpenInterestSourceEvidence, ...] = ()
+
+
+class HistoricalOpenInterestProvider(Protocol):
+    """Structural SPI for historical sampled open interest."""
+
+    @property
+    def descriptor(self) -> ProviderDescriptor: ...
+
+    def resolve_open_interest_market(
+        self, identity: MarketIdentity
+    ) -> ResolvedOpenInterestMarket: ...
+
+    def observe_open_interest(
+        self,
+        request: OpenInterestRequest,
+        market: ResolvedOpenInterestMarket,
+    ) -> OpenInterestObservation: ...

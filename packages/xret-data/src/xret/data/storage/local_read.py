@@ -7,39 +7,57 @@ policy, acquires locks, mutates storage, or contacts a provider.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, replace
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import polars as pl
 from xret.data.errors import CatalogError, InvalidRequestError
 from xret.data.models import (
     CoverageInterval,
     CoverageStatus,
+    DatasetFamily,
     DatasetKey,
     Market,
     MarketIdentity,
+    StorageKey,
     YearMonth,
+    storage_identity,
 )
-from xret.data.schema import OHLCV_SCHEMA
+from xret.data.schema import (
+    OHLCV_SCHEMA,
+    OPEN_INTEREST_SCHEMA,
+    REFERENCE_BAR_SCHEMA,
+    SETTLED_FUNDING_SCHEMA,
+)
 from xret.data.storage import paths
 from xret.data.storage.catalog import (
     CATALOG_FILE_NAME,
     Catalog,
     detect_incompatible_state,
 )
+from xret.data.storage.parquet import _require_safe_managed_path
 from xret.data.timeframe import TimeBar
+
+
+@dataclass(frozen=True, slots=True)
+class IndexedFileFacts:
+    relative_path: str
+    year_month: YearMonth
+    physical_hash: str
 
 
 @dataclass(frozen=True, slots=True)
 class LocalReadFacts:
     """Immutable local coverage facts for one resolved read request."""
 
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     start: datetime
     end: datetime
     covered: tuple[CoverageInterval, ...]
     gaps: tuple[CoverageInterval, ...]
+    indexed_files: tuple[IndexedFileFacts, ...] = ()
 
 
 def read_local_facts(
@@ -68,7 +86,7 @@ def read_local_facts(
 def read_local_facts_for_key(
     state_dir: Path,
     data_dir: Path,
-    dataset_key: DatasetKey,
+    dataset_key: StorageKey,
     start: datetime,
     end: datetime,
 ) -> LocalReadFacts:
@@ -90,9 +108,17 @@ def read_local_facts_for_key(
     try:
         with catalog.snapshot():
             covered, gaps = catalog.coverage_and_gaps(dataset_key, start, end)
+            indexed_files = tuple(
+                IndexedFileFacts(
+                    row.relative_path,
+                    YearMonth(row.year, row.month),
+                    row.physical_hash,
+                )
+                for row in catalog.list_files(dataset_key)
+            )
     finally:
         catalog.close()
-    return LocalReadFacts(dataset_key, start, end, covered, gaps)
+    return LocalReadFacts(dataset_key, start, end, covered, gaps, indexed_files)
 
 
 def _first_bar_start_at_or_after(time_bar: TimeBar, moment: datetime) -> datetime:
@@ -111,7 +137,10 @@ def _required_months(facts: LocalReadFacts) -> list[YearMonth]:
     month that owns no bar and therefore has no file. Deriving requirements
     from elapsed time instead of bar starts demands that nonexistent file.
     """
-    time_bar = TimeBar.parse(facts.dataset_key.timeframe)
+    identity = storage_identity(facts.dataset_key)
+    if identity.family is DatasetFamily.SETTLED_FUNDING:
+        return []
+    time_bar = TimeBar.parse(identity.timeframe)
     months: dict[tuple[int, int], YearMonth] = {}
     for interval in facts.covered:
         for year_month, slice_start, slice_end in paths.iter_month_slices(
@@ -125,6 +154,17 @@ def _required_months(facts: LocalReadFacts) -> list[YearMonth]:
 #: Temporary join columns used to restrict rows to covered intervals.
 _COVERED_START = "_covered_start"
 _COVERED_END = "_covered_end"
+
+
+def _family_schema_and_timestamp(facts: LocalReadFacts) -> tuple[pl.Schema, str]:
+    family = storage_identity(facts.dataset_key).family
+    if family is DatasetFamily.TRADE_BARS:
+        return OHLCV_SCHEMA, "timestamp"
+    if family is DatasetFamily.SETTLED_FUNDING:
+        return SETTLED_FUNDING_SCHEMA, "effective_at"
+    if family is DatasetFamily.REFERENCE_BARS:
+        return REFERENCE_BAR_SCHEMA, "timestamp"
+    return OPEN_INTEREST_SCHEMA, "timestamp"
 
 
 def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyFrame:
@@ -141,36 +181,78 @@ def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyF
     catalog does not currently cover, for example when a sync published
     Parquet and then failed before recording coverage.
     """
+    schema, timestamp = _family_schema_and_timestamp(facts)
     bounds = pl.LazyFrame(
         {
             _COVERED_START: [interval.start for interval in facts.covered],
             _COVERED_END: [interval.end for interval in facts.covered],
         },
         schema={
-            _COVERED_START: OHLCV_SCHEMA["timestamp"],
-            _COVERED_END: OHLCV_SCHEMA["timestamp"],
+            _COVERED_START: schema[timestamp],
+            _COVERED_END: schema[timestamp],
         },
     )
     return (
-        frame.sort("timestamp")
-        .join_asof(bounds, left_on="timestamp", right_on=_COVERED_START, strategy="backward")
-        .filter(pl.col(_COVERED_END).is_not_null() & (pl.col("timestamp") < pl.col(_COVERED_END)))
+        frame.sort(timestamp)
+        .join_asof(bounds, left_on=timestamp, right_on=_COVERED_START, strategy="backward")
+        .filter(pl.col(_COVERED_END).is_not_null() & (pl.col(timestamp) < pl.col(_COVERED_END)))
         .drop(_COVERED_START, _COVERED_END)
     )
 
 
+def _verified_frame(data_dir: Path, facts: LocalReadFacts, item: IndexedFileFacts) -> pl.DataFrame:
+    relative = PurePosixPath(item.relative_path)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != item.relative_path
+        or any(part in ("", ".", "..") for part in relative.parts)
+    ):
+        raise CatalogError(f"catalog contains an unsafe canonical path: {item.relative_path!r}")
+    expected = paths.relative_month_file_path(data_dir, facts.dataset_key, item.year_month)
+    if item.relative_path != expected:
+        raise CatalogError(
+            f"catalog path {item.relative_path!r} does not match canonical path {expected!r}"
+        )
+    path = data_dir.joinpath(*relative.parts)
+    _require_safe_managed_path(data_dir, path, error_cls=CatalogError)
+    if not path.is_file():
+        raise CatalogError(f"catalog coverage references missing canonical file: {path}")
+    try:
+        with path.open("rb") as handle:
+            digest = hashlib.sha256()
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+            if digest.hexdigest() != item.physical_hash:
+                raise CatalogError(f"catalog physical hash differs from canonical file: {path}")
+            handle.seek(0)
+            return pl.read_parquet(handle)
+    except CatalogError:
+        raise
+    except Exception as exc:
+        raise CatalogError(f"failed to read canonical file {path}: {exc}") from exc
+
+
 def lazy_frame_for_facts(data_dir: Path, facts: LocalReadFacts) -> pl.LazyFrame:
-    """Build the sorted lazy frame for catalog-covered canonical files."""
-    required_paths = [
-        paths.month_file_path(data_dir, facts.dataset_key, year_month)
-        for year_month in _required_months(facts)
-    ]
-    missing = [path for path in required_paths if not path.is_file()]
-    if missing:
-        raise CatalogError(f"catalog coverage references missing canonical file: {missing[0]}")
-    if not required_paths:
-        return pl.DataFrame(schema=OHLCV_SCHEMA).lazy()
-    combined = pl.concat([pl.scan_parquet(path) for path in required_paths], how="vertical")
+    """Build a sorted lazy query over verified, stable canonical snapshots."""
+    schema, _ = _family_schema_and_timestamp(facts)
+    family = storage_identity(facts.dataset_key).family
+    if family is DatasetFamily.SETTLED_FUNDING:
+        required = facts.indexed_files
+    else:
+        required_months = set(_required_months(facts))
+        required = tuple(item for item in facts.indexed_files if item.year_month in required_months)
+        indexed_months = {item.year_month for item in required}
+        missing_months = required_months - indexed_months
+        if missing_months:
+            missing = min(missing_months, key=lambda item: (item.year, item.month))
+            raise CatalogError(
+                "catalog coverage references missing canonical file: "
+                f"{paths.month_file_path(data_dir, facts.dataset_key, missing)}"
+            )
+    if not required:
+        return pl.DataFrame(schema=schema).lazy()
+    frames = [_verified_frame(data_dir, facts, item).lazy() for item in required]
+    combined = pl.concat(frames, how="vertical")
     return _restrict_to_covered(combined, facts)
 
 
@@ -190,7 +272,8 @@ def _resolve_local_perpetual_settle(
         candidates = {
             key.settle
             for key in catalog.list_datasets()
-            if key.exchange == identity.exchange
+            if isinstance(key, DatasetKey)
+            and key.exchange == identity.exchange
             and key.symbol == identity.symbol
             and key.market is Market.PERPETUAL
             and key.timeframe == timeframe

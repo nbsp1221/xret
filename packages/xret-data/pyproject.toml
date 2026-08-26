@@ -38,3 +38,6 @@ build-backend = "uv_build"
 
 [tool.uv.build-backend]
 module-name = "xret.data"
+
+[project.entry-points."xret.data.providers"]
+binance-data-vision = "xret.data.providers.binance_data_vision:BinanceDataVisionProvider"

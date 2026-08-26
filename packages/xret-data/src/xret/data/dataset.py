@@ -28,7 +28,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import polars as pl
 from xret.data import quality
@@ -299,7 +299,7 @@ class BarDataset:
 
     def _effective_provider(self) -> HistoricalBarProvider:
         handle = self._provider if self._provider is not None else ProviderHandle(None)
-        return handle.get()
+        return cast("HistoricalBarProvider", handle.get())
 
     def __post_init__(self) -> None:
         # Eager syntax validation only (Decision 11); still no I/O.
@@ -854,7 +854,7 @@ class BarDataset:
         )
         if not facts.covered:
             return PartialScanResult(
-                dataset_key=facts.dataset_key,
+                dataset_key=cast("DatasetKey", facts.dataset_key),
                 data=local_read.lazy_frame_for_facts(config.data_dir, facts),
                 covered=(),
                 gaps=facts.gaps or (CoverageInterval(start_dt, end_dt, CoverageStatus.MISSING),),
@@ -872,7 +872,7 @@ class BarDataset:
             for gap in facts.gaps
         )
         return PartialScanResult(
-            dataset_key=facts.dataset_key,
+            dataset_key=cast("DatasetKey", facts.dataset_key),
             data=lazy,
             covered=facts.covered,
             gaps=facts.gaps,

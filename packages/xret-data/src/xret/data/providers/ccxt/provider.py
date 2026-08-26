@@ -7,16 +7,26 @@ import time
 from _thread import LockType
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 
 import polars as pl
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.models import BarRequest, DataWarning, Market, MarketIdentity
+from xret.data.models import (
+    BarRequest,
+    DataWarning,
+    Market,
+    MarketIdentity,
+    ReferencePriceKind,
+)
 from xret.data.providers.ccxt import (
     capabilities,
     client,
     compatibility,
+    funding_pagination,
     markets,
+    oi_pagination,
     pagination,
+    reference_pagination,
     semantics,
 )
 from xret.data.providers.ccxt.live import (
@@ -27,10 +37,22 @@ from xret.data.providers.ccxt.live import (
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
+    PROVIDER_FUNDING_SCHEMA,
+    PROVIDER_OPEN_INTEREST_SCHEMA,
+    PROVIDER_REFERENCE_BAR_SCHEMA,
     BarObservation,
+    FundingObservation,
+    FundingRequest,
     MarketDefinition,
+    OpenInterestObservation,
+    OpenInterestRequest,
     ProviderDescriptor,
+    ReferenceBarObservation,
+    ReferenceBarRequest,
     ResolvedBarMarket,
+    ResolvedFundingMarket,
+    ResolvedOpenInterestMarket,
+    ResolvedReferenceMarket,
 )
 from xret.data.timeframe import TimeBar
 
@@ -83,6 +105,8 @@ class CcxtProvider:
         self._monotonic = monotonic
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
+        self._funding_duplicate_counts: dict[tuple[MarketIdentity, str, str], int] = {}
+        self._open_interest_duplicate_counts: dict[tuple[MarketIdentity, str, str], int] = {}
         self._live_capability_provider = live_capability_provider
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
@@ -181,6 +205,240 @@ class CcxtProvider:
                 self._resolutions_by_market[key] = resolution
             self._resolutions_by_request[identity] = resolution
             return resolution.market
+
+    def resolve_funding_market(self, identity: MarketIdentity) -> ResolvedFundingMarket:
+        if identity.market is not Market.PERPETUAL:
+            raise UnsupportedMarketError("settled funding is available only for perpetual markets")
+        market = self.resolve_market(identity)
+        with self._resolution_lock:
+            resolution = self._resolutions_by_market[_market_key(market)]
+        if not resolution.exchange.has.get("fetchFundingRateHistory"):
+            raise UnsupportedMarketError(
+                f"CCXT {resolution.exchange.id!r} does not advertise fetchFundingRateHistory"
+            )
+        return ResolvedFundingMarket(
+            identity=market.identity,
+            native_market_id=market.native_market_id,
+            native_symbol=market.native_symbol,
+        )
+
+    def observe_funding(
+        self,
+        request: FundingRequest,
+        market: ResolvedFundingMarket,
+    ) -> FundingObservation:
+        key = (market.identity, market.native_market_id, market.native_symbol)
+        with self._resolution_lock:
+            resolution = self._resolutions_by_market.get(key)
+        if resolution is None:
+            raise ProviderError("CCXT funding market was not resolved by this provider instance")
+        retry = client.RetryPolicy(
+            max_retries=self._max_retries,
+            backoff=lambda attempt: client.exponential_backoff(
+                attempt, base=self._retry_backoff_base
+            ),
+            sleep=self._sleep,
+        )
+        with resolution.observation_lock:
+            result = funding_pagination.paginate_funding_history(
+                exchange_id=resolution.exchange.id,
+                start=request.start,
+                end=request.end,
+                page_limit=self._page_limit,
+                fetch_page=lambda since, limit, params: client.fetch_funding_page(
+                    resolution.exchange,
+                    resolution.native_market.native_symbol,
+                    since,
+                    limit,
+                    params,
+                    retry,
+                    self._pacers_by_id[resolution.client_id],
+                ),
+            )
+            with self._resolution_lock:
+                self._funding_duplicate_counts[key] = result.duplicate_count
+        return FundingObservation(
+            frame=_provider_funding_frame(result.rows),
+            observed=result.observed,
+        )
+
+    def resolve_open_interest_market(self, identity: MarketIdentity) -> ResolvedOpenInterestMarket:
+        if identity.market is not Market.PERPETUAL:
+            raise UnsupportedMarketError("open interest is available only for perpetual markets")
+        market = self.resolve_market(identity)
+        with self._resolution_lock:
+            resolution = self._resolutions_by_market[_market_key(market)]
+        timeframes = markets.supported_open_interest_timeframes(resolution.exchange)
+        if not timeframes:
+            raise UnsupportedMarketError(
+                f"CCXT {resolution.exchange.id!r} has no compatible fetchOpenInterestHistory"
+            )
+        derivative = markets.derivative_interpretation(resolution.native_market)
+        is_quanto = resolution.native_market.metadata.get("quanto") is True
+        if is_quanto or derivative.linear is not True or derivative.inverse is not False:
+            raise UnsupportedMarketError(
+                "open interest requires an unambiguous linear, non-inverse, non-quanto contract"
+            )
+        try:
+            contract_size = Decimal(derivative.contract_size or "")
+        except (InvalidOperation, ValueError) as exc:
+            raise UnsupportedMarketError(
+                "open interest requires an exact positive contract size"
+            ) from exc
+        if not contract_size.is_finite() or contract_size <= 0:
+            raise UnsupportedMarketError("open interest requires an exact positive contract size")
+        return ResolvedOpenInterestMarket(
+            identity=market.identity,
+            native_market_id=market.native_market_id,
+            native_symbol=market.native_symbol,
+            timeframes=timeframes,
+            derivative=derivative,
+        )
+
+    def observe_open_interest(
+        self,
+        request: OpenInterestRequest,
+        market: ResolvedOpenInterestMarket,
+    ) -> OpenInterestObservation:
+        key = (market.identity, market.native_market_id, market.native_symbol)
+        with self._resolution_lock:
+            resolution = self._resolutions_by_market.get(key)
+        if resolution is None:
+            raise ProviderError(
+                "CCXT open-interest market was not resolved by this provider instance"
+            )
+        retry = client.RetryPolicy(
+            max_retries=self._max_retries,
+            backoff=lambda attempt: client.exponential_backoff(
+                attempt, base=self._retry_backoff_base
+            ),
+            sleep=self._sleep,
+        )
+        with resolution.observation_lock:
+            result = oi_pagination.paginate_open_interest_history(
+                exchange_id=resolution.exchange.id,
+                timeframe=request.timeframe,
+                start=request.start,
+                end=request.end,
+                page_limit=min(self._page_limit, 500),
+                fetch_page=lambda timeframe, since, limit, params: client.fetch_open_interest_page(
+                    resolution.exchange,
+                    resolution.native_market.native_symbol,
+                    timeframe,
+                    since,
+                    limit,
+                    params,
+                    retry,
+                    self._pacers_by_id[resolution.client_id],
+                ),
+            )
+            with self._resolution_lock:
+                self._open_interest_duplicate_counts[key] = result.duplicate_count
+        return OpenInterestObservation(
+            frame=_provider_open_interest_frame(result.rows),
+            observed=result.observed,
+        )
+
+    def _open_interest_normalizations(self, market: ResolvedOpenInterestMarket) -> tuple[str, ...]:
+        key = (market.identity, market.native_market_id, market.native_symbol)
+        with self._resolution_lock:
+            duplicates = self._open_interest_duplicate_counts.pop(key, 0)
+        result: list[str] = []
+        if duplicates:
+            result.append("open_interest.identical_duplicate_dedup")
+        return tuple(result)
+
+    def _open_interest_source_field_mapping(self, market: ResolvedOpenInterestMarket) -> str:
+        return "openInterestAmount->open_interest_amount;openInterestValue->open_interest_value"
+
+    def resolve_reference_market(
+        self, identity: MarketIdentity, kind: ReferencePriceKind
+    ) -> ResolvedReferenceMarket:
+        if identity.market is not Market.PERPETUAL:
+            raise UnsupportedMarketError("reference bars are available only for perpetual markets")
+        kind = ReferencePriceKind(kind)
+        market = self.resolve_market(identity)
+        with self._resolution_lock:
+            resolution = self._resolutions_by_market[_market_key(market)]
+        capability = {
+            ReferencePriceKind.MARK: "fetchMarkOHLCV",
+            ReferencePriceKind.INDEX: "fetchIndexOHLCV",
+            ReferencePriceKind.PREMIUM_INDEX: "fetchPremiumIndexOHLCV",
+        }[kind]
+        if not resolution.exchange.has.get(capability):
+            raise UnsupportedMarketError(
+                f"CCXT {resolution.exchange.id!r} does not advertise {capability}"
+            )
+        timeframes = markets.supported_reference_timeframes(resolution.exchange)
+        if not timeframes:
+            raise UnsupportedMarketError(
+                f"CCXT {resolution.exchange.id!r} has no canonical reference timeframes"
+            )
+        pair_scoped = kind is ReferencePriceKind.INDEX
+        return ResolvedReferenceMarket(
+            identity=market.identity,
+            native_market_id=(identity.symbol if pair_scoped else market.native_market_id),
+            native_symbol=(identity.symbol if pair_scoped else market.native_symbol),
+            kind=kind,
+            timeframes=timeframes,
+            reference_target_scope="pair" if pair_scoped else "contract",
+        )
+
+    def observe_reference_bars(
+        self,
+        request: ReferenceBarRequest,
+        market: ResolvedReferenceMarket,
+    ) -> ReferenceBarObservation:
+        with self._resolution_lock:
+            candidates = tuple(
+                value
+                for value in self._resolutions_by_market.values()
+                if value.market.identity == market.identity
+            )
+        if len(candidates) != 1:
+            raise ProviderError("CCXT reference market was not resolved by this provider instance")
+        resolution = candidates[0]
+        method_name = {
+            ReferencePriceKind.MARK: "fetch_mark_ohlcv",
+            ReferencePriceKind.INDEX: "fetch_index_ohlcv",
+            ReferencePriceKind.PREMIUM_INDEX: "fetch_premium_index_ohlcv",
+        }[request.kind]
+        retry = client.RetryPolicy(
+            max_retries=self._max_retries,
+            backoff=lambda attempt: client.exponential_backoff(
+                attempt, base=self._retry_backoff_base
+            ),
+            sleep=self._sleep,
+        )
+        with resolution.observation_lock:
+            result = reference_pagination.paginate_reference_history(
+                exchange_id=resolution.exchange.id,
+                time_bar=TimeBar.parse(request.timeframe),
+                start=request.start,
+                end=request.end,
+                page_limit=self._page_limit,
+                fetch_page=lambda since, limit, params: client.fetch_reference_page(
+                    resolution.exchange,
+                    method_name,
+                    market.native_symbol,
+                    request.timeframe,
+                    since,
+                    limit,
+                    params,
+                    retry,
+                    self._pacers_by_id[resolution.client_id],
+                ),
+            )
+        return ReferenceBarObservation(
+            frame=_provider_reference_frame(result.rows),
+            observed=result.observed,
+        )
+
+    def _funding_normalizations(self, market: ResolvedFundingMarket) -> tuple[str, ...]:
+        key = (market.identity, market.native_market_id, market.native_symbol)
+        with self._resolution_lock:
+            duplicates = self._funding_duplicate_counts.pop(key, 0)
+        return ("funding.identical_duplicate_dedup",) if duplicates else ()
 
     def fetch_markets(
         self,
@@ -348,6 +606,26 @@ class CcxtProvider:
         )
 
 
+def _provider_funding_frame(
+    rows: tuple[tuple[int, float, int | None, float | None], ...],
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "effective_at": (
+                pl.Series("effective_at", [row[0] for row in rows], dtype=pl.Int64)
+                .cast(pl.Datetime(time_unit="ms"))
+                .dt.replace_time_zone("UTC")
+            ),
+            "funding_rate": pl.Series("funding_rate", [row[1] for row in rows], dtype=pl.Float64),
+            "funding_interval_seconds": pl.Series(
+                "funding_interval_seconds", [row[2] for row in rows], dtype=pl.Int64
+            ),
+            "mark_price": pl.Series("mark_price", [row[3] for row in rows], dtype=pl.Float64),
+        },
+        schema=PROVIDER_FUNDING_SCHEMA,
+    )
+
+
 def _provider_frame(rows: tuple[tuple[float, ...], ...]) -> pl.DataFrame:
     ordered = sorted(rows, key=lambda row: row[0])
     return pl.DataFrame(
@@ -368,4 +646,44 @@ def _provider_frame(rows: tuple[tuple[float, ...], ...]) -> pl.DataFrame:
             "volume": pl.Series("volume", [float(row[5]) for row in ordered], dtype=pl.Float64),
         },
         schema=PROVIDER_BAR_SCHEMA,
+    )
+
+
+def _provider_reference_frame(
+    rows: tuple[tuple[float, float, float, float, float], ...],
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "timestamp": (
+                pl.Series("timestamp", [int(row[0]) for row in rows], dtype=pl.Int64)
+                .cast(pl.Datetime(time_unit="ms"))
+                .dt.replace_time_zone("UTC")
+            ),
+            "open": pl.Series("open", [row[1] for row in rows], dtype=pl.Float64),
+            "high": pl.Series("high", [row[2] for row in rows], dtype=pl.Float64),
+            "low": pl.Series("low", [row[3] for row in rows], dtype=pl.Float64),
+            "close": pl.Series("close", [row[4] for row in rows], dtype=pl.Float64),
+        },
+        schema=PROVIDER_REFERENCE_BAR_SCHEMA,
+    )
+
+
+def _provider_open_interest_frame(
+    rows: tuple[tuple[int, float, float | None], ...],
+) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "timestamp": (
+                pl.Series("timestamp", [row[0] for row in rows], dtype=pl.Int64)
+                .cast(pl.Datetime(time_unit="ms"))
+                .dt.replace_time_zone("UTC")
+            ),
+            "open_interest_amount": pl.Series(
+                "open_interest_amount", [row[1] for row in rows], dtype=pl.Float64
+            ),
+            "open_interest_value": pl.Series(
+                "open_interest_value", [row[2] for row in rows], dtype=pl.Float64
+            ),
+        },
+        schema=PROVIDER_OPEN_INTEREST_SCHEMA,
     )

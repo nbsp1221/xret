@@ -8,10 +8,11 @@ from Parquet.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -20,9 +21,14 @@ from xret.data.errors import CatalogError
 from xret.data.models import (
     CoverageInterval,
     CoverageStatus,
-    DatasetKey,
+    DatasetFamily,
     Market,
+    ProviderEvidence,
     QualitySeverity,
+    StorageKey,
+    _key_from_storage_identity,
+    _StorageIdentity,
+    storage_identity,
 )
 
 if TYPE_CHECKING:
@@ -48,7 +54,7 @@ __all__ = [
 #: Current, incompatible catalog schema.  Older layouts are rejected rather
 #: than migrated because their retry, generation, and provenance semantics
 #: are retired.
-SCHEMA_VERSION: Final[int] = 4
+SCHEMA_VERSION: Final[int] = 6
 #: Name of the SQLite coverage/provenance index file under `state_dir`.
 CATALOG_FILE_NAME: Final[str] = "catalog.sqlite3"
 
@@ -185,7 +191,7 @@ def covered_and_gaps(
 class FileMetadata:
     """SQLite index metadata for one published physical Parquet file."""
 
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     relative_path: str
     year: int
     month: int
@@ -194,6 +200,7 @@ class FileMetadata:
     max_timestamp: datetime
     physical_hash: str
     schema_version: int
+    contributors: tuple[ProviderEvidence, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +208,7 @@ class IngestionRunMetadata:
     """One synchronization run with immutable request identity."""
 
     run_id: str
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     requested_start: datetime
     requested_end: datetime
     started_at: datetime
@@ -234,7 +241,7 @@ class QualityEventMetadata:
 class FileRow:
     """A file record as read back from the catalog."""
 
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     relative_path: str
     year: int
     month: int
@@ -253,6 +260,8 @@ _CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS datasets (
         id INTEGER PRIMARY KEY,
+        family TEXT NOT NULL,
+        variant TEXT NOT NULL,
         exchange TEXT NOT NULL,
         symbol TEXT NOT NULL,
         market TEXT NOT NULL,
@@ -261,7 +270,7 @@ _CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
         provider_name TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        UNIQUE (exchange, symbol, market, settle, timeframe)
+        UNIQUE (family, variant, exchange, symbol, market, settle, timeframe)
     )
     """,
     """
@@ -281,6 +290,32 @@ _CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_files_dataset ON files(dataset_id)",
+    """
+    CREATE TABLE IF NOT EXISTS source_ownership (
+        id INTEGER PRIMARY KEY,
+        dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+        start_ts TEXT NOT NULL,
+        end_ts TEXT NOT NULL,
+        provider_name TEXT NOT NULL,
+        UNIQUE (dataset_id, start_ts, end_ts)
+    )
+    """,
+    (
+        "CREATE INDEX IF NOT EXISTS idx_source_ownership_dataset "
+        "ON source_ownership(dataset_id, start_ts)"
+    ),
+    """
+    CREATE TABLE IF NOT EXISTS file_contributors (
+        file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        ordinal INTEGER NOT NULL,
+        provider_name TEXT NOT NULL,
+        start_ts TEXT NOT NULL,
+        end_ts TEXT NOT NULL,
+        source_revision TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        PRIMARY KEY (file_id, ordinal)
+    )
+    """,
     """
     CREATE TABLE IF NOT EXISTS ingestion_runs (
         id INTEGER PRIMARY KEY,
@@ -378,8 +413,8 @@ def terminal_commit_is_visible(
         row = connection.execute(
             """
             SELECT r.status, r.requested_start, r.requested_end, r.started_at,
-                   r.schema_version, d.exchange, d.symbol, d.market, d.settle,
-                   d.timeframe
+                   r.schema_version, d.family, d.variant, d.exchange, d.symbol,
+                   d.market, d.settle, d.timeframe
             FROM ingestion_runs r
             JOIN datasets d ON d.id = r.dataset_id
             WHERE r.run_id = ?
@@ -392,11 +427,7 @@ def terminal_commit_is_visible(
             _iso(run.requested_end),
             _iso(run.started_at),
             run.schema_version,
-            run.dataset_key.exchange,
-            run.dataset_key.symbol,
-            run.dataset_key.market.value,
-            run.dataset_key.settle,
-            run.dataset_key.timeframe,
+            *_identity_values(run.dataset_key),
         )
         if row is None or tuple(row) != expected_identity:
             return False
@@ -407,16 +438,11 @@ def terminal_commit_is_visible(
                 SELECT f.relative_path, f.physical_hash
                 FROM files f
                 JOIN datasets d ON d.id = f.dataset_id
-                WHERE d.exchange = ? AND d.symbol = ? AND d.market = ?
-                  AND d.settle = ? AND d.timeframe = ?
+                WHERE d.family = ? AND d.variant = ? AND d.exchange = ?
+                  AND d.symbol = ? AND d.market = ? AND d.settle = ?
+                  AND d.timeframe = ?
                 """,
-                (
-                    run.dataset_key.exchange,
-                    run.dataset_key.symbol,
-                    run.dataset_key.market.value,
-                    run.dataset_key.settle,
-                    run.dataset_key.timeframe,
-                ),
+                _identity_values(run.dataset_key),
             )
         }
         return all(
@@ -468,6 +494,7 @@ def detect_incompatible_state(db_path: Path) -> bool:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
+
         if "schema_info" not in tables:
             return True
         rows = probe.execute("SELECT version FROM schema_info WHERE singleton = 1").fetchall()
@@ -573,6 +600,46 @@ def _parse_iso(value: str) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _evidence_json(value: ProviderEvidence) -> str:
+    return json.dumps(
+        asdict(value),
+        default=lambda item: item.isoformat() if isinstance(item, datetime) else item,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _identity_values(key: StorageKey) -> tuple[str, str, str, str, str, str, str]:
+    identity = storage_identity(key)
+    return (
+        identity.family.value,
+        identity.variant,
+        identity.exchange,
+        identity.symbol,
+        identity.market.value,
+        identity.settle,
+        identity.timeframe,
+    )
+
+
+def _key_from_row(row: sqlite3.Row) -> StorageKey:
+    try:
+        return _key_from_storage_identity(
+            _StorageIdentity(
+                family=DatasetFamily(row["family"]),
+                variant=row["variant"],
+                exchange=row["exchange"],
+                symbol=row["symbol"],
+                market=Market(row["market"]),
+                settle=row["settle"],
+                timeframe=row["timeframe"],
+            )
+        )
+    except Exception as exc:
+        raise CatalogError("catalog contains an invalid dataset identity") from exc
+
+
 # --------------------------------------------------------------------------
 # Catalog
 # --------------------------------------------------------------------------
@@ -653,7 +720,7 @@ class Catalog:
 
     # -- datasets ----------------------------------------------------
 
-    def ensure_dataset(self, key: DatasetKey) -> int:
+    def ensure_dataset(self, key: StorageKey) -> int:
         """Return the dataset row id, inserting it if it does not exist."""
         with self.transaction():
             now = _iso(datetime.now().astimezone())
@@ -663,63 +730,50 @@ class Catalog:
             cursor = self._connection.execute(
                 """
                 INSERT INTO datasets
-                    (exchange, symbol, market, settle, timeframe, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (family, variant, exchange, symbol, market, settle, timeframe,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    key.exchange,
-                    key.symbol,
-                    key.market.value,
-                    key.settle,
-                    key.timeframe,
-                    now,
-                    now,
-                ),
+                (*_identity_values(key), now, now),
             )
             dataset_id = cursor.lastrowid
             if dataset_id is None:
                 raise CatalogError(f"failed to insert dataset row for {key!r}")
             return dataset_id
 
-    def _get_dataset_id(self, key: DatasetKey) -> int | None:
+    def _get_dataset_id(self, key: StorageKey) -> int | None:
         row = self._connection.execute(
             """
             SELECT id FROM datasets
-            WHERE exchange = ? AND symbol = ? AND market = ? AND settle = ? AND timeframe = ?
+            WHERE family = ? AND variant = ? AND exchange = ? AND symbol = ?
+              AND market = ? AND settle = ? AND timeframe = ?
             """,
-            (key.exchange, key.symbol, key.market.value, key.settle, key.timeframe),
+            _identity_values(key),
         ).fetchone()
         return row["id"] if row is not None else None
 
-    def get_dataset_id(self, key: DatasetKey) -> int | None:
+    def get_dataset_id(self, key: StorageKey) -> int | None:
         return self._get_dataset_id(key)
 
-    def list_datasets(self) -> tuple[DatasetKey, ...]:
+    def list_datasets(self) -> tuple[StorageKey, ...]:
         rows = self._connection.execute(
-            "SELECT exchange, symbol, market, settle, timeframe FROM datasets ORDER BY id"
+            "SELECT family, variant, exchange, symbol, market, settle, timeframe "
+            "FROM datasets ORDER BY id"
         ).fetchall()
-        return tuple(
-            DatasetKey(
-                exchange=row["exchange"],
-                symbol=row["symbol"],
-                market=Market(row["market"]),
-                settle=row["settle"],
-                timeframe=row["timeframe"],
-            )
-            for row in rows
-        )
+        return tuple(_key_from_row(row) for row in rows)
 
-    def get_source_lineage(self, key: DatasetKey) -> str | None:
+    def get_source_lineage(self, key: StorageKey) -> str | None:
         row = self._connection.execute(
             """
             SELECT provider_name FROM datasets
-            WHERE exchange = ? AND symbol = ? AND market = ? AND settle = ? AND timeframe = ?
+            WHERE family = ? AND variant = ? AND exchange = ? AND symbol = ?
+              AND market = ? AND settle = ? AND timeframe = ?
             """,
-            (key.exchange, key.symbol, key.market.value, key.settle, key.timeframe),
+            _identity_values(key),
         ).fetchone()
         return row["provider_name"] if row is not None else None
 
-    def bind_source_lineage(self, key: DatasetKey, provider_name: str) -> None:
+    def bind_source_lineage(self, key: StorageKey, provider_name: str) -> None:
         if not provider_name:
             raise CatalogError("source lineage provider name must not be empty")
         with self.transaction():
@@ -737,18 +791,116 @@ class Catalog:
                     (provider_name, _iso(datetime.now().astimezone()), dataset_id),
                 )
 
-    def delete_dataset(self, key: DatasetKey) -> None:
+    def validate_source_ownership(
+        self, key: StorageKey, contributors: tuple[ProviderEvidence, ...]
+    ) -> None:
+        dataset_id = self._get_dataset_id(key)
+        previous: datetime | None = None
+        for contributor in contributors:
+            start = contributor.contributed_start
+            end = contributor.contributed_end
+            if start is None or end is None:
+                raise CatalogError("source contributor range is required")
+            if previous is not None and start < previous:
+                raise CatalogError("source contributors must be ordered and non-overlapping")
+            previous = end
+            if dataset_id is None:
+                continue
+            rows = self._connection.execute(
+                """
+                SELECT start_ts, end_ts, provider_name FROM source_ownership
+                WHERE dataset_id = ? AND start_ts < ? AND end_ts > ?
+                """,
+                (dataset_id, _iso(end), _iso(start)),
+            ).fetchall()
+            for row in rows:
+                if (
+                    row["provider_name"] != contributor.provider_name
+                    or row["start_ts"] != _iso(start)
+                    or row["end_ts"] != _iso(end)
+                ):
+                    raise CatalogError(
+                        "provider-owned canonical range overlaps an immutable ownership range"
+                    )
+
+    def validate_provider_request(
+        self,
+        key: StorageKey,
+        start: datetime,
+        end: datetime,
+        provider_name: str,
+    ) -> None:
+        dataset_id = self._get_dataset_id(key)
+        if dataset_id is None:
+            return
+        rows = self._connection.execute(
+            """
+            SELECT provider_name FROM source_ownership
+            WHERE dataset_id = ? AND start_ts < ? AND end_ts > ?
+            """,
+            (dataset_id, _iso(end), _iso(start)),
+        ).fetchall()
+        wrong = sorted(
+            {row["provider_name"] for row in rows if row["provider_name"] != provider_name}
+        )
+        if wrong:
+            raise CatalogError(
+                f"requested canonical range is owned by {wrong!r}, not {provider_name!r}"
+            )
+
+    def record_source_ownership(
+        self, key: StorageKey, contributors: tuple[ProviderEvidence, ...]
+    ) -> None:
+        with self.transaction():
+            self.validate_source_ownership(key, contributors)
+            dataset_id = self.ensure_dataset(key)
+            self._connection.executemany(
+                """
+                INSERT OR IGNORE INTO source_ownership
+                    (dataset_id, start_ts, end_ts, provider_name)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        dataset_id,
+                        _iso(contributor.contributed_start),
+                        _iso(contributor.contributed_end),
+                        contributor.provider_name,
+                    )
+                    for contributor in contributors
+                    if contributor.contributed_start is not None
+                    and contributor.contributed_end is not None
+                ],
+            )
+
+    def list_source_ownership(self, key: StorageKey) -> tuple[tuple[datetime, datetime, str], ...]:
+        dataset_id = self._get_dataset_id(key)
+        if dataset_id is None:
+            return ()
+        rows = self._connection.execute(
+            """
+            SELECT start_ts, end_ts, provider_name FROM source_ownership
+            WHERE dataset_id = ? ORDER BY start_ts
+            """,
+            (dataset_id,),
+        ).fetchall()
+        return tuple(
+            (_parse_iso(row["start_ts"]), _parse_iso(row["end_ts"]), row["provider_name"])
+            for row in rows
+        )
+
+    def delete_dataset(self, key: StorageKey) -> None:
         """Remove a dataset and every row that references it (cascade)."""
         with self.transaction():
             self._connection.execute(
-                "DELETE FROM datasets "
-                "WHERE exchange = ? AND symbol = ? AND market = ? AND settle = ? AND timeframe = ?",
-                (key.exchange, key.symbol, key.market.value, key.settle, key.timeframe),
+                "DELETE FROM datasets WHERE family = ? AND variant = ? AND exchange = ? "
+                "AND symbol = ? AND market = ? AND settle = ? AND timeframe = ?",
+                _identity_values(key),
             )
 
     # -- coverage ------------------------------------------------------
 
-    def get_coverage_segments(self, key: DatasetKey) -> tuple[CoverageSegment, ...]:
+    def get_coverage_segments(self, key: StorageKey) -> tuple[CoverageSegment, ...]:
         dataset_id = self._get_dataset_id(key)
         if dataset_id is None:
             return ()
@@ -765,11 +917,11 @@ class Catalog:
             for row in rows
         )
 
-    def get_coverage(self, key: DatasetKey) -> tuple[CoverageInterval, ...]:
+    def get_coverage(self, key: StorageKey) -> tuple[CoverageInterval, ...]:
         return tuple(segment.to_interval() for segment in self.get_coverage_segments(key))
 
     def apply_coverage(
-        self, key: DatasetKey, segment: CoverageSegment
+        self, key: StorageKey, segment: CoverageSegment
     ) -> tuple[CoverageSegment, ...]:
         """Merge `segment` into the dataset's stored coverage (by precedence)."""
         with self.transaction():
@@ -780,7 +932,7 @@ class Catalog:
             return normalized
 
     def apply_coverage_batch(
-        self, key: DatasetKey, segments: Sequence[CoverageSegment]
+        self, key: StorageKey, segments: Sequence[CoverageSegment]
     ) -> tuple[CoverageSegment, ...]:
         """Merge multiple `segments` into stored coverage in one pass.
 
@@ -797,7 +949,7 @@ class Catalog:
             self._replace_coverage(dataset_id, normalized)
             return normalized
 
-    def set_coverage(self, key: DatasetKey, segments: Sequence[CoverageSegment]) -> None:
+    def set_coverage(self, key: StorageKey, segments: Sequence[CoverageSegment]) -> None:
         """Replace a dataset's entire stored coverage with a normalized set."""
         with self.transaction():
             dataset_id = self.ensure_dataset(key)
@@ -823,8 +975,34 @@ class Catalog:
             ],
         )
 
+    def replace_coverage_range(
+        self,
+        key: StorageKey,
+        start: datetime,
+        end: datetime,
+        replacements: Sequence[CoverageSegment],
+    ) -> None:
+        """Set-replace coverage only inside one certified source interval."""
+        if start >= end:
+            raise CatalogError("replacement coverage range must be nonempty")
+        for segment in replacements:
+            if segment.start < start or segment.end > end:
+                raise CatalogError("replacement coverage falls outside its certified interval")
+        with self.transaction():
+            dataset_id = self.ensure_dataset(key)
+            retained: list[CoverageSegment] = []
+            for segment in self.get_coverage_segments(key):
+                if segment.end <= start or segment.start >= end:
+                    retained.append(segment)
+                    continue
+                if segment.start < start:
+                    retained.append(CoverageSegment(segment.start, start, segment.status))
+                if segment.end > end:
+                    retained.append(CoverageSegment(end, segment.end, segment.status))
+            self._replace_coverage(dataset_id, normalize_segments((*retained, *replacements)))
+
     def coverage_and_gaps(
-        self, key: DatasetKey, start: datetime, end: datetime
+        self, key: StorageKey, start: datetime, end: datetime
     ) -> tuple[tuple[CoverageInterval, ...], tuple[CoverageInterval, ...]]:
         return covered_and_gaps(self.get_coverage_segments(key), start, end)
 
@@ -900,21 +1078,58 @@ class Catalog:
                         file_id,
                     ),
                 )
+            self.record_source_ownership(metadata.dataset_key, metadata.contributors)
+            self._connection.execute("DELETE FROM file_contributors WHERE file_id = ?", (file_id,))
+            self._connection.executemany(
+                """
+                INSERT INTO file_contributors (
+                    file_id, ordinal, provider_name, start_ts, end_ts,
+                    source_revision, evidence_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        file_id,
+                        ordinal,
+                        contributor.provider_name,
+                        _iso(contributor.contributed_start),
+                        _iso(contributor.contributed_end),
+                        contributor.source_revision,
+                        _evidence_json(contributor),
+                    )
+                    for ordinal, contributor in enumerate(metadata.contributors)
+                    if contributor.contributed_start is not None
+                    and contributor.contributed_end is not None
+                    and contributor.source_revision is not None
+                ],
+            )
             if run_row is not None:
                 self._connection.execute(
                     "INSERT OR IGNORE INTO file_runs (file_id, run_id) VALUES (?, ?)",
                     (file_id, run_row["id"]),
                 )
 
+    def file_contributor_evidence(self, relative_path: str) -> tuple[str, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT fc.evidence_json FROM file_contributors fc
+            JOIN files f ON f.id = fc.file_id
+            WHERE f.relative_path = ? ORDER BY fc.ordinal
+            """,
+            (relative_path,),
+        ).fetchall()
+        return tuple(row["evidence_json"] for row in rows)
+
     def remove_file(self, relative_path: str) -> None:
         with self.transaction():
             self._connection.execute("DELETE FROM files WHERE relative_path = ?", (relative_path,))
 
-    def list_files(self, key: DatasetKey | None = None) -> tuple[FileRow, ...]:
+    def list_files(self, key: StorageKey | None = None) -> tuple[FileRow, ...]:
         if key is None:
             rows = self._connection.execute(
                 """
-                SELECT d.exchange, d.symbol, d.market, d.settle, d.timeframe, f.*
+                SELECT d.family, d.variant, d.exchange, d.symbol, d.market,
+                       d.settle, d.timeframe, f.*
                 FROM files f JOIN datasets d ON d.id = f.dataset_id
                 ORDER BY f.relative_path
                 """
@@ -925,7 +1140,8 @@ class Catalog:
                 return ()
             rows = self._connection.execute(
                 """
-                SELECT d.exchange, d.symbol, d.market, d.settle, d.timeframe, f.*
+                SELECT d.family, d.variant, d.exchange, d.symbol, d.market,
+                       d.settle, d.timeframe, f.*
                 FROM files f JOIN datasets d ON d.id = f.dataset_id
                 WHERE f.dataset_id = ?
                 ORDER BY f.relative_path
@@ -935,13 +1151,7 @@ class Catalog:
 
         return tuple(
             FileRow(
-                dataset_key=DatasetKey(
-                    exchange=row["exchange"],
-                    symbol=row["symbol"],
-                    market=Market(row["market"]),
-                    settle=row["settle"],
-                    timeframe=row["timeframe"],
-                ),
+                dataset_key=_key_from_row(row),
                 relative_path=row["relative_path"],
                 year=row["year"],
                 month=row["month"],
@@ -1038,7 +1248,7 @@ class Catalog:
                 ),
             )
 
-    def list_ingestion_run_ids(self, key: DatasetKey) -> tuple[str, ...]:
+    def list_ingestion_run_ids(self, key: StorageKey) -> tuple[str, ...]:
         dataset_id = self._get_dataset_id(key)
         if dataset_id is None:
             return ()
@@ -1049,7 +1259,7 @@ class Catalog:
 
     # -- quality events ------------------------------------------------
 
-    def record_quality_event(self, key: DatasetKey, event: QualityEventMetadata) -> None:
+    def record_quality_event(self, key: StorageKey, event: QualityEventMetadata) -> None:
         with self.transaction():
             dataset_id = self.ensure_dataset(key)
             run_row_id = None
@@ -1080,7 +1290,7 @@ class Catalog:
                 ),
             )
 
-    def list_quality_events(self, key: DatasetKey) -> tuple[QualityEventMetadata, ...]:
+    def list_quality_events(self, key: StorageKey) -> tuple[QualityEventMetadata, ...]:
         dataset_id = self._get_dataset_id(key)
         if dataset_id is None:
             return ()

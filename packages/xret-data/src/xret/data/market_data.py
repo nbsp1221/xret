@@ -21,18 +21,22 @@ from typing import cast
 from xret.data.config import MarketDataConfig, resolve_config
 from xret.data.dataset import BarDataset
 from xret.data.errors import CatalogError, UnsupportedMarketError
+from xret.data.funding import SettledFundingDataset
 from xret.data.live import LiveMarketData
 from xret.data.models import (
     CatalogRebuildResult,
     CatalogValidationResult,
     Market,
     MarketIdentity,
+    ReferencePriceKind,
     _coerce_market,
     _validate_exchange,
 )
-from xret.data.providers import HistoricalBarProvider, MarketDefinition
+from xret.data.open_interest import OpenInterestDataset
+from xret.data.providers import MarketDefinition
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.runtime import MarketDefinitionRuntime
+from xret.data.reference import ReferenceBarDataset
 from xret.data.storage.catalog import CATALOG_FILE_NAME
 from xret.data.storage.recovery import RecoveryService
 
@@ -106,7 +110,7 @@ class MarketData:
         self,
         config: MarketDataConfig | None = None,
         *,
-        provider: HistoricalBarProvider | str | None = None,
+        provider: object | None = None,
     ) -> None:
         self._config = config if config is not None else resolve_config()
         self._provider = ProviderHandle(provider)
@@ -150,12 +154,79 @@ class MarketData:
             market=canonical_market,
         )
 
+    def settled_funding(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        market: str,
+        settle: str | None = None,
+    ) -> SettledFundingDataset:
+        """Bind final public funding history for one perpetual market. No I/O."""
+        identity = MarketIdentity(
+            exchange=exchange,
+            symbol=symbol,
+            market=cast("Market", market),
+            settle=settle,
+        )
+        dataset = SettledFundingDataset(identity=identity)
+        object.__setattr__(dataset, "_config", self._config)
+        object.__setattr__(dataset, "_provider", self._provider)
+        return dataset
+
     def live(self, *, exchange: str) -> LiveMarketData:
         """Bind a one-shot live session for one canonical exchange. No I/O."""
         return LiveMarketData(
             provider=self._provider,
             exchange=_validate_exchange(exchange),
         )
+
+    def reference_bars(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        market: str,
+        settle: str | None = None,
+        kind: str,
+        timeframe: str,
+    ) -> ReferenceBarDataset:
+        """Bind one historical reference-price bar series. No I/O."""
+        identity = MarketIdentity(
+            exchange=exchange,
+            symbol=symbol,
+            market=cast("Market", market),
+            settle=settle,
+        )
+        dataset = ReferenceBarDataset(
+            identity=identity,
+            kind=cast("ReferencePriceKind", kind),
+            timeframe=timeframe,
+        )
+        object.__setattr__(dataset, "_config", self._config)
+        object.__setattr__(dataset, "_provider", self._provider)
+        return dataset
+
+    def open_interest(
+        self,
+        *,
+        exchange: str,
+        symbol: str,
+        market: str,
+        settle: str | None = None,
+        timeframe: str,
+    ) -> OpenInterestDataset:
+        """Bind one sampled historical open-interest gauge series. No I/O."""
+        identity = MarketIdentity(
+            exchange=exchange,
+            symbol=symbol,
+            market=cast("Market", market),
+            settle=settle,
+        )
+        dataset = OpenInterestDataset(identity=identity, timeframe=timeframe)
+        object.__setattr__(dataset, "_config", self._config)
+        object.__setattr__(dataset, "_provider", self._provider)
+        return dataset
 
     def bars(
         self,

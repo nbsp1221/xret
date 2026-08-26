@@ -17,7 +17,13 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Final
 
-from xret.data.models import DatasetKey, Market, YearMonth
+from xret.data.models import (
+    DatasetFamily,
+    Market,
+    StorageKey,
+    YearMonth,
+    storage_identity,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -53,6 +59,13 @@ MAINTENANCE_LOCK_FILE_NAME: Final[str] = "_maintenance.lock"
 _YEAR_DIR_RE: Final[re.Pattern[str]] = re.compile(r"^year=(\d{4})$")
 _MONTH_DIR_RE: Final[re.Pattern[str]] = re.compile(r"^month=(\d{2})$")
 _CANONICAL_PATH_DEPTH: Final[int] = 7
+_RESERVED_ROOT: Final[str] = "_xret"
+_FAMILY_PATH_NAMES: Final[dict[DatasetFamily, str]] = {
+    DatasetFamily.SETTLED_FUNDING: "settled-funding",
+    DatasetFamily.REFERENCE_BARS: "reference-bars",
+    DatasetFamily.OPEN_INTEREST: "open-interest",
+}
+_REFERENCE_PATH_KINDS: Final[frozenset[str]] = frozenset({"mark", "index", "premium_index"})
 
 # Separators, filesystem syntax, Windows-reserved syntax, and characters that
 # are not visibly readable in a path must never appear literally in a slug.
@@ -86,42 +99,52 @@ def _symbol_components(symbol: str) -> tuple[str, str]:
     return base, quote
 
 
-def instrument_slug(key: DatasetKey) -> str:
+def instrument_slug(key: StorageKey) -> str:
     """Return the readable instrument projection for ``key``.
 
     Spot slugs contain base and quote; perpetual slugs additionally contain
     settlement. The internal spot sentinel is never exposed in paths.
     """
-    base, quote = _symbol_components(key.symbol)
+    identity = storage_identity(key)
+    base, quote = _symbol_components(identity.symbol)
     components = [encode_slug_component(base), encode_slug_component(quote)]
-    if key.market is Market.PERPETUAL:
-        components.append(encode_slug_component(key.settle))
+    if identity.market is Market.PERPETUAL:
+        components.append(encode_slug_component(identity.settle))
     return "-".join(components)
 
 
-def _key_segments(key: DatasetKey) -> tuple[str, str, str, str]:
-    """The readable identity segments of ``key`` in canonical path order."""
-    return (key.exchange, key.market.value, instrument_slug(key), key.timeframe)
+def _key_segments(key: StorageKey) -> tuple[str, ...]:
+    """The exact readable canonical path projection for ``key``."""
+    identity = storage_identity(key)
+    common = (identity.exchange, identity.market.value, instrument_slug(key))
+    if identity.family is DatasetFamily.TRADE_BARS:
+        return (*common, identity.timeframe)
+    family = _FAMILY_PATH_NAMES[identity.family]
+    if identity.family is DatasetFamily.SETTLED_FUNDING:
+        return (_RESERVED_ROOT, family, *common)
+    if identity.family is DatasetFamily.REFERENCE_BARS:
+        return (_RESERVED_ROOT, family, identity.variant, *common, identity.timeframe)
+    return (_RESERVED_ROOT, family, *common, identity.timeframe)
 
 
-def dataset_dir(data_dir: Path, key: DatasetKey) -> Path:
+def dataset_dir(data_dir: Path, key: StorageKey) -> Path:
     """Directory holding every monthly file for one dataset."""
     return data_dir.joinpath(*_key_segments(key))
 
 
-def month_dir(data_dir: Path, key: DatasetKey, year_month: YearMonth) -> Path:
+def month_dir(data_dir: Path, key: StorageKey, year_month: YearMonth) -> Path:
     """Directory holding the one canonical file for ``year_month``."""
     return (
         dataset_dir(data_dir, key) / f"year={year_month.year:04d}" / f"month={year_month.month:02d}"
     )
 
 
-def month_file_path(data_dir: Path, key: DatasetKey, year_month: YearMonth) -> Path:
+def month_file_path(data_dir: Path, key: StorageKey, year_month: YearMonth) -> Path:
     """Absolute path to the canonical Parquet file for one dataset/month."""
     return month_dir(data_dir, key, year_month) / DATA_FILE_NAME
 
 
-def relative_month_file_path(data_dir: Path, key: DatasetKey, year_month: YearMonth) -> str:
+def relative_month_file_path(data_dir: Path, key: StorageKey, year_month: YearMonth) -> str:
     """POSIX path to the canonical file relative to ``data_dir``."""
     absolute = month_file_path(data_dir, key, year_month)
     return PurePosixPath(*absolute.relative_to(data_dir).parts).as_posix()
@@ -175,12 +198,26 @@ def is_canonical_month_file_path(data_dir: Path, path: Path) -> bool:
     except ValueError:
         return False
     parts = relative.parts
-    return (
-        len(parts) == _CANONICAL_PATH_DEPTH
-        and parts[-1] == DATA_FILE_NAME
-        and bool(_YEAR_DIR_RE.match(parts[-3]))
-        and bool(_MONTH_DIR_RE.match(parts[-2]))
-    )
+    if not parts or parts[-1] != DATA_FILE_NAME:
+        return False
+    if (
+        len(parts) < 3
+        or not _YEAR_DIR_RE.fullmatch(parts[-3])
+        or not _MONTH_DIR_RE.fullmatch(parts[-2])
+    ):
+        return False
+    if parts[0] != _RESERVED_ROOT:
+        return len(parts) == _CANONICAL_PATH_DEPTH
+    if len(parts) < 2:
+        return False
+    family = parts[1]
+    if family == "settled-funding":
+        return len(parts) == 8
+    if family == "reference-bars":
+        return len(parts) == 10 and parts[2] in _REFERENCE_PATH_KINDS
+    if family == "open-interest":
+        return len(parts) == 9
+    return False
 
 
 def classify_managed_storage(data_dir: Path) -> str:
@@ -190,6 +227,17 @@ def classify_managed_storage(data_dir: Path) -> str:
     canonical_files = tuple(iter_canonical_files(data_dir))
     if any(not is_canonical_month_file_path(data_dir, path) for path in canonical_files):
         return "ambiguous"
+    reserved = data_dir / _RESERVED_ROOT
+    if reserved.exists():
+        if not reserved.is_dir():
+            return "ambiguous"
+        known = set(_FAMILY_PATH_NAMES.values())
+        for entry in reserved.iterdir():
+            if not entry.is_dir() or entry.name not in known:
+                return "ambiguous"
+        for entry in reserved.rglob("*"):
+            if entry.is_file() and entry.name != DATA_FILE_NAME and not is_temp_file(entry):
+                return "ambiguous"
     if any(data_dir.rglob(f"{TEMP_FILE_PREFIX}*")):
         return "ambiguous"
     return "canonical" if canonical_files else "empty"
@@ -202,9 +250,22 @@ def iter_canonical_files(data_dir: Path) -> Iterator[Path]:
     yield from data_dir.rglob(DATA_FILE_NAME)
 
 
-def lock_file_path(state_dir: Path, key: DatasetKey) -> Path:
-    """Return the readable collision-free per-dataset inter-process lock path."""
-    return state_dir / LOCK_DIR_NAME / f"{'__'.join(_key_segments(key))}.lock"
+def lock_file_path(state_dir: Path, key: StorageKey) -> Path:
+    """Return the exact per-dataset lock path, preserving legacy trade names."""
+    identity = storage_identity(key)
+    if identity.family is DatasetFamily.TRADE_BARS:
+        return state_dir / LOCK_DIR_NAME / f"{'__'.join(_key_segments(key))}.lock"
+    family = identity.family.value
+    variant = identity.variant or "_"
+    name = "__".join(
+        (
+            identity.exchange,
+            identity.market.value,
+            instrument_slug(key),
+            identity.timeframe or "_",
+        )
+    )
+    return state_dir / LOCK_DIR_NAME / "v2" / family / variant / f"{name}.lock"
 
 
 def maintenance_lock_file_path(state_dir: Path) -> Path:

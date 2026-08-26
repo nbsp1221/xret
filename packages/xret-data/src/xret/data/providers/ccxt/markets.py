@@ -14,6 +14,8 @@ from xret.data.models import (
     Market,
     MarketIdentity,
     OperationCapability,
+    ReferenceBarCapability,
+    ReferencePriceKind,
     TimeBarCapability,
 )
 from xret.data.providers.ccxt import capabilities, compatibility
@@ -183,6 +185,35 @@ def supported_timeframes(exchange: CCXTExchange) -> frozenset[str]:
     return canonical_timeframes(exchange.id, canonical)
 
 
+def supported_reference_timeframes(exchange: CCXTExchange) -> frozenset[str]:
+    """Canonical timeframes advertised for reference-price OHLC operations.
+
+    Reference convenience methods are independent CCXT capabilities, so their
+    timeframe catalog must not depend on the generic ``fetchOHLCV`` flag.
+    """
+    timeframes = getattr(exchange, "timeframes", None)
+    if not isinstance(timeframes, Mapping):
+        return frozenset()
+    canonical: set[str] = set()
+    for key in timeframes:
+        candidate = str(key)
+        try:
+            TimeBar.parse(candidate)
+        except InvalidRequestError:
+            continue
+        canonical.add(candidate)
+    return frozenset(canonical)
+
+
+def supported_open_interest_timeframes(exchange: CCXTExchange) -> frozenset[str]:
+    """Exact historical-OI periods with maintained unified-route semantics."""
+    if not exchange.has.get("fetchOpenInterestHistory"):
+        return frozenset()
+    if exchange.id not in {"binance", "binanceusdm"}:
+        return frozenset()
+    return frozenset({"5m", "15m", "30m", "1h", "2h", "4h", "6h", "12h", "1d"})
+
+
 def market_definitions(
     *,
     canonical_exchange: str,
@@ -227,6 +258,34 @@ def market_definitions(
                 historical_timeframes=raw_timeframes,
                 live_capability=live_capability,
             ),
+            funding_history=OperationCapability(
+                Availability.AVAILABLE
+                if market_family is Market.PERPETUAL
+                and bool(exchange.has.get("fetchFundingRateHistory"))
+                else Availability.UNAVAILABLE
+            ),
+            reference_bar_capabilities=_reference_bar_capabilities(
+                exchange=exchange,
+                market_family=market_family,
+                timeframes=raw_timeframes,
+            ),
+            open_interest_capabilities=tuple(
+                TimeBarCapability(
+                    timeframe,
+                    OperationCapability(Availability.AVAILABLE),
+                    OperationCapability(Availability.UNAVAILABLE),
+                )
+                for timeframe in sorted(
+                    supported_open_interest_timeframes(exchange), key=_timeframe_sort_key
+                )
+            )
+            if market_family is Market.PERPETUAL
+            and definition.derivative is not None
+            and definition.derivative.linear is True
+            and definition.derivative.inverse is False
+            and raw.get("quanto") is not True
+            and _positive_decimal(definition.derivative.contract_size) is not None
+            else (),
         )
         identity = definition.identity
         if identity in collisions:
@@ -312,6 +371,32 @@ def _operation_capability(
             ),
         )
     return OperationCapability(Availability.AVAILABLE, notices=notices)
+
+
+def _reference_bar_capabilities(
+    *,
+    exchange: CCXTExchange,
+    market_family: Market,
+    timeframes: frozenset[str],
+) -> tuple[ReferenceBarCapability, ...]:
+    if market_family is not Market.PERPETUAL:
+        return ()
+    flags = (
+        (ReferencePriceKind.MARK, "fetchMarkOHLCV"),
+        (ReferencePriceKind.INDEX, "fetchIndexOHLCV"),
+        (ReferencePriceKind.PREMIUM_INDEX, "fetchPremiumIndexOHLCV"),
+    )
+    return tuple(
+        ReferenceBarCapability(
+            kind,
+            timeframe,
+            OperationCapability(
+                Availability.AVAILABLE if bool(exchange.has.get(flag)) else Availability.UNAVAILABLE
+            ),
+        )
+        for kind, flag in flags
+        for timeframe in sorted(timeframes, key=_timeframe_sort_key)
+    )
 
 
 def _timeframe_sort_key(value: str) -> tuple[int, int, str]:
