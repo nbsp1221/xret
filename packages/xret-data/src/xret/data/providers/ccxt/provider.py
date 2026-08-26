@@ -105,7 +105,6 @@ class CcxtProvider:
         self._monotonic = monotonic
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
-        self._funding_duplicate_counts: dict[tuple[MarketIdentity, str, str], int] = {}
         self._live_capability_provider = live_capability_provider
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
@@ -254,11 +253,12 @@ class CcxtProvider:
                     self._pacers_by_id[resolution.client_id],
                 ),
             )
-            with self._resolution_lock:
-                self._funding_duplicate_counts[key] = result.duplicate_count
         return FundingObservation(
             frame=_provider_funding_frame(result.rows),
             observed=result.observed,
+            normalizations=(
+                ("funding.identical_duplicate_dedup",) if result.duplicate_count else ()
+            ),
         )
 
     def resolve_open_interest_market(self, identity: MarketIdentity) -> ResolvedOpenInterestMarket:
@@ -425,12 +425,6 @@ class CcxtProvider:
             frame=_provider_reference_frame(result.rows),
             observed=result.observed,
         )
-
-    def _funding_normalizations(self, market: ResolvedFundingMarket) -> tuple[str, ...]:
-        key = (market.identity, market.native_market_id, market.native_symbol)
-        with self._resolution_lock:
-            duplicates = self._funding_duplicate_counts.pop(key, 0)
-        return ("funding.identical_duplicate_dedup",) if duplicates else ()
 
     def fetch_markets(
         self,

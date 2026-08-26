@@ -6,6 +6,7 @@ from pathlib import Path
 
 import polars as pl
 import pytest
+from xret.data import ProviderEvidence
 from xret.data.config import MarketDataConfig
 from xret.data.errors import CatalogError, InvalidRequestError, ProviderError
 from xret.data.funding_quality import enforce_settled_funding
@@ -183,6 +184,50 @@ def test_exact_family_schemas_and_validators() -> None:
         schema=OPEN_INTEREST_SCHEMA,
     )
     enforce_open_interest(oi, oi_key)
+
+
+def test_empty_family_artifacts_remain_forbidden_outside_oi_revision_path() -> None:
+    identity = _identity()
+    provider = ProviderProvenance("fixture", "1", 1, "BTCUSDT", "BTC/USDT:USDT")
+    cases = (
+        (SettledFundingKey(identity=identity), pl.DataFrame(schema=SETTLED_FUNDING_SCHEMA)),
+        (
+            ReferenceBarKey(
+                identity=identity,
+                kind=ReferencePriceKind.MARK,
+                timeframe="5m",
+            ),
+            pl.DataFrame(schema=REFERENCE_BAR_SCHEMA),
+        ),
+        (
+            OpenInterestKey(identity=identity, timeframe="5m"),
+            pl.DataFrame(schema=OPEN_INTEREST_SCHEMA),
+        ),
+    )
+    for key, frame in cases:
+        with pytest.raises(InvalidRequestError, match="empty family artifact"):
+            family_metadata(key, YearMonth(2024, 1), frame, provider)
+
+    contributor = ProviderEvidence(
+        provider_name="fixture",
+        provider_version="1",
+        provider_api_version=1,
+        native_market_id="BTCUSDT",
+        native_symbol="BTC/USDT:USDT",
+        contributed_start=_timestamp(),
+        contributed_end=datetime(2024, 2, 1, tzinfo=UTC),
+        source_rows=0,
+        canonical_rows=0,
+        duplicate_rows=0,
+    )
+    with pytest.raises(InvalidRequestError, match="empty family artifact"):
+        family_metadata(
+            OpenInterestKey(identity=identity, timeframe="5m"),
+            YearMonth(2024, 1),
+            pl.DataFrame(schema=OPEN_INTEREST_SCHEMA),
+            provider,
+            (contributor,),
+        )
 
 
 def _write_family_file(

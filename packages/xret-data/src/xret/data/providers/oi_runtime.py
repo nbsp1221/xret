@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import cast
 
 import polars as pl
@@ -61,6 +62,15 @@ def _resolved(requested: MarketIdentity, value: object) -> ResolvedOpenInterestM
         or (requested.settle is not None and actual.settle != requested.settle)
     ):
         raise ProviderError("provider resolved open-interest market changed canonical identity")
+    derivative = value.derivative
+    if derivative.linear is not True or derivative.inverse is not False:
+        raise ProviderError("open interest requires a linear, non-inverse derivative")
+    try:
+        contract_size = Decimal(derivative.contract_size or "")
+    except (InvalidOperation, ValueError) as exc:
+        raise ProviderError("open interest requires a finite positive contract size") from exc
+    if not contract_size.is_finite() or contract_size <= 0:
+        raise ProviderError("open interest requires a finite positive contract size")
     return value
 
 

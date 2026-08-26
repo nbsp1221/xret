@@ -9,8 +9,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, cast
@@ -39,7 +38,6 @@ from xret.data.storage.parquet import (
     CommittedFile,
     PreparedFile,
     ProviderProvenance,
-    _fsync_directory,
     _require_safe_managed_path,
     cleanup_stale_temp_files,
     compute_content_hash,
@@ -79,17 +77,6 @@ _META_KEYS: Final[frozenset[str]] = frozenset(
         "contributors",
     }
 )
-
-
-@dataclass(slots=True)
-class PreparedFamilyDeletion:
-    dataset_key: OpenInterestKey
-    year_month: YearMonth
-    relative_path: str
-    absolute_path: Path
-    data_dir: Path
-    contributors: tuple[ProviderEvidence, ...]
-    published: bool = False
 
 
 def _validate_contributors(
@@ -193,6 +180,9 @@ def _validate(
     key: StorageKey,
     year_month: YearMonth,
     error_cls: type[XretDataError],
+    *,
+    contributors: tuple[ProviderEvidence, ...] = (),
+    allow_empty_open_interest_revision: bool = False,
 ) -> str:
     schema, timestamp = _schema_and_timestamp(key)
     if frame.schema != schema:
@@ -204,13 +194,50 @@ def _validate(
     elif isinstance(key, OpenInterestKey):
         enforce_open_interest(frame, key, error_cls=error_cls)
     if frame.height == 0:
-        raise error_cls("cannot commit an empty family artifact")
+        if (
+            not allow_empty_open_interest_revision
+            or not isinstance(key, OpenInterestKey)
+            or not contributors
+        ):
+            raise error_cls("cannot commit an empty family artifact")
+        _validate_contributors(contributors, error_cls=error_cls)
+        month_start = datetime(year_month.year, year_month.month, 1, tzinfo=UTC)
+        month_end = (
+            datetime(year_month.year + 1, 1, 1, tzinfo=UTC)
+            if year_month.month == 12
+            else datetime(year_month.year, year_month.month + 1, 1, tzinfo=UTC)
+        )
+        if any(
+            contributor.contributed_start is None
+            or contributor.contributed_end is None
+            or contributor.contributed_start < month_start
+            or contributor.contributed_end > month_end
+            or contributor.canonical_rows != 0
+            for contributor in contributors
+        ):
+            raise error_cls("empty open-interest artifact has invalid contributor evidence")
+        return timestamp
     if frame.filter(
         (pl.col(timestamp).dt.year() != year_month.year)
         | (pl.col(timestamp).dt.month() != year_month.month)
     ).height:
         raise error_cls(f"family artifact contains rows outside {year_month}")
     return timestamp
+
+
+def _artifact_bounds(
+    frame: pl.DataFrame,
+    timestamp: str,
+    contributors: tuple[ProviderEvidence, ...],
+) -> tuple[datetime, datetime]:
+    if not frame.is_empty():
+        return (
+            cast("datetime", frame.get_column(timestamp).min()),
+            cast("datetime", frame.get_column(timestamp).max()),
+        )
+    first, last = contributors[0], contributors[-1]
+    assert first.contributed_start is not None and last.contributed_end is not None
+    return first.contributed_start, last.contributed_end
 
 
 def _key_from_metadata(path: Path, metadata: dict[str, str]) -> tuple[StorageKey, YearMonth, int]:
@@ -309,29 +336,6 @@ def read_family_committed_file(data_dir: Path, path: Path) -> CommittedFile:
     expected_path = paths.month_file_path(data_dir, key, year_month)
     if path.resolve() != expected_path.resolve():
         raise CatalogError(f"{path}: family metadata does not match canonical path {expected_path}")
-    timestamp = _validate(frame, key, year_month, CatalogError)
-    row_count = frame.height
-    minimum = cast("datetime", frame.get_column(timestamp).min())
-    maximum = cast("datetime", frame.get_column(timestamp).max())
-    identity = storage_identity(key)
-    expected = {
-        "artifact_schema_version": str(version),
-        "dataset_family": identity.family.value,
-        "variant": identity.variant,
-        "exchange": identity.exchange,
-        "symbol": identity.symbol,
-        "market": identity.market.value,
-        "settle": identity.settle,
-        "timeframe": identity.timeframe,
-        "year": f"{year_month.year:04d}",
-        "month": f"{year_month.month:02d}",
-        "row_count": str(row_count),
-        "min_timestamp": minimum.isoformat(),
-        "max_timestamp": maximum.isoformat(),
-    }
-    for name, value in expected.items():
-        if metadata.get(name) != value:
-            raise CatalogError(f"{path}: metadata {name!r} does not match file rows")
     try:
         if metadata["derivative_linear"] not in ("", "true", "false") or metadata[
             "derivative_inverse"
@@ -361,6 +365,35 @@ def read_family_committed_file(data_dir: Path, path: Path) -> CommittedFile:
         _validate_provider_semantics(key, provider, contributors)
     except (KeyError, TypeError, ValueError, XretDataError) as exc:
         raise CatalogError(f"{path}: invalid provider metadata") from exc
+    timestamp = _validate(
+        frame,
+        key,
+        year_month,
+        CatalogError,
+        contributors=contributors,
+        allow_empty_open_interest_revision=True,
+    )
+    row_count = frame.height
+    minimum, maximum = _artifact_bounds(frame, timestamp, contributors)
+    identity = storage_identity(key)
+    expected = {
+        "artifact_schema_version": str(version),
+        "dataset_family": identity.family.value,
+        "variant": identity.variant,
+        "exchange": identity.exchange,
+        "symbol": identity.symbol,
+        "market": identity.market.value,
+        "settle": identity.settle,
+        "timeframe": identity.timeframe,
+        "year": f"{year_month.year:04d}",
+        "month": f"{year_month.month:02d}",
+        "row_count": str(row_count),
+        "min_timestamp": minimum.isoformat(),
+        "max_timestamp": maximum.isoformat(),
+    }
+    for name, value in expected.items():
+        if metadata.get(name) != value:
+            raise CatalogError(f"{path}: metadata {name!r} does not match file rows")
     return CommittedFile(
         key,
         year_month,
@@ -376,20 +409,28 @@ def read_family_committed_file(data_dir: Path, path: Path) -> CommittedFile:
     )
 
 
-def family_metadata(
+def _family_metadata(
     key: StorageKey,
     year_month: YearMonth,
     frame: pl.DataFrame,
     provider: ProviderProvenance,
     contributors: tuple[ProviderEvidence, ...] = (),
+    *,
+    allow_empty_open_interest_revision: bool = False,
 ) -> dict[str, str]:
     """Build exact metadata after deep validation for a later publisher."""
-    timestamp = _validate(frame, key, year_month, InvalidRequestError)
+    timestamp = _validate(
+        frame,
+        key,
+        year_month,
+        InvalidRequestError,
+        contributors=contributors,
+        allow_empty_open_interest_revision=allow_empty_open_interest_revision,
+    )
     identity = storage_identity(key)
     if identity.family is DatasetFamily.TRADE_BARS:
         raise InvalidRequestError("trade bars use artifact schema 5")
-    minimum = cast("datetime", frame.get_column(timestamp).min())
-    maximum = cast("datetime", frame.get_column(timestamp).max())
+    minimum, maximum = _artifact_bounds(frame, timestamp, contributors)
     return {
         "artifact_schema_version": str(ARTIFACT_SCHEMA_VERSIONS[identity.family]),
         "dataset_family": identity.family.value,
@@ -420,6 +461,17 @@ def family_metadata(
         "source_field_mapping": provider.source_field_mapping,
         "contributors": _contributors_json(contributors),
     }
+
+
+def family_metadata(
+    key: StorageKey,
+    year_month: YearMonth,
+    frame: pl.DataFrame,
+    provider: ProviderProvenance,
+    contributors: tuple[ProviderEvidence, ...] = (),
+) -> dict[str, str]:
+    """Build exact metadata for a nonempty family artifact."""
+    return _family_metadata(key, year_month, frame, provider, contributors)
 
 
 def split_family_by_year_month(
@@ -519,7 +571,7 @@ def prepare_open_interest_revision_month(
     *,
     provider: ProviderProvenance,
     contributors: tuple[ProviderEvidence, ...],
-) -> PreparedFile | PreparedFamilyDeletion | None:
+) -> PreparedFile:
     """Prepare a contributor set-replacement, including an empty resulting month."""
     if batch.schema != OPEN_INTEREST_SCHEMA:
         raise InvalidRequestError("family artifact schema mismatch")
@@ -528,8 +580,6 @@ def prepare_open_interest_revision_month(
     final_path = paths.month_file_path(data_dir, key, year_month)
     _require_safe_managed_path(data_dir, final_path, error_cls=SyncError)
     if not final_path.is_file():
-        if batch.is_empty():
-            return None
         return prepare_family_month(
             data_dir,
             key,
@@ -537,6 +587,7 @@ def prepare_open_interest_revision_month(
             batch,
             provider=provider,
             contributors=contributors,
+            _allow_empty_open_interest_revision=batch.is_empty(),
         )
     committed = read_family_committed_file(data_dir, final_path)
     if committed.dataset_key != key:
@@ -553,18 +604,16 @@ def prepare_open_interest_revision_month(
         existing_contributors=committed.contributors,
         incoming_contributors=contributors,
     )
-    if merged.is_empty():
-        return PreparedFamilyDeletion(
-            key,
-            year_month,
-            paths.relative_month_file_path(data_dir, key, year_month),
-            final_path,
-            data_dir,
-            contributors,
-        )
     directory.mkdir(parents=True, exist_ok=True)
     cleanup_stale_temp_files(directory)
-    metadata = family_metadata(key, year_month, merged, provider, merged_contributors)
+    metadata = _family_metadata(
+        key,
+        year_month,
+        merged,
+        provider,
+        merged_contributors,
+        allow_empty_open_interest_revision=merged.is_empty(),
+    )
     temp_path = paths.new_temp_path(directory)
     _require_safe_managed_path(data_dir, temp_path, error_cls=SyncError)
     try:
@@ -603,15 +652,6 @@ def prepare_open_interest_revision_month(
     )
 
 
-def publish_family_deletion(prepared: PreparedFamilyDeletion) -> None:
-    if prepared.published:
-        raise SyncError("prepared family deletion has already been published")
-    _require_safe_managed_path(prepared.data_dir, prepared.absolute_path, error_cls=SyncError)
-    prepared.absolute_path.unlink(missing_ok=True)
-    prepared.published = True
-    _fsync_directory(prepared.absolute_path.parent)
-
-
 def prepare_family_month(
     data_dir: Path,
     key: StorageKey,
@@ -620,9 +660,17 @@ def prepare_family_month(
     *,
     provider: ProviderProvenance,
     contributors: tuple[ProviderEvidence, ...] = (),
+    _allow_empty_open_interest_revision: bool = False,
 ) -> PreparedFile:
     """Prepare one deeply validated family artifact for atomic publication."""
-    timestamp = _validate(batch, key, year_month, InvalidRequestError)
+    timestamp = _validate(
+        batch,
+        key,
+        year_month,
+        InvalidRequestError,
+        contributors=contributors,
+        allow_empty_open_interest_revision=_allow_empty_open_interest_revision,
+    )
     directory = paths.month_dir(data_dir, key, year_month)
     _require_safe_managed_path(data_dir, directory, error_cls=SyncError)
     directory.mkdir(parents=True, exist_ok=True)
@@ -662,7 +710,14 @@ def prepare_family_month(
         existing_contributors=existing_contributors,
         incoming_contributors=contributors,
     )
-    metadata = family_metadata(key, year_month, merged, provider, contributors=merged_contributors)
+    metadata = _family_metadata(
+        key,
+        year_month,
+        merged,
+        provider,
+        contributors=merged_contributors,
+        allow_empty_open_interest_revision=_allow_empty_open_interest_revision,
+    )
     temp_path = paths.new_temp_path(directory)
     _require_safe_managed_path(data_dir, temp_path, error_cls=SyncError)
     try:
@@ -719,19 +774,35 @@ def read_family_committed_file_from_temp(
         metadata = pl.read_parquet_metadata(path)
     except Exception as exc:
         raise SyncError(f"failed to reopen prepared family artifact {path}: {exc}") from exc
-    timestamp = _validate(frame, key, year_month, SyncError)
-    expected = family_metadata(key, year_month, frame, provider, contributors=contributors)
+    allow_empty_revision = isinstance(key, OpenInterestKey) and frame.is_empty()
+    timestamp = _validate(
+        frame,
+        key,
+        year_month,
+        SyncError,
+        contributors=contributors,
+        allow_empty_open_interest_revision=allow_empty_revision,
+    )
+    expected = _family_metadata(
+        key,
+        year_month,
+        frame,
+        provider,
+        contributors=contributors,
+        allow_empty_open_interest_revision=allow_empty_revision,
+    )
     for name, value in expected.items():
         if metadata.get(name) != value:
             raise SyncError(f"prepared family artifact metadata {name!r} differs")
+    minimum, maximum = _artifact_bounds(frame, timestamp, contributors)
     return CommittedFile(
         key,
         year_month,
         paths.relative_month_file_path(data_dir, key, year_month),
         paths.month_file_path(data_dir, key, year_month),
         frame.height,
-        cast("datetime", frame.get_column(timestamp).min()),
-        cast("datetime", frame.get_column(timestamp).max()),
+        minimum,
+        maximum,
         compute_content_hash(path),
         ARTIFACT_SCHEMA_VERSIONS[storage_identity(key).family],
         provider,

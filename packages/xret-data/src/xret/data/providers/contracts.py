@@ -366,6 +366,15 @@ class FundingObservation:
 
     frame: pl.DataFrame
     observed: tuple[ObservedWindow, ...]
+    normalizations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.normalizations, tuple) or not all(
+            isinstance(value, str) and value for value in self.normalizations
+        ):
+            raise InvalidRequestError(
+                "funding observation normalizations must be a tuple of nonempty strings"
+            )
 
 
 class HistoricalFundingProvider(Protocol):

@@ -8,10 +8,20 @@ import urllib.error
 import zipfile
 from datetime import UTC, datetime, timedelta
 
+import polars as pl
 import pytest
 from xret.data import MarketData
 from xret.data.config import MarketDataConfig
-from xret.data.errors import ProviderError, UnsupportedMarketError
+from xret.data.errors import CatalogError, ProviderError, UnsupportedMarketError
+from xret.data.providers import (
+    PROVIDER_API_VERSION,
+    PROVIDER_OPEN_INTEREST_SCHEMA,
+    DerivativeInterpretation,
+    ObservedWindow,
+    OpenInterestObservation,
+    ProviderDescriptor,
+    ResolvedOpenInterestMarket,
+)
 from xret.data.providers.binance_data_vision import (
     BinanceDataVisionProvider,
 )
@@ -19,6 +29,7 @@ from xret.data.providers.binance_data_vision import (
     provider as data_vision,
 )
 from xret.data.providers.discovery import load_installed_provider
+from xret.data.storage.catalog import Catalog
 
 _HEADER = (
     "create_time",
@@ -420,7 +431,9 @@ def test_empty_revision_retires_month_and_rebuild_cannot_resurrect_rows(tmp_path
     current.update(archive=empty_archive, checksum=empty_checksum)
     revised = dataset.sync(_DAY, _DAY + timedelta(days=1))
     assert not revised.is_complete
-    assert not tuple(config.data_dir.rglob("data.parquet"))
+    tombstone = next(config.data_dir.rglob("data.parquet"))
+    assert pl.read_parquet(tombstone).is_empty()
+    assert pl.read_parquet_metadata(tombstone)["row_count"] == "0"
     assert dataset.scan_partial(_DAY, _DAY + timedelta(days=1)).data.collect().is_empty()
 
     db_path = config.state_dir / "catalog.sqlite3"
@@ -432,6 +445,62 @@ def test_empty_revision_retires_month_and_rebuild_cannot_resurrect_rows(tmp_path
         path.unlink(missing_ok=True)
     MarketData(config=config).maintenance.rebuild_catalog()
     assert dataset.scan_partial(_DAY, _DAY + timedelta(days=1)).data.collect().is_empty()
+    with Catalog.open_read_only(db_path) as catalog:
+        files = catalog.list_files(revised.dataset_key)
+        assert len(files) == 1
+        assert files[0].row_count == 0
+        assert files[0].min_timestamp == _DAY
+        assert files[0].max_timestamp == _DAY + timedelta(days=1)
+        ownership = catalog.list_source_ownership(revised.dataset_key)
+        assert list(ownership) == [(_DAY, _DAY + timedelta(days=1), "binance-data-vision")]
+
+    class WrongProvider:
+        descriptor = ProviderDescriptor("wrong-provider", "1", PROVIDER_API_VERSION)
+
+        def resolve_open_interest_market(self, identity):
+            return ResolvedOpenInterestMarket(
+                identity,
+                "BTCUSDT",
+                "BTC/USDT:USDT",
+                frozenset({"5m"}),
+                DerivativeInterpretation(True, False, "1"),
+            )
+
+        def observe_open_interest(self, request, market):
+            del market
+            return OpenInterestObservation(
+                pl.DataFrame(
+                    {
+                        "timestamp": [request.start],
+                        "open_interest_amount": [1.0],
+                        "open_interest_value": [2.0],
+                    },
+                    schema=PROVIDER_OPEN_INTEREST_SCHEMA,
+                ),
+                (ObservedWindow(request.start, request.end),),
+            )
+
+    wrong = MarketData(config=config, provider=WrongProvider()).open_interest(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market="perpetual",
+        settle="USDT",
+        timeframe="5m",
+    )
+    with pytest.raises(CatalogError, match="owned"):
+        wrong.sync(_DAY, _DAY + timedelta(days=1))
+    assert pl.read_parquet(tombstone).is_empty()
+
+    from xret.data.models import CoverageStatus
+    from xret.data.storage.catalog import CoverageSegment
+
+    with Catalog.open(db_path) as catalog:
+        catalog.set_coverage(
+            revised.dataset_key,
+            (CoverageSegment(_DAY, _DAY + timedelta(days=1), CoverageStatus.AVAILABLE),),
+        )
+    with pytest.raises(CatalogError, match="empty canonical artifact"):
+        dataset.scan_partial(_DAY, _DAY + timedelta(days=1))
 
 
 def _checksum_for(payload: bytes) -> bytes:

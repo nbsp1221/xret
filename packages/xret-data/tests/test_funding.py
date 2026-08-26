@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Barrier
 
 import polars as pl
 import pytest
@@ -11,6 +13,7 @@ from xret.data.config import MarketDataConfig
 from xret.data.errors import (
     CatalogError,
     CoverageError,
+    InvalidRequestError,
     ProviderError,
     SyncError,
     UnsupportedMarketError,
@@ -24,7 +27,7 @@ from xret.data.providers import (
     ProviderDescriptor,
     ResolvedFundingMarket,
 )
-from xret.data.providers.ccxt import CcxtProvider
+from xret.data.providers.ccxt import CcxtProvider, funding_pagination
 from xret.data.providers.ccxt.funding_pagination import paginate_funding_history
 from xret.data.providers.funding_runtime import FundingProviderRuntime
 from xret.data.schema import SETTLED_FUNDING_SCHEMA
@@ -131,6 +134,49 @@ def test_fetch_round_trips_signed_rates_exact_timestamps_and_nullable_fields(
     assert result.data.get_column("mark_price").to_list() == [None, 42_000.0, None]
     assert len(result.sources) == 1
     assert not config.state_dir.exists() and not config.data_dir.exists()
+
+
+def test_funding_observation_normalizations_are_strict_and_positional_compatible() -> None:
+    observation = FundingObservation(_provider_frame([]), ())
+    assert observation.normalizations == ()
+    for invalid in (["x"], ("",), (1,)):
+        with pytest.raises(InvalidRequestError, match="normalizations"):
+            FundingObservation(
+                _provider_frame([]),
+                (),
+                normalizations=invalid,  # type: ignore[arg-type]
+            )
+
+
+def test_narrow_funding_scan_ignores_unrelated_corrupt_month_and_eventless_month(
+    tmp_path: Path,
+) -> None:
+    rows = [
+        (datetime(2024, 1, 15, tzinfo=UTC), -0.1, None, None),
+        (datetime(2024, 3, 15, tzinfo=UTC), 0.1, None, None),
+    ]
+    dataset, config = _dataset(tmp_path, FundingProvider(rows))
+    dataset.sync(
+        datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)
+    ).require_complete()
+    january = next(
+        path
+        for path in config.data_dir.rglob("data.parquet")
+        if "year=2024/month=01" in path.as_posix()
+    )
+    january.write_bytes(b"corrupt unrelated month")
+
+    assert (
+        dataset.scan(datetime(2024, 2, 1, tzinfo=UTC), datetime(2024, 3, 1, tzinfo=UTC))
+        .collect()
+        .is_empty()
+    )
+    march = dataset.scan(
+        datetime(2024, 3, 1, tzinfo=UTC), datetime(2024, 4, 1, tzinfo=UTC)
+    ).collect()
+    assert march.get_column("effective_at").to_list() == [datetime(2024, 3, 15, tzinfo=UTC)]
+    with pytest.raises(CatalogError, match="physical hash differs"):
+        dataset.scan(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 2, 1, tzinfo=UTC))
 
 
 def test_partial_fetch_exposes_unproved_tail(tmp_path: Path) -> None:
@@ -329,6 +375,61 @@ def test_ccxt_unified_adapter_resolves_capability_and_fetches_exact_history(
     assert result.data.get_column("funding_interval_seconds").to_list() == [14_400]
     assert result.data.get_column("mark_price").to_list() == [None]
     assert result.sources[0].normalizations == ("funding.identical_duplicate_dedup",)
+
+
+def test_concurrent_ccxt_funding_fetches_keep_call_specific_dedupe_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Exchange:
+        id = "binanceusdm"
+        has = {"fetchOHLCV": False, "fetchFundingRateHistory": True}
+        markets = None
+        precisionMode = 0
+        timeframes = None
+
+        def load_markets(self, reload=False):
+            return {
+                "BTC/USDT:USDT": {
+                    "id": "BTCUSDT",
+                    "symbol": "BTC/USDT:USDT",
+                    "base": "BTC",
+                    "quote": "USDT",
+                    "settle": "USDT",
+                    "swap": True,
+                    "linear": True,
+                    "inverse": False,
+                    "contractSize": 1,
+                }
+            }
+
+    rendezvous = Barrier(2)
+
+    class CoordinatedProvider(CcxtProvider):
+        def observe_funding(self, request, market):
+            observation = super().observe_funding(request, market)
+            rendezvous.wait(timeout=5)
+            return observation
+
+    def paginate(*, start, end, **_kwargs):
+        duplicate_count = 1 if start.day == 1 else 0
+        return funding_pagination.FundingPaginationResult(
+            (), (ObservedWindow(start, end),), duplicate_count
+        )
+
+    monkeypatch.setattr(funding_pagination, "paginate_funding_history", paginate)
+    provider = CoordinatedProvider(
+        exchange_factory=lambda _client_id: Exchange(),
+        version_provider=lambda: "fixture",
+        sleep=lambda _seconds: None,
+    )
+    dataset, _ = _dataset(tmp_path, provider)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = {day: executor.submit(dataset.fetch, _at(day), _at(day + 1)) for day in (1, 2)}
+        results = {day: future.result() for day, future in futures.items()}
+
+    assert results[1].sources[0].normalizations == ("funding.identical_duplicate_dedup",)
+    assert results[2].sources[0].normalizations == ()
 
 
 def test_ccxt_pagination_deduplicates_overlap_and_preserves_no_schedule() -> None:

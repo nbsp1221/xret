@@ -46,6 +46,7 @@ class IndexedFileFacts:
     relative_path: str
     year_month: YearMonth
     physical_hash: str
+    row_count: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +114,7 @@ def read_local_facts_for_key(
                     row.relative_path,
                     YearMonth(row.year, row.month),
                     row.physical_hash,
+                    row.row_count,
                 )
                 for row in catalog.list_files(dataset_key)
             )
@@ -225,7 +227,10 @@ def _verified_frame(data_dir: Path, facts: LocalReadFacts, item: IndexedFileFact
             if digest.hexdigest() != item.physical_hash:
                 raise CatalogError(f"catalog physical hash differs from canonical file: {path}")
             handle.seek(0)
-            return pl.read_parquet(handle)
+            frame = pl.read_parquet(handle)
+            if frame.height != item.row_count:
+                raise CatalogError(f"catalog row count differs from canonical file: {path}")
+            return frame
     except CatalogError:
         raise
     except Exception as exc:
@@ -237,7 +242,14 @@ def lazy_frame_for_facts(data_dir: Path, facts: LocalReadFacts) -> pl.LazyFrame:
     schema, _ = _family_schema_and_timestamp(facts)
     family = storage_identity(facts.dataset_key).family
     if family is DatasetFamily.SETTLED_FUNDING:
-        required = facts.indexed_files
+        covered_months = {
+            year_month
+            for interval in facts.covered
+            for year_month, _slice_start, _slice_end in paths.iter_month_slices(
+                interval.start, interval.end
+            )
+        }
+        required = tuple(item for item in facts.indexed_files if item.year_month in covered_months)
     else:
         required_months = set(_required_months(facts))
         required = tuple(item for item in facts.indexed_files if item.year_month in required_months)
@@ -251,6 +263,12 @@ def lazy_frame_for_facts(data_dir: Path, facts: LocalReadFacts) -> pl.LazyFrame:
             )
     if not required:
         return pl.DataFrame(schema=schema).lazy()
+    empty_required = next((item for item in required if item.row_count == 0), None)
+    if empty_required is not None:
+        raise CatalogError(
+            "catalog coverage references an empty canonical artifact: "
+            f"{empty_required.relative_path}"
+        )
     frames = [_verified_frame(data_dir, facts, item).lazy() for item in required]
     combined = pl.concat(frames, how="vertical")
     return _restrict_to_covered(combined, facts)

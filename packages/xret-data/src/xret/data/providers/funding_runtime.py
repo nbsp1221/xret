@@ -167,15 +167,6 @@ class FundingProviderRuntime:
             end=request.end,
             error_cls=ProviderError,
         )
-        normalizations: tuple[str, ...] = ()
-        hook = getattr(self._provider, "_funding_normalizations", None)
-        if callable(hook):
-            candidate = hook(resolved)
-            if not isinstance(candidate, tuple) or not all(
-                isinstance(item, str) and item for item in candidate
-            ):
-                raise ProviderError("provider funding normalizations hook returned invalid values")
-            normalizations = candidate
         return ValidatedFundingObservation(
             frame=canonical,
             observed=observed,
@@ -188,7 +179,7 @@ class FundingProviderRuntime:
                 ),
                 native_market_id=resolved.native_market_id,
                 native_symbol=resolved.native_symbol,
-                normalizations=normalizations,
+                normalizations=raw.normalizations,
             ),
             evidence_at=evidence_at,
             completed_at=completed_at,

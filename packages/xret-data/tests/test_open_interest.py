@@ -142,6 +142,32 @@ def test_resolved_oi_market_requires_typed_sync_policy(policy: object) -> None:
 
 
 @pytest.mark.parametrize(
+    "derivative",
+    [
+        DerivativeInterpretation(False, False, "1"),
+        DerivativeInterpretation(True, True, "1"),
+        DerivativeInterpretation(True, False, None),
+        DerivativeInterpretation(True, False, "0"),
+        DerivativeInterpretation(True, False, "NaN"),
+        DerivativeInterpretation(True, False, "Infinity"),
+    ],
+)
+def test_runtime_rejects_oi_specific_derivative_semantics_before_observation(
+    tmp_path: Path, derivative: DerivativeInterpretation
+) -> None:
+    class InvalidDerivativeProvider(OpenInterestProvider):
+        def resolve_open_interest_market(self, identity):
+            return replace(super().resolve_open_interest_market(identity), derivative=derivative)
+
+    provider = InvalidDerivativeProvider([])
+    dataset, _ = _dataset(tmp_path, provider)
+
+    with pytest.raises(ProviderError, match="linear, non-inverse|positive contract size"):
+        dataset.fetch(_at(0), _at(5))
+    assert provider.observe_calls == 0
+
+
+@pytest.mark.parametrize(
     ("normalizations", "mapping"),
     [(["x"], None), (("",), None), ((), "")],
 )

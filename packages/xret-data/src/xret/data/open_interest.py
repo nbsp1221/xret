@@ -40,10 +40,8 @@ from xret.data.storage.catalog import (
     _CommitUncertainCatalogError,
 )
 from xret.data.storage.family_parquet import (
-    PreparedFamilyDeletion,
     prepare_family_month,
     prepare_open_interest_revision_month,
-    publish_family_deletion,
     split_family_by_year_month,
 )
 from xret.data.storage.parquet import (
@@ -461,8 +459,7 @@ class OpenInterestDataset:
                         prepared.append(change)
             except Exception as exc:
                 for artifact in prepared:
-                    if not isinstance(artifact, PreparedFamilyDeletion):
-                        discard_prepared_file(artifact)
+                    discard_prepared_file(artifact)
                 self._fail_run(db_path, config, running, exc)
                 raise
             terminal: IngestionRunMetadata | None = None
@@ -470,17 +467,9 @@ class OpenInterestDataset:
                 with locking.catalog_gate(config.state_dir), Catalog.open(db_path) as catalog:
                     catalog.record_ingestion_run(running)
                     for artifact in prepared:
-                        contributors = (
-                            artifact.contributors
-                            if isinstance(artifact, PreparedFamilyDeletion)
-                            else artifact.committed_file.contributors
-                        )
-                        catalog.validate_source_ownership(key, contributors)
+                        catalog.validate_source_ownership(key, artifact.committed_file.contributors)
                     for artifact in prepared:
-                        if isinstance(artifact, PreparedFamilyDeletion):
-                            publish_family_deletion(artifact)
-                        else:
-                            publish_prepared_file(artifact)
+                        publish_prepared_file(artifact)
                     segments = [
                         segment
                         for requested_gap, observation, _rows in observations
@@ -537,9 +526,6 @@ class OpenInterestDataset:
                         elif segments:
                             catalog.apply_coverage_batch(key, segments)
                         for artifact in prepared:
-                            if isinstance(artifact, PreparedFamilyDeletion):
-                                catalog.remove_file(artifact.relative_path)
-                                continue
                             committed = artifact.committed_file
                             catalog.record_file(
                                 FileMetadata(
@@ -560,8 +546,7 @@ class OpenInterestDataset:
                         covered, gaps = catalog.coverage_and_gaps(key, start_dt, end_dt)
             except CatalogError as exc:
                 for artifact in prepared:
-                    if not isinstance(artifact, PreparedFamilyDeletion):
-                        discard_prepared_file(artifact)
+                    discard_prepared_file(artifact)
                 if (
                     isinstance(exc, _CommitUncertainCatalogError)
                     and terminal is not None
@@ -574,7 +559,6 @@ class OpenInterestDataset:
                                 artifact.committed_file.physical_hash,
                             )
                             for artifact in prepared
-                            if not isinstance(artifact, PreparedFamilyDeletion)
                         ),
                     )
                 ):
@@ -597,8 +581,7 @@ class OpenInterestDataset:
                     raise
             except Exception as exc:
                 for artifact in prepared:
-                    if not isinstance(artifact, PreparedFamilyDeletion):
-                        discard_prepared_file(artifact)
+                    discard_prepared_file(artifact)
                 if any(artifact.published for artifact in prepared):
                     raise SyncError(
                         "catalog update failed after publishing canonical open-interest Parquet; "
