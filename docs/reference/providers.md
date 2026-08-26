@@ -18,18 +18,22 @@ xret/data/providers/
 ├── oi_runtime.py           # open-interest validation
 ├── live_runtime.py         # live capability validation and normalization
 ├── discovery.py            # lazy direct/installed provider binding
-├── binance_data_vision.py  # packaged historical-OI archive provider
+├── conformance.py          # public structural conformance validation
+├── binance_data_vision/    # packaged historical-OI archive provider
+│   ├── __init__.py         # stable provider export and entry-point path
+│   └── provider.py         # archive resolution and observation
 └── ccxt/                   # built-in general crypto implementation
     ├── provider.py         # capability orchestration
     ├── client.py           # CCXT construction, retry, and transport
-    ├── markets.py          # crypto resolution and capability translation
+    ├── markets.py          # crypto market resolution and identity translation
+    ├── capabilities.py     # provider-advertised capability interpretation
     ├── compatibility.py    # exact lossless semantics and window policies
     ├── live.py             # CCXT Pro live-bar session
     ├── semantics.py        # trade-bar canonical-value translation
     └── *_pagination.py     # family-specific observation strategies
 ```
 
-The Data Vision implementation is a sibling module with only descriptor, `resolve_open_interest_market`, and `observe_open_interest`; it does not fake other capability methods. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. Current identities remain limited to crypto spot and perpetual markets; Xret does not claim that non-crypto identity or session semantics have been designed.
+The Data Vision implementation is a sibling package with only descriptor, `resolve_open_interest_market`, and `observe_open_interest`; it does not fake other capability methods. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. Current identities remain limited to crypto spot and perpetual markets; Xret does not claim that non-crypto identity or session semantics have been designed.
 
 ## Public provider API
 
@@ -69,6 +73,8 @@ from xret.data.providers import (
     ResolvedFundingMarket,
     ResolvedOpenInterestMarket,
     ResolvedReferenceMarket,
+    OpenInterestSyncPolicy,
+    validate_provider_conformance,
 )
 ```
 
@@ -186,6 +192,21 @@ no returned row != proof that the entire remaining range was observed empty
 For an endpoint with a maintained bounded-window policy, the built-in CCXT adapter partitions a request into exact windows and sends the actual number of remaining bar boundaries on the final page, not the endpoint's maximum page size. A typed endpoint profile may omit CCXT's unified `until` when the adapter derives the native end from `since + limit`. A profile may also recognize a documented closed native window by accepting only the exact right-boundary candle as an observation witness and discarding it from Xret's half-open result.
 
 An endpoint without an exact policy is not blocked. Xret uses CCXT's advertised page limit when available, advances only from validated returned timestamps, rejects ignored `since`, backward data, conflicting overlap, malformed rows, and non-progress, and stops under a deterministic request budget. This generic strategy establishes presence only: returned bar intervals are observed, while every other interval remains `missing` and retryable. It never turns an unknown empty response into unavailable coverage.
+
+## Implement, validate, and connect a provider
+
+Implement one class with a `ProviderDescriptor` and at least one complete capability pair from the table above. Keep resolution I/O-free when the provider can derive native identity from supplied configuration; observation methods perform remote reads and return only the matching immutable contract values. OI providers use incremental missing-range synchronization by default. A revisioned archive declares `open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE` on the provider and returns the same policy from `ResolvedOpenInterestMarket.sync_policy`; Xret validates the declaration without I/O and rejects a resolved-market mismatch. Use this policy only when the source can revise certified ranges and every observation supplies contributor evidence suitable for replacing the provider-owned range. Return call-specific provenance through `OpenInterestObservation.normalizations` and `source_field_mapping`, not private methods.
+
+Validate the finished object before integration:
+
+```python
+from xret.data.providers import validate_provider_conformance
+
+provider = AcmeProvider(...)
+descriptor = validate_provider_conformance(provider)
+```
+
+This validator performs no market resolution, network access, or storage I/O. It validates the descriptor, accepts any complete recognized capability pairs, rejects partial pairs, and rejects an object with no capability. Use that same validated object directly with `MarketData(provider=provider)`. If the provider can be constructed without application-owned arguments, expose a zero-argument factory through the `xret.data.providers` entry-point group and select its descriptor name with `MarketData(provider="acme")`. Direct injection and installed discovery apply the same conformance rules; neither path registers fallback providers.
 
 ## Direct injection
 

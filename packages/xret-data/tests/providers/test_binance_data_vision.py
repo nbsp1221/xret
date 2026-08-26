@@ -12,8 +12,12 @@ import pytest
 from xret.data import MarketData
 from xret.data.config import MarketDataConfig
 from xret.data.errors import ProviderError, UnsupportedMarketError
-from xret.data.providers import binance_data_vision as data_vision
-from xret.data.providers.binance_data_vision import BinanceDataVisionProvider
+from xret.data.providers.binance_data_vision import (
+    BinanceDataVisionProvider,
+)
+from xret.data.providers.binance_data_vision import (
+    provider as data_vision,
+)
 from xret.data.providers.discovery import load_installed_provider
 
 _HEADER = (

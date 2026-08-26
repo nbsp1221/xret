@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from typing import Final, Protocol, Self
 
 import polars as pl
@@ -34,6 +35,7 @@ __all__ = [
     "ReferenceBarObservation",
     "OpenInterestObservation",
     "OpenInterestSourceEvidence",
+    "OpenInterestSyncPolicy",
     "FundingRequest",
     "ReferenceBarRequest",
     "OpenInterestRequest",
@@ -542,6 +544,13 @@ class HistoricalReferenceBarProvider(Protocol):
     ) -> ReferenceBarObservation: ...
 
 
+class OpenInterestSyncPolicy(StrEnum):
+    """Static synchronization and source-revision semantics for resolved OI history."""
+
+    MISSING_ONLY = "missing_only"
+    REVISIONED_ARCHIVE = "revisioned_archive"
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class OpenInterestRequest:
     """Aligned UTC half-open request for sampled historical open interest."""
@@ -577,6 +586,7 @@ class ResolvedOpenInterestMarket:
     native_symbol: str
     timeframes: frozenset[str]
     derivative: DerivativeInterpretation
+    sync_policy: OpenInterestSyncPolicy = OpenInterestSyncPolicy.MISSING_ONLY
 
     def __post_init__(self) -> None:
         if self.identity.market is not Market.PERPETUAL or self.identity.settle is None:
@@ -591,6 +601,8 @@ class ResolvedOpenInterestMarket:
             TimeBar.parse(timeframe)
         if not isinstance(self.derivative, DerivativeInterpretation):
             raise InvalidRequestError("resolved open-interest derivative is required")
+        if not isinstance(self.sync_policy, OpenInterestSyncPolicy):
+            raise InvalidRequestError("resolved open-interest sync_policy is required")
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +657,22 @@ class OpenInterestObservation:
     frame: pl.DataFrame
     observed: tuple[ObservedWindow, ...]
     sources: tuple[OpenInterestSourceEvidence, ...] = ()
+    normalizations: tuple[str, ...] = ()
+    source_field_mapping: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.normalizations, tuple) or not all(
+            isinstance(value, str) and value for value in self.normalizations
+        ):
+            raise InvalidRequestError(
+                "OI observation normalizations must be a tuple of nonempty strings"
+            )
+        if self.source_field_mapping is not None and (
+            not isinstance(self.source_field_mapping, str) or not self.source_field_mapping
+        ):
+            raise InvalidRequestError(
+                "OI observation source_field_mapping must be a nonempty string or None"
+            )
 
 
 class HistoricalOpenInterestProvider(Protocol):

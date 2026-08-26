@@ -7,14 +7,7 @@ from importlib import metadata
 
 from xret.data.errors import InvalidRequestError, ProviderError
 from xret.data.providers.ccxt import CcxtProvider
-from xret.data.providers.runtime import validate_provider_descriptor
-
-_CAPABILITY_METHOD_PAIRS: tuple[tuple[str, str], ...] = (
-    ("resolve_market", "observe_bars"),
-    ("resolve_funding_market", "observe_funding"),
-    ("resolve_reference_market", "observe_reference_bars"),
-    ("resolve_open_interest_market", "observe_open_interest"),
-)
+from xret.data.providers.conformance import validate_provider_conformance
 
 ENTRY_POINT_GROUP = "xret.data.providers"
 
@@ -24,29 +17,11 @@ def _validate_provider_object(
     *,
     expected_name: str | None,
 ) -> object:
-    try:
-        descriptor = validate_provider_descriptor(provider)
-    except ProviderError:
-        raise
-    except Exception as exc:
-        raise ProviderError(f"invalid provider object: {exc}") from exc
+    descriptor = validate_provider_conformance(provider)
     if expected_name is not None and descriptor.name != expected_name:
         raise ProviderError(
             f"provider entry point {expected_name!r} returned descriptor {descriptor.name!r}"
         )
-    complete = 0
-    for first, second in _CAPABILITY_METHOD_PAIRS:
-        first_present = callable(getattr(provider, first, None))
-        second_present = callable(getattr(provider, second, None))
-        if first_present != second_present:
-            missing = second if first_present else first
-            raise ProviderError(
-                f"provider {descriptor.name!r} has partial capability pair "
-                f"{first}()/{second}(); missing callable {missing}()"
-            )
-        complete += int(first_present and second_present)
-    if not complete:
-        raise ProviderError(f"provider {descriptor.name!r} has no callable resolve_market()")
     return provider
 
 

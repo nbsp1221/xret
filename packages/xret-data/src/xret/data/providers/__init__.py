@@ -10,6 +10,7 @@ from xret.data.models import (
     ReferenceBarCapability,
     TimeBarCapability,
 )
+from xret.data.providers.conformance import validate_provider_conformance
 from xret.data.providers.contracts import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -32,6 +33,7 @@ from xret.data.providers.contracts import (
     OpenInterestObservation,
     OpenInterestRequest,
     OpenInterestSourceEvidence,
+    OpenInterestSyncPolicy,
     ProviderBarUpdate,
     ProviderDescriptor,
     ReferenceBarObservation,
@@ -52,6 +54,7 @@ __all__ = [
     "FundingObservation",
     "OpenInterestObservation",
     "OpenInterestSourceEvidence",
+    "OpenInterestSyncPolicy",
     "ReferenceBarObservation",
     "FundingRequest",
     "OpenInterestRequest",
@@ -79,5 +82,6 @@ __all__ = [
     "ResolvedBarMarket",
     "ResolvedFundingMarket",
     "ResolvedOpenInterestMarket",
+    "validate_provider_conformance",
     "ResolvedReferenceMarket",
 ]

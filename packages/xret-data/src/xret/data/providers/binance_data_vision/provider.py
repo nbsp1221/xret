@@ -26,6 +26,7 @@ from xret.data.providers.contracts import (
     OpenInterestObservation,
     OpenInterestRequest,
     OpenInterestSourceEvidence,
+    OpenInterestSyncPolicy,
     ProviderDescriptor,
     ResolvedOpenInterestMarket,
 )
@@ -116,6 +117,7 @@ class BinanceDataVisionProvider:
     """Historical OI only; never delegates to CCXT or Binance REST."""
 
     descriptor = ProviderDescriptor("binance-data-vision", "1", PROVIDER_API_VERSION)
+    open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE
 
     def __init__(self, *, transport: Transport | None = None) -> None:
         self._transport = transport or _download
@@ -149,6 +151,7 @@ class BinanceDataVisionProvider:
             native,
             frozenset({"5m"}),
             DerivativeInterpretation(True, False, "1"),
+            OpenInterestSyncPolicy.REVISIONED_ARCHIVE,
         )
 
     def observe_open_interest(
@@ -192,7 +195,15 @@ class BinanceDataVisionProvider:
             },
             schema=PROVIDER_OPEN_INTEREST_SCHEMA,
         )
-        return OpenInterestObservation(frame, tuple(observed), tuple(evidence))
+        return OpenInterestObservation(
+            frame,
+            tuple(observed),
+            tuple(evidence),
+            source_field_mapping=(
+                "sum_open_interest->open_interest_amount;"
+                "sum_open_interest_value->open_interest_value"
+            ),
+        )
 
     def _read_day(
         self, symbol: str, day: date, start: datetime, end: datetime
@@ -307,9 +318,3 @@ class BinanceDataVisionProvider:
             normalizations=tuple(normalizations),
         )
         return rows, evidence
-
-    def _open_interest_source_field_mapping(self, market: ResolvedOpenInterestMarket) -> str:
-        del market
-        return (
-            "sum_open_interest->open_interest_amount;sum_open_interest_value->open_interest_value"
-        )

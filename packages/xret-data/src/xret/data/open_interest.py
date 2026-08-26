@@ -23,7 +23,7 @@ from xret.data.models import (
     YearMonth,
 )
 from xret.data.observation_coverage import evaluate_observation_coverage
-from xret.data.providers.contracts import OpenInterestRequest
+from xret.data.providers.contracts import OpenInterestRequest, OpenInterestSyncPolicy
 from xret.data.providers.discovery import ProviderHandle
 from xret.data.providers.oi_runtime import (
     OpenInterestProviderRuntime,
@@ -191,16 +191,13 @@ def _segments(
 
 
 def _warnings(
-    gaps: tuple[CoverageInterval, ...], *, provider_name: str | None = None
+    gaps: tuple[CoverageInterval, ...], *, sync_policy: OpenInterestSyncPolicy
 ) -> tuple[DataWarning, ...]:
-    code = (
-        "source.publication_lag"
-        if provider_name == "binance-data-vision"
-        else "coverage.partial_observation"
-    )
+    revisioned_archive = sync_policy is OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+    code = "source.publication_lag" if revisioned_archive else "coverage.partial_observation"
     message = (
-        "official archive object is absent or does not certify this open-interest span"
-        if provider_name == "binance-data-vision"
+        "revisioned archive object is absent or does not certify this open-interest span"
+        if revisioned_archive
         else "provider observation did not prove this open-interest span"
     )
     return normalized_warnings(DataWarning(code, message, gap.start, gap.end) for gap in gaps)
@@ -307,7 +304,7 @@ class OpenInterestDataset:
             covered=covered,
             gaps=gaps,
             sources=_sources(observation),
-            warnings=_warnings(gaps, provider_name=observation.source.descriptor.name),
+            warnings=_warnings(gaps, sync_policy=observation.market.sync_policy),
         )
 
     def _local_key(self) -> OpenInterestKey:
@@ -384,7 +381,7 @@ class OpenInterestDataset:
                     catalog.record_ingestion_run(running)
             try:
                 runtime = runtime or self._runtime()
-                if runtime.descriptor.name == "binance-data-vision":
+                if runtime.sync_policy is OpenInterestSyncPolicy.REVISIONED_ARCHIVE:
                     missing = (CoverageInterval(start_dt, end_dt, CoverageStatus.MISSING),)
                 if missing:
                     market = runtime.resolve_market(resolved)
@@ -440,7 +437,7 @@ class OpenInterestDataset:
                         contract_size=observation.market.derivative.contract_size or "",
                         source_field_mapping=observation.source_field_mapping or "",
                     )
-                    if observation.source.descriptor.name == "binance-data-vision":
+                    if observation.market.sync_policy is OpenInterestSyncPolicy.REVISIONED_ARCHIVE:
                         change = prepare_open_interest_revision_month(
                             config.data_dir,
                             key,
@@ -520,7 +517,8 @@ class OpenInterestDataset:
                     with catalog.transaction():
                         if (
                             observations
-                            and observations[0][1].source.descriptor.name == "binance-data-vision"
+                            and observations[0][1].market.sync_policy
+                            is OpenInterestSyncPolicy.REVISIONED_ARCHIVE
                         ):
                             for _requested, observation, _rows in observations:
                                 for contributor in observation.contributors:
@@ -625,10 +623,7 @@ class OpenInterestDataset:
             covered=covered,
             gaps=gaps,
             sources=sources,
-            warnings=_warnings(
-                gaps,
-                provider_name=(observations[0][1].source.descriptor.name if observations else None),
-            ),
+            warnings=_warnings(gaps, sync_policy=runtime.sync_policy),
         )
 
     @staticmethod

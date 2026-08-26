@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from xret.data.errors import (
     SyncError,
     UnsupportedMarketError,
 )
+from xret.data.models import Market
 from xret.data.open_interest_quality import enforce_open_interest
 from xret.data.providers import (
     PROVIDER_API_VERSION,
@@ -26,6 +28,7 @@ from xret.data.providers import (
     OpenInterestObservation,
     OpenInterestRequest,
     OpenInterestSourceEvidence,
+    OpenInterestSyncPolicy,
     ProviderDescriptor,
     ResolvedOpenInterestMarket,
 )
@@ -92,6 +95,139 @@ class OpenInterestProvider:
         if observed is None:
             observed = (ObservedWindow(request.start, request.end),)
         return OpenInterestObservation(_provider_frame(rows), observed)
+
+
+def test_oi_contract_defaults_preserve_positional_provider_source_compatibility() -> None:
+    from xret.data.models import MarketIdentity
+
+    identity = MarketIdentity(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market=Market.PERPETUAL,
+        settle="USDT",
+    )
+    market = ResolvedOpenInterestMarket(
+        identity,
+        "BTCUSDT",
+        "BTC/USDT:USDT",
+        frozenset({"5m"}),
+        DerivativeInterpretation(True, False, "1"),
+    )
+    observation = OpenInterestObservation(_provider_frame([]), ())
+
+    assert market.sync_policy is OpenInterestSyncPolicy.MISSING_ONLY
+    assert observation.normalizations == ()
+    assert observation.source_field_mapping is None
+
+
+@pytest.mark.parametrize("policy", ["missing_only", None, object()])
+def test_resolved_oi_market_requires_typed_sync_policy(policy: object) -> None:
+    from xret.data.models import MarketIdentity
+
+    identity = MarketIdentity(
+        exchange="binance",
+        symbol="BTC/USDT",
+        market=Market.PERPETUAL,
+        settle="USDT",
+    )
+    with pytest.raises(InvalidRequestError, match="sync_policy"):
+        ResolvedOpenInterestMarket(
+            identity,
+            "BTCUSDT",
+            "BTC/USDT:USDT",
+            frozenset({"5m"}),
+            DerivativeInterpretation(True, False, "1"),
+            policy,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("normalizations", "mapping"),
+    [(["x"], None), (("",), None), ((), "")],
+)
+def test_oi_observation_strictly_validates_explicit_provenance(
+    normalizations: object, mapping: object
+) -> None:
+    with pytest.raises(InvalidRequestError):
+        OpenInterestObservation(
+            _provider_frame([]),
+            (),
+            normalizations=normalizations,  # type: ignore[arg-type]
+            source_field_mapping=mapping,  # type: ignore[arg-type]
+        )
+
+
+def test_runtime_rejects_declared_and_resolved_sync_policy_mismatch(tmp_path: Path) -> None:
+    class MismatchedPolicyProvider(OpenInterestProvider):
+        open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+
+    dataset, _ = _dataset(tmp_path, MismatchedPolicyProvider([]))
+
+    with pytest.raises(ProviderError, match="does not match its declared policy"):
+        dataset.fetch(_at(0), _at(5))
+
+
+def test_runtime_uses_observation_provenance_and_ignores_private_hooks(tmp_path: Path) -> None:
+    class ExplicitProvider(OpenInterestProvider):
+        def observe_open_interest(self, request, market):
+            del market
+            self.observe_calls += 1
+            return OpenInterestObservation(
+                _provider_frame([(request.start, 1.0, 2.0)]),
+                (ObservedWindow(request.start, request.end),),
+                normalizations=("open_interest.explicit",),
+                source_field_mapping="nativeAmount->open_interest_amount",
+            )
+
+        def _open_interest_normalizations(self, market):
+            raise AssertionError("private normalization hook must not be inspected")
+
+        def _open_interest_source_field_mapping(self, market):
+            raise AssertionError("private mapping hook must not be inspected")
+
+    result = _dataset(tmp_path, ExplicitProvider([]))[0].fetch(_at(0), _at(5))
+
+    assert result.sources[0].normalizations == ("open_interest.explicit",)
+    assert result.sources[0].source_field_mapping == "nativeAmount->open_interest_amount"
+
+
+def test_provider_name_does_not_enable_revision_or_archive_warning(tmp_path: Path) -> None:
+    class SameNameProvider(OpenInterestProvider):
+        descriptor = ProviderDescriptor("binance-data-vision", "fixture", PROVIDER_API_VERSION)
+
+    provider = SameNameProvider(
+        [(_at(0), 1.0, None)],
+        observed=(ObservedWindow(_at(0), _at(5)),),
+    )
+    dataset, _ = _dataset(tmp_path, provider)
+    fetched = dataset.fetch(_at(0), _at(10))
+    dataset.sync(_at(0), _at(5)).require_complete()
+    dataset.sync(_at(0), _at(5)).require_complete()
+
+    assert fetched.warnings[0].code == "coverage.partial_observation"
+    assert provider.observe_calls == 2
+
+
+def test_revisioned_policy_requires_explicit_source_evidence(tmp_path: Path) -> None:
+    class EvidenceFreeRevisionProvider(OpenInterestProvider):
+        open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+
+        def resolve_open_interest_market(self, identity):
+            return replace(
+                super().resolve_open_interest_market(identity),
+                sync_policy=OpenInterestSyncPolicy.REVISIONED_ARCHIVE,
+            )
+
+    dataset, _ = _dataset(
+        tmp_path,
+        EvidenceFreeRevisionProvider(
+            [(_at(0), 1.0, None)],
+            observed=(ObservedWindow(_at(0), _at(5)),),
+        ),
+    )
+
+    with pytest.raises(ProviderError, match="explicit source contributor evidence"):
+        dataset.fetch(_at(0), _at(5))
 
 
 def _dataset(tmp_path: Path, provider: object) -> tuple[OpenInterestDataset, MarketDataConfig]:
@@ -205,7 +341,8 @@ def test_sync_strict_partial_idempotence_and_rebuild_preserve_only_row_grid(
     assert metadata["derivative_inverse"] == "false"
     assert metadata["contract_size"] == "1"
     assert metadata["source_field_mapping"] == ""
-    assert not second.changed and second.sources == () and provider.observe_calls == 1
+    assert not second.changed and second.sources == ()
+    assert provider.resolve_calls == provider.observe_calls == 1
 
     db_path = config.state_dir / "catalog.sqlite3"
     for path in (

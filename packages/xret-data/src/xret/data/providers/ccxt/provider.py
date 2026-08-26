@@ -106,7 +106,6 @@ class CcxtProvider:
         self._tick_size_precision_mode_provider = tick_size_precision_mode_provider
         self._live_exchange_factory = live_exchange_factory
         self._funding_duplicate_counts: dict[tuple[MarketIdentity, str, str], int] = {}
-        self._open_interest_duplicate_counts: dict[tuple[MarketIdentity, str, str], int] = {}
         self._live_capability_provider = live_capability_provider
         self._resolution_lock = threading.RLock()
         self._clients_by_id: dict[str, client.CCXTExchange] = {}
@@ -332,24 +331,17 @@ class CcxtProvider:
                     self._pacers_by_id[resolution.client_id],
                 ),
             )
-            with self._resolution_lock:
-                self._open_interest_duplicate_counts[key] = result.duplicate_count
+        normalizations = (
+            ("open_interest.identical_duplicate_dedup",) if result.duplicate_count else ()
+        )
         return OpenInterestObservation(
             frame=_provider_open_interest_frame(result.rows),
             observed=result.observed,
+            normalizations=normalizations,
+            source_field_mapping=(
+                "openInterestAmount->open_interest_amount;openInterestValue->open_interest_value"
+            ),
         )
-
-    def _open_interest_normalizations(self, market: ResolvedOpenInterestMarket) -> tuple[str, ...]:
-        key = (market.identity, market.native_market_id, market.native_symbol)
-        with self._resolution_lock:
-            duplicates = self._open_interest_duplicate_counts.pop(key, 0)
-        result: list[str] = []
-        if duplicates:
-            result.append("open_interest.identical_duplicate_dedup")
-        return tuple(result)
-
-    def _open_interest_source_field_mapping(self, market: ResolvedOpenInterestMarket) -> str:
-        return "openInterestAmount->open_interest_amount;openInterestValue->open_interest_value"
 
     def resolve_reference_market(
         self, identity: MarketIdentity, kind: ReferencePriceKind

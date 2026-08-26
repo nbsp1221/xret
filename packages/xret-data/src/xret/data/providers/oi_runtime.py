@@ -19,6 +19,7 @@ from xret.data.providers.contracts import (
     OpenInterestObservation,
     OpenInterestRequest,
     OpenInterestSourceEvidence,
+    OpenInterestSyncPolicy,
     ProviderDescriptor,
     ResolvedOpenInterestMarket,
 )
@@ -144,6 +145,16 @@ class OpenInterestProviderRuntime:
         self._provider = provider
         self._descriptor = validate_provider_descriptor(provider)
         self._clock = clock or _clock
+        self._sync_policy = getattr(
+            provider,
+            "open_interest_sync_policy",
+            OpenInterestSyncPolicy.MISSING_ONLY,
+        )
+        if not isinstance(self._sync_policy, OpenInterestSyncPolicy):
+            raise ProviderError(
+                f"provider {self._descriptor.name!r} open_interest_sync_policy must be "
+                "an OpenInterestSyncPolicy"
+            )
         if not callable(getattr(provider, "resolve_open_interest_market", None)) or not callable(
             getattr(provider, "observe_open_interest", None)
         ):
@@ -154,6 +165,10 @@ class OpenInterestProviderRuntime:
     @property
     def descriptor(self) -> ProviderDescriptor:
         return self._descriptor
+
+    @property
+    def sync_policy(self) -> OpenInterestSyncPolicy:
+        return self._sync_policy
 
     def resolve_market(self, identity: MarketIdentity) -> ResolvedOpenInterestMarket:
         provider = cast("HistoricalOpenInterestProvider", self._provider)
@@ -166,7 +181,13 @@ class OpenInterestProviderRuntime:
                 f"provider {self._descriptor.name!r} failed to resolve open interest for "
                 f"{identity.exchange}/{identity.symbol}: {exc}"
             ) from exc
-        return _resolved(identity, value)
+        resolved = _resolved(identity, value)
+        if resolved.sync_policy is not self._sync_policy:
+            raise ProviderError(
+                f"provider {self._descriptor.name!r} resolved open-interest sync policy "
+                "does not match its declared policy"
+            )
+        return resolved
 
     def observe(
         self,
@@ -180,6 +201,11 @@ class OpenInterestProviderRuntime:
             if market is None
             else _resolved(request.identity, market)
         )
+        if resolved.sync_policy is not self._sync_policy:
+            raise ProviderError(
+                f"provider {self._descriptor.name!r} resolved open-interest sync policy "
+                "does not match its declared policy"
+            )
         if request.timeframe not in resolved.timeframes:
             raise UnsupportedMarketError(
                 f"provider {self._descriptor.name!r} does not support open-interest "
@@ -200,6 +226,14 @@ class OpenInterestProviderRuntime:
         if not isinstance(raw, OpenInterestObservation):
             raise ProviderError(
                 "provider observe_open_interest() must return OpenInterestObservation"
+            )
+        if (
+            self._sync_policy is OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+            and raw.observed
+            and not raw.sources
+        ):
+            raise ProviderError(
+                "revisioned open-interest observations require explicit source contributor evidence"
             )
         if (
             not isinstance(raw.frame, pl.DataFrame)
@@ -249,26 +283,15 @@ class OpenInterestProviderRuntime:
             end=request.end,
             error_cls=ProviderError,
         )
-        normalizations: tuple[str, ...] = ()
-        hook = getattr(self._provider, "_open_interest_normalizations", None)
-        if callable(hook):
-            candidate = hook(resolved)
-            if not isinstance(candidate, tuple) or not all(
-                isinstance(item, str) and item for item in candidate
-            ):
-                raise ProviderError(
-                    "provider open-interest normalizations hook returned invalid values"
+        normalizations = tuple(
+            dict.fromkeys(
+                (
+                    *raw.normalizations,
+                    *(item for source in raw.sources for item in source.normalizations),
                 )
-            normalizations = candidate
-        source_field_mapping: str | None = None
-        mapping_hook = getattr(self._provider, "_open_interest_source_field_mapping", None)
-        if callable(mapping_hook):
-            candidate = mapping_hook(resolved)
-            if not isinstance(candidate, str) or not candidate:
-                raise ProviderError(
-                    "provider open-interest source-field mapping hook returned an invalid value"
-                )
-            source_field_mapping = candidate
+            )
+        )
+        source_field_mapping = raw.source_field_mapping
         contributors = _contributors(
             raw.sources,
             request,
@@ -281,14 +304,6 @@ class OpenInterestProviderRuntime:
         for timestamp in timestamps.to_list():
             if not any(item.start <= timestamp < item.end for item in contributors):
                 raise ProviderError("provider open-interest row falls outside contributors")
-        normalizations = tuple(
-            dict.fromkeys(
-                (
-                    *normalizations,
-                    *(item for source in raw.sources for item in source.normalizations),
-                )
-            )
-        )
         return ValidatedOpenInterestObservation(
             frame=canonical,
             observed=observed,
