@@ -7,6 +7,24 @@
 - `MarketData`
 - `MarketDataConfig`
 - `BarDataset`
+- `SettledFundingDataset`
+- `FundingFetchResult`
+- `FundingSyncResult`
+- `FundingPartialScanResult`
+- `ReferenceBarDataset`
+- `ReferenceBarFetchResult`
+- `ReferenceBarSyncResult`
+- `ReferenceBarPartialScanResult`
+- `OpenInterestDataset`
+- `OpenInterestFetchResult`
+- `OpenInterestSyncResult`
+- `OpenInterestPartialScanResult`
+- `ReferencePriceKind`
+- `ReferenceBarKey`
+- `ReferenceBarCapability`
+- `DatasetFamily`
+- `SettledFundingKey`
+- `OpenInterestKey`
 - `BarUpdate`
 - `BarFinality`
 - `Availability`
@@ -26,7 +44,7 @@
 MarketData(
     config: MarketDataConfig | None = None,
     *,
-    provider: HistoricalBarProvider | str | None = None,
+    provider: object | None = None,
 )
 ```
 
@@ -75,10 +93,13 @@ Each `MarketDefinition` contains:
 - `timeframes`: provider-advertised timeframe names that Xret's canonical grammar can express;
 - `tick_size`: a positive exact `Decimal` fixed price increment, or `None`;
 - `size_increment`: a positive exact `Decimal` fixed quantity increment, or `None`;
-- `derivative`: linear/inverse and contract-size interpretation for a perpetual, otherwise `None`.
-- `bar_capabilities`: per-timeframe historical and live availability plus capability notices.
+- `derivative`: linear/inverse and contract-size interpretation for a perpetual, otherwise `None`;
+- `bar_capabilities`: per-timeframe historical and live trade-bar availability plus capability notices;
+- `funding_history`: settled-funding availability and notices;
+- `reference_bar_capabilities`: availability and notices for each mark, index, or premium-index kind/timeframe; and
+- `open_interest_capabilities`: per-timeframe historical OI availability and notices.
 
-`active=True` is not a guarantee that every venue operation is currently available. `timeframes` remains the concise historical catalog and is not an exhaustive-pagination or qualification claim. Inspect `bar_capabilities` to distinguish `available`, `unavailable`, and `incompatible`. Xret attempts available operations and validates the current response.
+`active=True` is not a guarantee that every venue operation is currently available. `timeframes` remains the concise trade-bar catalog and is not an exhaustive-pagination or qualification claim. Inspect the family-specific capability fields to distinguish `available`, `unavailable`, and `incompatible`. Xret attempts available operations and validates the current response.
 
 These fields answer discovery-time questions, not whether a later network request succeeded. See [Provider support and trust](../explanation/provider-support.md) for the state model.
 
@@ -120,6 +141,44 @@ Binds one provider-independent dataset identity and performs no I/O.
 
 All historical and live rows use Xret's [canonical trade time-bar contract](time-bars.md). OHLC summarizes eligible executed trades, `volume` is base-asset quantity, and a provider-native timeframe is usable only when its complete interval semantics match or can be normalized losslessly. Fixed `s`, `m`, `h`, and `d` multiples use the Unix epoch as their origin; `1w` begins Monday UTC and `1M` begins at the UTC calendar-month boundary. Consequently `7d` and `1w` are distinct identities.
 
+### `settled_funding`
+
+```python
+market_data.settled_funding(
+    *,
+    exchange: str,
+    symbol: str,
+    market: str,
+    settle: str | None = None,
+) -> SettledFundingDataset
+```
+
+Binds one provider-independent series of final public funding events and performs no I/O. `market` must be `perpetual`; settlement inference follows the same single-candidate remote/local rules as perpetual trade bars. The family deliberately excludes current or predicted rates, private account payments, and funding PnL calculations.
+
+Canonical rows contain `exchange, symbol, market, settle, effective_at, funding_rate, funding_interval_seconds, mark_price`. `effective_at` preserves the provider's exact UTC millisecond event time rather than rounding to a nominal schedule. `funding_rate` is finite. `funding_interval_seconds` is nullable and positive when present; `mark_price` is nullable and positive finite when present. Xret does not assume a fixed eight-hour schedule or infer an interval from neighboring events.
+
+Funding accepts arbitrary UTC-aware half-open ranges because it is an irregular event series. Only events strictly before the conservative pre-call evidence instant are accepted, and observed spans are clipped at that instant; a requested future tail therefore remains `missing` for a later sync. `fetch`, `sync`, `scan`, and `scan_partial` keep the standard remote-only, reconcile, strict-local, and explicit-partial boundaries and return funding-specific result types. Provider-observed spans, not event spacing, establish completeness. A rebuild can recover event files but cannot prove the surrounding observation spans, so rebuilt funding coverage is empty until those ranges are synchronized again.
+
+### `reference_bars`
+
+```python
+market_data.reference_bars(
+    *,
+    exchange: str,
+    symbol: str,
+    market: str,
+    settle: str | None = None,
+    kind: str,
+    timeframe: str,
+) -> ReferenceBarDataset
+```
+
+Binds one provider-independent historical reference series and performs no I/O. `market` must be `perpetual`; settlement inference follows the same single-candidate remote/local rules as perpetual trade bars. `kind` is exactly `mark`, `index`, or `premium_index`, and each kind/timeframe has independent identity, path, lock, coverage, and source lineage.
+
+A reference row has `exchange, symbol, market, settle, timeframe, timestamp, open, high, low, close`. It never has `volume`: native placeholder volume and unrelated kline fields are discarded at the provider adapter. Mark and index OHLC values are finite and positive. Premium index is a dimensionless dislocation series, not a currency price, so its finite OHLC values may be negative or zero while preserving `low <= open, close <= high`.
+
+`fetch`, `sync`, `scan`, and `scan_partial` have the same remote-only, reconcile, strict-local, and explicit-partial I/O boundaries as `BarDataset`, but return reference-family result types. Requests must align to the timeframe grid. Only time-closed rows beyond Xret's finality grace are accepted; no absent value is synthesized. A missing slot in an exhaustively observed grid is `unavailable`, so strict scans reject it. Pair-scoped index routes remain stored under the requested derivative identity while provider evidence and Parquet provenance identify `reference_target_scope="pair"` and the native pair.
+
 ### `live`
 
 ```python
@@ -138,13 +197,36 @@ async with market_data.live(exchange="binance") as live:
 
 `bars` must be a `BarDataset` created by the same `MarketData` instance and must use the session exchange. One session may merge several bar subscriptions into its single-consumer iterator. The only current event type is immutable `BarUpdate`, containing canonical identity, timeframe, inclusive UTC bar-start timestamp, trade-derived OHLC floats, base-asset `volume`, Xret's UTC normalization receipt time, and `BarFinality` (`FORMING`, `PROVISIONAL`, or `FINAL`). Finality describes the observation relative to the bar interval and Xret's finality grace. It never claims that the value is stored as canonical data.
 
+### `open_interest`
+
+```python
+market_data.open_interest(
+    *,
+    exchange: str,
+    symbol: str,
+    market: str,
+    settle: str | None = None,
+    timeframe: str,
+) -> OpenInterestDataset
+```
+
+Binds one provider-independent historical open-interest series and performs no I/O. `market` must be `perpetual`; settlement inference follows the same single-candidate remote/local rule as other perpetual families. Open interest is a non-directional point-in-time gauge sampled at the provider-labeled row `timestamp`. It is not interval flow, turnover, or evidence of long/short direction, and Xret never forward-fills a missing sample.
+
+Canonical rows contain `exchange, symbol, market, settle, timeframe, timestamp, open_interest_amount, open_interest_value`. Amount is finite nonnegative base-asset outstanding exposure. The built-in CCXT adapter admits only unambiguously linear, non-inverse contracts with an exact positive contract size, consumes CCXT's unified `openInterestAmount` directly, and converts its Decimal representation once to Float64. Contract size remains interpretation and provenance metadata; it is not applied again to the unified amount. Value is nullable finite nonnegative quote-currency notional. Signed zero is normalized to positive zero; inverse, quanto, ambiguous, nonfinite, and overflowing values fail before return or storage.
+
+Requests use aligned half-open sample-grid ranges. `fetch`, `sync`, `scan`, and `scan_partial` preserve the standard remote-only, reconcile, strict-local, and explicit-partial boundaries and return OI-specific results. Each expected timestamp is its own completeness unit. The CCXT route proves returned samples only: sparse omissions and ranges outside source retention remain `missing`, never `unavailable`, and no current snapshot call patches historical data. Result and Parquet provenance record the derivative interpretation, contract size, native field mapping, and named conversion.
+
+The separately selected installed provider `MarketData(provider="binance-data-vision")` supports official Binance Data Vision USDⓈ-M perpetual daily metrics archives at `5m`; it has no bars, funding, reference, live, discovery, CCXT delegation, or Binance REST fallback. Requests must use whole UTC days. Xret verifies the official SHA-256 sidecar and object identity, bounds and validates the ZIP and sole CSV member, parses the exact schema/day/grid with Decimal-to-Float64 and positive-zero normalization, stable-sorts rows, deduplicates exact duplicates, and rejects conflicting duplicates. A 404 or missing slot remains `missing` with publication-lag evidence. `sources` records each contributed range, object key, checksum/revision, retrieval time, row counts, route, and normalizations.
+
+Canonical OI artifacts carry ordered, non-overlapping contributor ranges. The catalog separately indexes immutable provider ownership, so a sync selected with the wrong provider fails before publication even when the range is already covered. Data Vision re-observes requested archive days to detect checksum changes; a changed revision set-replaces rows and coverage only inside the same owned certified interval, including deletions, while preserving disjoint contributors. Cross-provider overlap is fetch-only qualification evidence and differing same-key canonical values fail without choosing a winner.
+
 `subscribe_bar_updates(bars, *, bootstrap=False) -> LiveSubscription` starts live-only delivery by default and returns the resolved dataset identity, provider evidence, normalization identifiers, and initial warnings. With `bootstrap=True`, Xret buffers the activated live stream, observes the two most recent closed intervals through the same provider, coalesces timestamp overlap with the last buffered live value taking precedence, emits the bootstrap sequence in ascending timestamp order, and then continues live delivery. The operation performs remote I/O but never reads or changes canonical storage.
 
 Same-timestamp updates are valid after bootstrap. Backward timestamps, provider failures, malformed events, and bounded queue or bootstrap-buffer overflow fail the whole session with `ProviderError`; Xret does not silently retry, reconnect, or drop old events. Ordering is nondecreasing per dataset, not globally across different datasets in one session. A non-boolean `bootstrap` value raises `InvalidRequestError` before provider I/O. See [Consume live bar updates](../guides/live-bars.md) for lifecycle and continuity guidance.
 
 ## Time ranges
 
-Every data verb requires `start` and accepts optional `end`. Inputs may be timezone-aware `datetime` values, ISO dates, or offset-bearing ISO timestamps. Naive datetimes are rejected. Ranges are UTC-aware and half-open (`[start, end)`), and both bounds must align to the dataset timeframe.
+Every data verb requires `start` and accepts optional `end`. Inputs may be timezone-aware `datetime` values, ISO dates, or offset-bearing ISO timestamps. Naive datetimes are rejected and all ranges are UTC-aware and half-open (`[start, end)`). Trade bars, reference bars, and OI require bounds aligned to their timeframe; settled funding accepts arbitrary UTC-aware bounds.
 
 ## `BarDataset.fetch`
 
@@ -202,25 +284,66 @@ market_data.maintenance.validate()
 market_data.maintenance.rebuild_catalog()
 ```
 
-`validate()` compares the rebuildable SQLite operational index with canonical Parquet metadata and does not mutate state. `rebuild_catalog()` is the exclusive maintenance operation: it rebuilds SQLite only from sufficient canonical Parquet evidence, never mutates Parquet, and fails closed when evidence is insufficient. Xret has no automatic repair, cause taxonomy, synthetic bars, or forensic recovery.
+`validate()` compares the rebuildable SQLite operational index with canonical Parquet metadata and does not mutate state. `rebuild_catalog()` is the exclusive maintenance operation: it rebuilds SQLite only from sufficient current canonical Parquet evidence, never mutates Parquet, and fails closed when evidence is insufficient.
 
-Canonical Parquet holds OHLCV rows and provider-neutral domain, source, and self-description metadata. SQLite uses WAL and short transactions for operational coverage, source-lineage binding, physical SHA values, file locations, and ingestion runs. Negative evidence for an unavailable-only dataset has no Parquet artifact: if its catalog is lost and rebuilt, that evidence and its lineage return to unknown rather than being invented.
+Catalog schema v6 identifies the closed family vocabulary and indexes open-interest contributor ownership. Xret never migrates an existing catalog in place: normal open paths reject any schema other than exactly v6 without mutation. An operator upgrades by stopping writers, backing up `state_dir` and `data_dir` together, then calling `rebuild_catalog()`. Incompatible catalogs with live WAL/SHM sidecars are not replaced. See [Migrate a local store to catalog v6](../guides/catalog-v6-migration.md) for backup, rebuild, verification, and rollback steps.
 
-Xret 0.x does not migrate incompatible canonical or catalog schemas. Normal open paths reject them without mutation. Catalog rebuild accepts only canonical Parquet written in the current schema; handling an older store is an explicit application/operator decision, not an automatic compatibility path.
+Trade bars retain their existing paths. Settled funding, reference bars, and open interest use independently versioned canonical artifacts under the reserved `_xret/settled-funding`, `_xret/reference-bars`, and `_xret/open-interest` trees. Unknown entries beneath `_xret`, malformed paths, unsupported artifact versions, and metadata/path mismatches make storage ambiguous and block operation rather than being ignored.
+
+Rebuild restores file facts and only row-provable coverage. Trade, reference, and OI rows reconstruct contiguous `available` grids; missing slots and previous `unavailable` evidence return to `missing`. Funding rows do not prove exhaustive observation around irregular events, so funding files are indexed but funding completeness is not reconstructed. Ingestion runs, warnings, quality events, unavailable-only datasets, and other catalog-only history are not invented.
+
+Canonical open-interest artifacts may contain ordered, non-overlapping contributor ranges from different providers. Catalog v6 reconstructs that ownership from Parquet and rejects synchronization by a provider that does not own the requested range. Other families retain one stable provider-name lineage per dataset. Xret has no automatic Parquet repair, cause taxonomy, synthetic values, in-place schema migration, or down-migration.
 
 ## 0.5.1 migration
 
 `BarDataset.fetch()` now returns `FetchResult`; replace direct frame use with `bars.fetch(...).data` and inspect `.gaps`, `.warnings`, and `.source` when remote completeness or provenance matters. `LiveMarketData.subscribe_bar_updates()` now returns `LiveSubscription` instead of `None`. `SyncResult` adds optional `.source`.
 
-CCXT qualification is no longer an authorization gate or runtime state. `VerificationStatus`, `Verification`, `UnverifiedProviderWarning`, `OperationCapability.verification`, and `ProviderEvidence.verification` are removed. Applications should inspect `bar_capabilities` for current availability, inspect operation results for source and warnings, and call `require_complete()` when partial presence-only history is insufficient. The separate [verified-support matrix](../quality/verified-support.md) remains the dated record of scopes exercised by Xret.
+PER-46 adds `settled_funding`, `reference_bars`, and `open_interest` as separate dataset bindings rather than columns or switches on `bars`. Each has family-specific fetch, sync, partial-scan result types and canonical schema. Applications must select nondefault providers explicitly through `MarketData(provider=...)`; provider selection never cascades or falls back. Stores created before catalog v6 require the explicit rebuild procedure above.
 
-## Canonical bar schema
+CCXT qualification is no longer an authorization gate or runtime state. `VerificationStatus`, `Verification`, `UnverifiedProviderWarning`, `OperationCapability.verification`, and `ProviderEvidence.verification` are removed. Applications should inspect family-specific capabilities for current availability, inspect operation results for source evidence and warnings, and call `require_complete()` when partial history is insufficient. The separate [verified-support matrix](../quality/verified-support.md) remains the dated record of scopes exercised by Xret.
 
-Frames and canonical Parquet files use:
+## Canonical schemas
+
+Trade bars:
 
 ```text
-exchange, symbol, market, settle, timeframe, timestamp,
-open, high, low, close, volume
+exchange: String, symbol: String, market: String, settle: String,
+timeframe: String, timestamp: Datetime(ms, UTC),
+open: Float64, high: Float64, low: Float64, close: Float64, volume: Float64
 ```
 
-`timestamp` is the inclusive UTC interval start. `settle` is null exactly for spot rows. Canonical rows are unique across dataset identity plus `timestamp`.
+Settled funding:
+
+```text
+exchange: String, symbol: String, market: String, settle: String,
+effective_at: Datetime(ms, UTC), funding_rate: Float64,
+funding_interval_seconds: Int64?, mark_price: Float64?
+```
+
+Reference bars:
+
+```text
+exchange: String, symbol: String, market: String, settle: String,
+timeframe: String, timestamp: Datetime(ms, UTC),
+open: Float64, high: Float64, low: Float64, close: Float64
+```
+
+Open interest:
+
+```text
+exchange: String, symbol: String, market: String, settle: String,
+timeframe: String, timestamp: Datetime(ms, UTC),
+open_interest_amount: Float64, open_interest_value: Float64?
+```
+
+All timestamps are UTC millisecond instants. Identity fields are non-null for these perpetual-only families; trade-bar `settle` is null exactly for spot. Rows are strictly ordered and unique within their family identity. Nullable fields are marked `?`; Xret never substitutes a guessed interval, mark price, or OI notional.
+
+## Derivative-family result contracts
+
+Funding, reference-bar, and OI verbs return their exported family-specific result types rather than `FetchResult`, `SyncResult`, or `PartialScanResult`. Their common fields are:
+
+- fetch: `dataset_key`, eager `data`, `covered`, `gaps`, `sources`, `warnings`, `is_complete`, and `require_complete()`;
+- sync: the fetch fields except `data`, plus `run_id`, `changed`, `fetched_rows`, and `written_partitions`; and
+- partial scan: `dataset_key`, lazy `data`, `covered`, `gaps`, `warnings`, and `is_complete`.
+
+`FundingFetchResult`, `ReferenceBarFetchResult`, and `OpenInterestFetchResult` raise `ProviderError` from `require_complete()` when gaps remain. Their sync counterparts raise `SyncError`. Unlike the trade-bar result's optional singular `source`, derivative-family remote results expose plural `sources`: funding and reference normally contain one provider snapshot, while OI may contain multiple object/range contributors. Strict family `scan` methods return `polars.LazyFrame` and raise `CoverageError` for any gap, matching the trade-bar local-read boundary.

@@ -74,11 +74,11 @@ df = bars.scan("2024-01-01", "2024-06-01").collect()
 | Surface | Available today | Important boundary |
 |---|---|---|
 | Markets | Crypto spot and perpetual | Futures with expiry, options, and non-crypto identities are not part of the current contract. |
-| Historical bars | Provider fetch, incremental sync, canonical Parquet, strict and partial local reads | Complete coverage is reported separately; Xret never fills unexplained gaps. |
+| Historical data | Trade bars, settled funding, mark/index/premium-index reference bars, and sampled open interest; incremental sync, canonical Parquet, strict and partial local reads | Complete coverage is reported separately; Xret never fills unexplained gaps or OI retention gaps. |
 | Live bars | Provider-advertised time-bar streams and optional recent-history bootstrap | Live observations are transient; Xret does not promise automatic reconnect or persistence. |
-| Providers | Built-in CCXT/CCXT Pro and an experimental custom-provider API | Provider capability permits an attempt; current responses must still satisfy Xret's contract. |
+| Providers | Built-in CCXT/CCXT Pro, built-in Binance Data Vision for qualified USDⓈ-M 5-minute historical OI, and an experimental custom-provider API | Provider capability permits an attempt; current responses must still satisfy Xret's contract. |
 
-Xret does not restrict CCXT to a small approved-exchange list. Provider capability and known lossless-compatibility rules determine whether an operation can be attempted; runtime validation and coverage evidence determine whether its result is safe and complete. Prior qualification is published separately as useful historical evidence, but it is not execution state and does not create warnings. Read [Provider support and trust](docs/explanation/provider-support.md) for the mental model and [Verified support](docs/quality/verified-support.md) for the tested combinations.
+Xret does not restrict CCXT to a small approved-exchange list. Provider capability and known lossless-compatibility rules determine whether an operation can be attempted; runtime validation and coverage evidence determine whether its result is safe and complete. Select nondefault providers explicitly with `MarketData(provider=...)`: `binance-data-vision` is a separate OI-only provider for the qualified Binance `BTC/USDT` USDⓈ-M `5m` archive scope and never falls back to CCXT or Binance REST. Prior qualification is published separately as useful historical evidence, but it is not execution state and does not create warnings. Read [Provider support and trust](docs/explanation/provider-support.md) for the mental model and [Verified support](docs/quality/verified-support.md) for the tested combinations.
 
 ## Principles
 

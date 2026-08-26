@@ -1,6 +1,6 @@
 # Market-data providers
 
-The experimental provider-author API lets an application or separately installed package acquire historical time bars through Xret without changing Xret itself. CCXT is the built-in implementation, not part of the provider contract.
+The experimental provider-author API lets an application or separately installed package acquire capability-specific historical market data through Xret without changing Xret itself. CCXT is the default implementation. The packaged `binance-data-vision` provider is a separate historical-OI-only implementation, not a route inside CCXT.
 
 Xret owns canonical identity, finality, schema validation, coverage, storage, locking, and recovery. A provider owns native market resolution, optional market-definition snapshots, historical network observation, and optional live bar delivery. Providers never write Xret's Parquet files or SQLite catalog.
 
@@ -10,24 +10,26 @@ The provider package is organized around a stable provider-independent core and 
 
 ```text
 xret/data/providers/
-├── __init__.py          # provider-author public exports
-├── contracts.py         # immutable SPI values and protocol
-├── runtime.py           # historical validation and canonical normalization
-├── live_runtime.py      # live capability validation and normalization
-├── discovery.py         # lazy direct/installed provider binding
-└── ccxt/                # built-in crypto implementation
-    ├── __init__.py      # CcxtProvider export
-    ├── provider.py      # implementation orchestration
-    ├── capabilities.py  # CCXT capability metadata interpretation
-    ├── compatibility.py # exact lossless semantics and bounded-window policies
-    ├── live.py          # CCXT Pro live-bar session
-    ├── client.py        # CCXT construction, retry, and transport
-    ├── markets.py       # crypto market resolution and definition translation
-    ├── semantics.py     # generic lossless canonical-value translation
-    └── pagination.py    # exhaustive and conservative presence-only strategies
+├── __init__.py             # provider-author public exports
+├── contracts.py            # immutable SPI values and protocols
+├── runtime.py              # trade-bar validation and normalization
+├── funding_runtime.py      # settled-funding validation
+├── reference_runtime.py    # reference-bar validation
+├── oi_runtime.py           # open-interest validation
+├── live_runtime.py         # live capability validation and normalization
+├── discovery.py            # lazy direct/installed provider binding
+├── binance_data_vision.py  # packaged historical-OI archive provider
+└── ccxt/                   # built-in general crypto implementation
+    ├── provider.py         # capability orchestration
+    ├── client.py           # CCXT construction, retry, and transport
+    ├── markets.py          # crypto resolution and capability translation
+    ├── compatibility.py    # exact lossless semantics and window policies
+    ├── live.py             # CCXT Pro live-bar session
+    ├── semantics.py        # trade-bar canonical-value translation
+    └── *_pagination.py     # family-specific observation strategies
 ```
 
-An additional built-in provider would be a sibling implementation package, not another branch inside `runtime.py` or the CCXT package. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. The current contract is deliberately limited to crypto spot and perpetual historical bars; it does not claim that non-crypto asset identity or session semantics have been designed.
+The Data Vision implementation is a sibling module with only descriptor, `resolve_open_interest_market`, and `observe_open_interest`; it does not fake other capability methods. Separately distributed providers implement the public contract in their own package and use direct injection or the installed-provider entry point. Current identities remain limited to crypto spot and perpetual markets; Xret does not claim that non-crypto identity or session semantics have been designed.
 
 ## Public provider API
 
@@ -37,10 +39,18 @@ Provider authors import from `xret.data.providers`:
 from xret.data.providers import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
+    PROVIDER_FUNDING_SCHEMA,
+    PROVIDER_OPEN_INTEREST_SCHEMA,
+    PROVIDER_REFERENCE_BAR_SCHEMA,
     BarObservation,
     BarRequest,
     DerivativeInterpretation,
+    FundingObservation,
+    FundingRequest,
     HistoricalBarProvider,
+    HistoricalFundingProvider,
+    HistoricalOpenInterestProvider,
+    HistoricalReferenceBarProvider,
     LiveBarProvider,
     LiveBarSession,
     Market,
@@ -48,15 +58,34 @@ from xret.data.providers import (
     MarketDefinitionProvider,
     MarketIdentity,
     ObservedWindow,
+    OpenInterestObservation,
+    OpenInterestRequest,
+    OpenInterestSourceEvidence,
     ProviderDescriptor,
     ProviderBarUpdate,
+    ReferenceBarObservation,
+    ReferenceBarRequest,
     ResolvedBarMarket,
+    ResolvedFundingMarket,
+    ResolvedOpenInterestMarket,
+    ResolvedReferenceMarket,
 )
 ```
 
 This namespace is self-contained for provider authoring; provider packages do not import domain values from implementation modules such as `xret.data.models`.
 
-The mandatory protocol covers synchronous historical [canonical trade OHLCV time bars](time-bars.md) for spot and perpetual markets. Live bars and market definitions are optional capabilities. The SPI does not expose raw trades, quotes, order books, fundamentals, provider-specific columns, fallback, or synthetic timeframes.
+The provider SPI is structural and capability-specific. A descriptor plus at least one complete recognized resolve/observe pair is required; historical bars, settled funding, reference bars, and historical OI are independent capabilities. Supplying only one method of a pair is a provider contract error. Live bars and market definitions are optional. The SPI does not expose raw trades, quotes, order books, fundamentals, provider-specific row columns, fallback, or synthetic timeframes.
+
+Provider value frames omit canonical identity, which Xret attaches after validation:
+
+| Capability pair | Provider schema | Time meaning |
+|---|---|---|
+| `resolve_market` / `observe_bars` | `timestamp, open, high, low, close, volume` | Aligned completed executed-trade intervals; volume is base quantity. |
+| `resolve_funding_market` / `observe_funding` | `effective_at, funding_rate, funding_interval_seconds?, mark_price?` | Final public settlement events in arbitrary UTC half-open ranges. |
+| `resolve_reference_market` / `observe_reference_bars` | `timestamp, open, high, low, close` | Aligned completed mark, index, or premium-index intervals; no volume. |
+| `resolve_open_interest_market` / `observe_open_interest` | `timestamp, open_interest_amount, open_interest_value?` | Provider-labeled samples on the requested grid; amount is base-asset-equivalent exposure and value is quote notional. |
+
+Each observation returns ordered, non-overlapping `ObservedWindow` evidence. Absence has meaning only inside those windows; providers may return a proved subset of the request for funding, reference, and OI. Xret preserves every unproved remainder as `missing`.
 
 `HistoricalBarProvider` is a structural protocol. Inheritance is optional; an implementation supplies:
 
@@ -88,11 +117,11 @@ class MarketDefinitionProvider(Protocol):
     ) -> tuple[MarketDefinition, ...]: ...
 ```
 
-A provider used through `MarketData` still implements `HistoricalBarProvider`. It may additionally implement `MarketDefinitionProvider`. Calling `MarketData.fetch_markets(...)` against a provider without this optional capability raises `UnsupportedMarketError`; Xret never falls back to CCXT after an explicitly selected provider lacks or fails the operation.
+A provider used through `MarketData` supplies a descriptor and at least one complete recognized resolve/observe capability pair. Historical bars are not mandatory: the packaged Data Vision provider is deliberately OI-only. A provider may additionally implement `MarketDefinitionProvider`. Calling `MarketData.fetch_markets(...)` against a provider without this optional capability raises `UnsupportedMarketError`; Xret never falls back to CCXT after an explicitly selected provider lacks or fails the operation.
 
 Every returned definition must belong to the requested canonical exchange and market family, and canonical identities must be unique. Xret rejects mutable collections, wrong value types, out-of-scope definitions, and duplicate identities as provider contract failures.
 
-`MarketDefinition` is immutable and contains canonical identity, nullable provider-advertised active status, canonical provider-advertised timeframes, optional exact `tick_size` and `size_increment`, and optional derivative interpretation. Its timeframes do not assert exhaustive historical pagination or Xret qualification. Search, filtering, ordering, and result caching remain application responsibilities.
+`MarketDefinition` is immutable and contains canonical identity, nullable provider-advertised active status, canonical provider-advertised trade-bar timeframes, optional exact `tick_size` and `size_increment`, and optional derivative interpretation. `bar_capabilities` reports historical/live trade bars; `funding_history` reports settled funding; `reference_bar_capabilities` reports exact kind/timeframe pairs; and `open_interest_capabilities` reports OI timeframes. These values describe current provider-advertised operability and known compatibility, not exhaustive pagination or Xret qualification. Search, filtering, ordering, and result caching remain application responsibilities.
 
 The built-in CCXT adapter translates only entries safely expressible with the requested spot or perpetual identity. Unrelated native instrument families, unknown optional fields, and native timeframe names outside Xret's grammar do not reject the venue. Canonical identity collisions are excluded rather than resolved by exposing or arbitrarily selecting a provider-native symbol. CCXT precision values become increments only in `TICK_SIZE` mode; limits and other precision modes are not guessed into fixed increments.
 
@@ -146,7 +175,7 @@ Identity columns are deliberately absent. Xret adds canonical identity after val
 
 These meanings make explicit the canonical semantics already required by the provider value schema; they do not add a method or field to SPI version 1. A provider that emitted a differently defined value was not producing canonical Xret OHLCV even if its frame shape passed structural validation.
 
-Observation evidence is stronger than returned rows. In the current SPI major, ordered windows must align to the requested timeframe and contiguously cover the entire request. A provider that cannot prove exhaustive coverage must raise an error; it must not return a partial observation as success. Immediately before calling the provider, Xret records a conservative evidence time and records completion separately after the call returns. The completed-bar gate and negative coverage use only the pre-call evidence time, so a bar becoming final during a slow request remains `missing` for the next sync. Xret also rejects rows outside the request or evidence and enforces canonical OHLCV invariants.
+Observation evidence is stronger than returned rows. In the current SPI major, observed windows must be ordered, non-overlapping, inside the request, and aligned to a grid when the family has one. They may prove only a subset of the request; every returned row must lie inside an observed window, and every unproved remainder stays `missing`. Immediately before calling the provider, Xret records a conservative evidence time and records completion separately after the call returns. For finalized bar families, the completed-row gate and negative coverage use only the pre-call evidence time, so an interval becoming final during a slow request remains `missing` for the next sync. Xret also rejects rows outside the request or evidence and enforces the applicable family invariants.
 
 This distinction prevents a temporary empty native page from turning an unqueried tail into false `unavailable` coverage:
 
@@ -195,13 +224,31 @@ Discovery, import, and factory execution are lazy and cached per `MarketData` in
 
 A zero-argument factory is suitable for providers configured from their own environment or configuration files. Providers needing application-owned runtime objects should use direct injection.
 
+## Packaged Binance Data Vision provider
+
+Select the packaged archive provider explicitly:
+
+```python
+from xret.data import MarketData
+
+archive = MarketData(provider="binance-data-vision")
+```
+
+It implements only `resolve_open_interest_market` and `observe_open_interest`. Its admitted scope is Binance `BTC/USDT`, USDT-settled linear perpetual, `5m`, using official USDⓈ-M daily metrics archives and whole UTC-day requests of 1 through 366 days. It has no trade bars, funding, reference bars, live session, market discovery, CCXT delegation, or Binance REST fallback. Selecting it for another operation or identity raises rather than switching providers.
+
+For each day Xret verifies the official SHA-256 sidecar and filename, bounded ZIP structure, sole expected CSV member, exact header, symbol, UTC day/grid, finite nonnegative Decimal values, ordering, and duplicates. Exact duplicates are deduplicated; conflicts fail. Missing objects and absent slots remain `missing` and carry publication-lag evidence. Amount maps from `sum_open_interest`; value maps from `sum_open_interest_value`.
+
+Data Vision re-observes requested archive days so a changed checksum can replace only the same certified owned interval, including deleting rows that disappeared from the revised object. OI canonical files carry ordered, non-overlapping contributor manifests, and catalog v6 indexes provider ownership. Another provider may own a disjoint recent range in the same OI dataset, but cannot synchronize an overlapping Data Vision range. Cross-provider overlap is a fetch-only qualification operation and never chooses or publishes a winner.
+
 ## Source lineage and recovery
 
-The first `sync` that commits provider-derived canonical facts binds a canonical dataset to `ProviderDescriptor.name`. Those facts may be available rows published to Parquet or unavailable coverage for a finalized range. A successful remote observation that produces neither does not bind lineage. A newer implementation version with the same name may continue the history. A different name cannot silently append or rewrite it.
+For trade bars, settled funding, and reference bars, the first `sync` that commits provider-derived canonical facts binds a canonical dataset to `ProviderDescriptor.name`. Those facts may be available rows or unavailable coverage for a finalized range. A successful remote observation that produces neither does not bind lineage. A newer implementation version with the same name may continue the history. A different name cannot silently append or rewrite it.
+
+Open interest additionally supports contributor-managed artifacts. Each contributed half-open range has one immutable provider owner, contributor ranges must be ordered and non-overlapping, and disjoint providers may coexist in one canonical monthly file. Explicit contributor ranges must cover every observed window and returned row before they can become ownership state. They may additionally cover a certified source-revision interval with absent samples, which is required to represent sparse or zero-row archive revisions without claiming those samples as available. Provider ownership is not row-level selection or fallback: an overlapping sync by the wrong provider fails before observation or publication.
 
 This is a lineage constraint, not part of canonical market identity: `exchange`, `symbol`, `market`, `settle`, and `timeframe` still identify the dataset. Provider name, version, API version, native market ID, and native symbol are operational provenance stored in canonical Parquet metadata and ingestion state. Parquet metadata describes the provider snapshot that most recently published the current physical monthly file; it is not row-level acquisition history for every bar merged into that file. While the catalog exists, ingestion runs retain the provider snapshot for each remote operation. Rebuild can recover only the latest file snapshot and the stable provider-name lineage from canonical Parquet. Provider version and native IDs are audit facts, not lineage equality fields; changes under the same provider name update the latest publication snapshot and remain visible in ingestion runs while the catalog exists.
 
-Available lineage can be rebuilt from canonical Parquet. An exhaustive empty observation can create unavailable coverage and lineage without producing a Parquet file. Those catalog-only facts are intentionally non-rebuildable: after catalog loss, rebuild returns them to `missing` with no source binding.
+Available lineage can be rebuilt from ordinary canonical Parquet. OI contributor ownership and evidence can be rebuilt from contributor manifests. An exhaustive empty observation can create unavailable coverage and ordinary lineage without producing a Parquet file; those catalog-only facts are intentionally non-rebuildable and return to `missing` with no source binding. Funding event files rebuild without completeness because irregular rows do not prove the surrounding observed span.
 
 ## Errors and external qualification
 
