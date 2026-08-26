@@ -18,7 +18,7 @@ from xret.data.errors import (
     SyncError,
     UnsupportedMarketError,
 )
-from xret.data.models import Market
+from xret.data.models import Market, OpenInterestKey
 from xret.data.open_interest_quality import enforce_open_interest
 from xret.data.providers import (
     PROVIDER_API_VERSION,
@@ -254,6 +254,107 @@ def test_revisioned_policy_requires_explicit_source_evidence(tmp_path: Path) -> 
 
     with pytest.raises(ProviderError, match="explicit source contributor evidence"):
         dataset.fetch(_at(0), _at(5))
+
+
+def test_cross_month_revision_writes_month_local_contributor_counts(tmp_path: Path) -> None:
+    start = datetime(2024, 1, 31, 23, 55, tzinfo=UTC)
+    boundary = datetime(2024, 2, 1, tzinfo=UTC)
+    end = boundary + timedelta(minutes=5)
+
+    class CrossMonthRevisionProvider(OpenInterestProvider):
+        open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+
+        def resolve_open_interest_market(self, identity):
+            return replace(
+                super().resolve_open_interest_market(identity),
+                sync_policy=OpenInterestSyncPolicy.REVISIONED_ARCHIVE,
+            )
+
+        def observe_open_interest(self, request, market):
+            del market
+            return OpenInterestObservation(
+                _provider_frame([(request.start, 1.0, None)]),
+                (ObservedWindow(request.start, request.end),),
+                (
+                    OpenInterestSourceEvidence(
+                        request.start,
+                        request.end,
+                        "fixture-route",
+                        "fixture-revision",
+                        source_rows=1,
+                        canonical_rows=1,
+                    ),
+                ),
+            )
+
+    dataset, config = _dataset(tmp_path, CrossMonthRevisionProvider([]))
+
+    result = dataset.sync(start, end)
+
+    assert not result.is_complete
+    files = sorted(config.data_dir.rglob("data.parquet"))
+    assert len(files) == 2
+    by_month = {pl.read_parquet_metadata(path)["month"]: path for path in files}
+    assert pl.read_parquet(by_month["01"]).height == 1
+    assert pl.read_parquet(by_month["02"]).is_empty()
+    january_contributors = pl.read_parquet_metadata(by_month["01"])["contributors"]
+    february_contributors = pl.read_parquet_metadata(by_month["02"])["contributors"]
+    assert '"start":"2024-01-31T23:55:00+00:00"' in january_contributors
+    assert '"canonical_rows":1' in january_contributors
+    assert '"end":"2024-02-01T00:05:00+00:00"' in february_contributors
+    assert '"canonical_rows":0' in february_contributors
+
+    MarketData(config=config).maintenance.rebuild_catalog()
+    with Catalog.open_read_only(config.state_dir / "catalog.sqlite3") as catalog:
+        assert list(catalog.list_source_ownership(result.dataset_key)) == [
+            (start, boundary, "oi-fixture"),
+            (boundary, end, "oi-fixture"),
+        ]
+
+
+def test_cross_month_revision_rejects_unattributable_duplicate_counts(tmp_path: Path) -> None:
+    start = datetime(2024, 1, 31, 23, 55, tzinfo=UTC)
+    end = datetime(2024, 2, 1, 0, 5, tzinfo=UTC)
+
+    class DuplicateCrossMonthRevisionProvider(OpenInterestProvider):
+        open_interest_sync_policy = OpenInterestSyncPolicy.REVISIONED_ARCHIVE
+
+        def resolve_open_interest_market(self, identity):
+            return replace(
+                super().resolve_open_interest_market(identity),
+                sync_policy=OpenInterestSyncPolicy.REVISIONED_ARCHIVE,
+            )
+
+        def observe_open_interest(self, request, market):
+            del market
+            return OpenInterestObservation(
+                _provider_frame([(request.start, 1.0, None)]),
+                (ObservedWindow(request.start, request.end),),
+                (
+                    OpenInterestSourceEvidence(
+                        request.start,
+                        request.end,
+                        "fixture-route",
+                        "fixture-revision",
+                        source_rows=2,
+                        canonical_rows=1,
+                        duplicate_rows=1,
+                    ),
+                ),
+            )
+
+    dataset, config = _dataset(tmp_path, DuplicateCrossMonthRevisionProvider([]))
+
+    with pytest.raises(ProviderError, match="duplicate rows cannot be attributed"):
+        dataset.sync(start, end)
+
+    assert not tuple(config.data_dir.rglob("*.parquet"))
+    partial = dataset.scan_partial(start, end)
+    assert partial.data.collect().is_empty()
+    assert partial.gaps
+    key = OpenInterestKey(identity=dataset.identity, timeframe=dataset.timeframe)
+    with Catalog.open_read_only(config.state_dir / "catalog.sqlite3") as catalog:
+        assert catalog.list_source_ownership(key) == ()
 
 
 def _dataset(tmp_path: Path, provider: object) -> tuple[OpenInterestDataset, MarketDataConfig]:

@@ -156,6 +156,33 @@ def _sources(observation: ValidatedOpenInterestObservation) -> tuple[ProviderEvi
     )
 
 
+def _month_source(
+    source: ProviderEvidence,
+    frame: pl.DataFrame,
+    start: datetime,
+    end: datetime,
+) -> ProviderEvidence:
+    assert source.contributed_start is not None
+    assert source.contributed_end is not None
+    if start == source.contributed_start and end == source.contributed_end:
+        return source
+    if source.duplicate_rows:
+        raise ProviderError(
+            "cross-month OI source duplicate rows cannot be attributed to monthly artifacts"
+        )
+    canonical_rows = frame.filter(
+        (pl.col("timestamp") >= start) & (pl.col("timestamp") < end)
+    ).height
+    return replace(
+        source,
+        contributed_start=start,
+        contributed_end=end,
+        source_rows=canonical_rows,
+        canonical_rows=canonical_rows,
+        duplicate_rows=0,
+    )
+
+
 def _coverage(
     observation: ValidatedOpenInterestObservation,
     start: datetime,
@@ -404,11 +431,7 @@ class OpenInterestDataset:
                         ):
                             monthly.setdefault(month, [])
                             month_observation.setdefault(month, observation)
-                            clipped = replace(
-                                source,
-                                contributed_start=month_start,
-                                contributed_end=month_end,
-                            )
+                            clipped = _month_source(source, rows, month_start, month_end)
                             if clipped not in month_contributors.setdefault(month, []):
                                 month_contributors[month].append(clipped)
                 for month, frames in monthly.items():
