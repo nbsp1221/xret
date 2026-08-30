@@ -12,6 +12,9 @@ import polars as pl
 
 __all__ = [
     "OHLCV_SCHEMA",
+    "SETTLED_FUNDING_SCHEMA",
+    "REFERENCE_BAR_SCHEMA",
+    "OPEN_INTEREST_SCHEMA",
     "OHLCV_COLUMNS",
     "IDENTITY_COLUMNS",
     "OHLC_COLUMNS",
@@ -59,4 +62,48 @@ IDENTITY_COLUMNS: Final[tuple[str, ...]] = (
 
 #: The four price columns, in OHLC order, used by invariant checks
 #: (e.g. `low <= open, close <= high`).
+
+#: Exact canonical schemas for the three derivatives data families. These are
+#: deliberately independent from trade OHLCV: funding is irregular, reference
+#: bars have no volume, and open interest is a sampled gauge.
+SETTLED_FUNDING_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "exchange": pl.String(),
+        "symbol": pl.String(),
+        "market": pl.String(),
+        "settle": pl.String(),
+        "effective_at": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "funding_rate": pl.Float64(),
+        "funding_interval_seconds": pl.Int64(),
+        "mark_price": pl.Float64(),
+    }
+)
+
+REFERENCE_BAR_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "exchange": pl.String(),
+        "symbol": pl.String(),
+        "market": pl.String(),
+        "settle": pl.String(),
+        "timeframe": pl.String(),
+        "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "open": pl.Float64(),
+        "high": pl.Float64(),
+        "low": pl.Float64(),
+        "close": pl.Float64(),
+    }
+)
+
+OPEN_INTEREST_SCHEMA: Final[pl.Schema] = pl.Schema(
+    {
+        "exchange": pl.String(),
+        "symbol": pl.String(),
+        "market": pl.String(),
+        "settle": pl.String(),
+        "timeframe": pl.String(),
+        "timestamp": pl.Datetime(time_unit="ms", time_zone="UTC"),
+        "open_interest_amount": pl.Float64(),
+        "open_interest_value": pl.Float64(),
+    }
+)
 OHLC_COLUMNS: Final[tuple[str, ...]] = ("open", "high", "low", "close")

@@ -54,7 +54,7 @@ result.require_complete()
 
 ## Discover before operating
 
-`fetch_markets()` exposes historical and live capability facts for every representable timeframe in the current provider snapshot:
+`fetch_markets()` exposes family-specific capability facts for each representable market: `bar_capabilities`, plus `funding_history`, `reference_bar_capabilities`, and `open_interest_capabilities` for perpetuals. A provider may implement only one family and omit discovery entirely, so capability absence is reported by the selected operation as `UnsupportedMarketError` rather than triggering another provider.
 
 ```python
 from xret.data import MarketData
@@ -75,19 +75,27 @@ for definition in definitions:
         )
 ```
 
-Discovery is a current provider metadata snapshot, not an uptime probe or a guarantee that credentials, geography, rate limits, and the venue will permit the later request. The operation result remains authoritative for what actually happened.
+Discovery is a current provider metadata snapshot, not an uptime probe or a guarantee that credentials, geography, rate limits, retention, and the venue will permit the later request. The operation result remains authoritative for what actually happened.
+
+## Explicit source selection and ownership
+
+`MarketData()` selects built-in CCXT. `MarketData(provider="binance-data-vision")` explicitly selects a separate OI-only provider; Xret never tries Data Vision from CCXT and never falls back from Data Vision to CCXT or Binance REST. A selected provider that lacks the requested family fails explicitly.
+
+The packaged Data Vision scope is intentionally narrower than CCXT capability: Binance `BTC/USDT` USDⓈ-M linear perpetual OI, exactly `5m`, from official daily metrics archives using whole UTC-day requests. This is the only archive identity admitted by the current implementation. A missing archive or grid slot remains `missing`; it is not patched from another source.
+
+Canonical OI may combine providers only through immutable ordered, non-overlapping ownership ranges. For example, Data Vision can own a deep archive interval and CCXT can own a disjoint recent interval. Ownership is persisted in artifact contributor evidence and catalog v6, survives rebuild, and rejects an overlapping sync by the wrong provider. Fetch-only overlap can be used for qualification, but it never mutates ownership or chooses a winner.
 
 ## What Xret guarantees
 
-For every attempted remote time-bar operation, Xret keeps these responsibilities:
+For every attempted remote operation, Xret keeps these responsibilities:
 
-- provider-independent spot and perpetual market identity;
-- UTC-aligned canonical interval semantics;
-- trade-derived OHLC and base-asset volume;
-- schema, timestamp, ordering, duplicate, range, and OHLC invariant validation;
-- explicit incomplete coverage instead of invented bars or silent gap filling;
-- explicit source, normalization, coverage, and current warning evidence; and
-- fail-closed canonical publication.
+- provider-independent spot/perpetual identity and separate family identity;
+- exact UTC event, aligned interval, or sampled-grid semantics appropriate to the family;
+- trade-derived OHLC/base volume, reference-kind OHLC without volume, exact settled funding events, or nonnegative base-equivalent OI as applicable;
+- schema, timestamp, ordering, duplicate, range, unit, and family-specific invariant validation;
+- explicit incomplete coverage instead of invented bars, fixed funding schedules, or forward-filled OI;
+- explicit source, normalization, coverage, contributor, and current warning evidence; and
+- fail-closed canonical publication and non-overlapping OI ownership.
 
 Xret does not guarantee exchange uptime, complete history where the provider cannot prove it, uninterrupted WebSocket delivery, automatic reconnect, or semantic correctness that cannot be established from received evidence and maintained compatibility rules. The [canonical time-bar contract](../reference/time-bars.md) defines what accepted data means; the [verified-support matrix](../quality/verified-support.md) records the exact scopes Xret has independently exercised.
 

@@ -43,6 +43,31 @@ class ProviderSnapshot:
     normalizations: tuple[str, ...] = ()
 
 
+def validate_aligned_observed_windows(
+    value: object,
+    *,
+    start: datetime,
+    end: datetime,
+    time_bar: TimeBar,
+    family: str,
+) -> tuple[ObservedWindow, ...]:
+    """Validate ordered request-contained evidence on an aligned family grid."""
+    if not isinstance(value, tuple):
+        raise ProviderError("provider observed windows must be a tuple")
+    previous: datetime | None = None
+    for window in value:
+        if not isinstance(window, ObservedWindow):
+            raise ProviderError("provider observed entries must be ObservedWindow values")
+        if window.start < start or window.end > end:
+            raise ProviderError(f"{family} observed window falls outside the request")
+        if time_bar.floor(window.start) != window.start or time_bar.floor(window.end) != window.end:
+            raise ProviderError(f"{family} observed windows must align to {time_bar}")
+        if previous is not None and window.start < previous:
+            raise ProviderError(f"{family} observed windows must be ordered and non-overlapping")
+        previous = window.end
+    return cast("tuple[ObservedWindow, ...]", value)
+
+
 @dataclass(frozen=True, slots=True)
 class ValidatedBarObservation:
     frame: pl.DataFrame
@@ -65,7 +90,7 @@ class _ValidatedProviderObservation:
 class MarketDefinitionRuntime:
     """Validate one optional provider market-definition operation."""
 
-    def __init__(self, provider: HistoricalBarProvider) -> None:
+    def __init__(self, provider: object) -> None:
         self._provider = provider
         self._descriptor = validate_provider_descriptor(provider)
 

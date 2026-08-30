@@ -21,7 +21,7 @@ from xret.data.errors import CatalogError, SyncError, XretDataError
 from xret.data.storage import paths
 
 if TYPE_CHECKING:
-    from xret.data.models import DatasetKey
+    from xret.data.models import StorageKey
 
 __all__ = [
     "DEFAULT_LOCK_TIMEOUT",
@@ -143,7 +143,7 @@ class FileLock:
 
 def dataset_lock(
     state_dir: Path,
-    key: DatasetKey,
+    key: StorageKey,
     *,
     timeout: float = DEFAULT_LOCK_TIMEOUT,
     poll_interval: float = DEFAULT_POLL_INTERVAL,

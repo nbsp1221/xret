@@ -11,24 +11,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast, runtime_checkable
 
+import polars as pl
 from xret.data.errors import CatalogError
 from xret.data.models import (
     CatalogRebuildResult,
     CatalogValidationResult,
     CoverageStatus,
-    DatasetKey,
+    DatasetFamily,
+    ProviderEvidence,
+    StorageKey,
     YearMonth,
+    storage_identity,
 )
 from xret.data.storage import paths
 from xret.data.storage.catalog import (
     Catalog,
     CoverageSegment,
     FileMetadata,
+    _evidence_json,
     detect_incompatible_state,
 )
 from xret.data.storage.locking import catalog_gate
-from xret.data.storage.parquet import SCHEMA_VERSION as PARQUET_SCHEMA_VERSION
-from xret.data.storage.parquet import ProviderProvenance, read_committed_file, read_month_file
+from xret.data.storage.parquet import ProviderProvenance, read_committed_file
 from xret.data.timeframe import TimeBar
 
 if TYPE_CHECKING:
@@ -50,7 +54,7 @@ __all__ = [
 class CommittedFileLike(Protocol):
     """The file facts recovery is permitted to persist."""
 
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     year_month: YearMonth
     relative_path: str
     absolute_path: Path
@@ -60,6 +64,7 @@ class CommittedFileLike(Protocol):
     physical_hash: str
     schema_version: int
     provider: ProviderProvenance
+    contributors: tuple[ProviderEvidence, ...]
 
 
 FileSource = Callable[[], Iterable[CommittedFileLike]]
@@ -94,8 +99,6 @@ def _files(data_dir: Path, source: FileSource) -> list[CommittedFileLike]:
             raise CatalogError(
                 f"failed to read committed file: {supplied_file.absolute_path}"
             ) from exc
-        if file.schema_version != PARQUET_SCHEMA_VERSION:
-            raise CatalogError(f"unsupported Parquet schema for {file.relative_path}")
         if file.relative_path in seen:
             raise CatalogError(f"duplicate canonical file path: {file.relative_path}")
         seen.add(file.relative_path)
@@ -121,7 +124,7 @@ def _validate(catalog: Catalog, files: list[CommittedFileLike]) -> CatalogValida
     indexed = {row.relative_path: row for row in catalog.list_files()}
     discovered = {file.relative_path: file for file in files}
     issues: list[str] = []
-    keys: set[DatasetKey] = set()
+    keys: set[StorageKey] = set()
     for relative_path, row in indexed.items():
         keys.add(row.dataset_key)
         file = discovered.get(relative_path)
@@ -150,7 +153,25 @@ def _validate(catalog: Catalog, files: list[CommittedFileLike]) -> CatalogValida
         if file.year_month.year != row.year or file.year_month.month != row.month:
             issues.append(f"year/month mismatch for {relative_path}")
         lineage = catalog.get_source_lineage(file.dataset_key)
-        if lineage != file.provider.name:
+        if file.contributors:
+            if lineage is not None:
+                issues.append(
+                    f"contributor-managed source lineage must be null for {relative_path}"
+                )
+            indexed_contributors = catalog.file_contributor_evidence(relative_path)
+            expected_contributors = tuple(_evidence_json(item) for item in file.contributors)
+            if indexed_contributors != expected_contributors:
+                issues.append(f"contributor manifest mismatch for {relative_path}")
+            ownership = catalog.list_source_ownership(file.dataset_key)
+            for contributor in file.contributors:
+                expected_owner = (
+                    contributor.contributed_start,
+                    contributor.contributed_end,
+                    contributor.provider_name,
+                )
+                if expected_owner not in ownership:
+                    issues.append(f"source ownership mismatch for {relative_path}")
+        elif lineage != file.provider.name:
             issues.append(
                 f"source lineage mismatch for {relative_path}: "
                 f"catalog={lineage!r} disk={file.provider.name!r}"
@@ -166,8 +187,17 @@ def _validate(catalog: Catalog, files: list[CommittedFileLike]) -> CatalogValida
     )
 
 
-def _key_sort(key: DatasetKey) -> tuple[str, str, str, str, str]:
-    return key.exchange, key.symbol, key.market.value, key.settle, key.timeframe
+def _key_sort(key: StorageKey) -> tuple[str, str, str, str, str, str, str]:
+    identity = storage_identity(key)
+    return (
+        identity.family.value,
+        identity.variant,
+        identity.exchange,
+        identity.symbol,
+        identity.market.value,
+        identity.settle,
+        identity.timeframe,
+    )
 
 
 def validate_catalog_state(
@@ -205,8 +235,8 @@ def validate_catalog_state(
         catalog.close()
 
 
-def _group(files: Iterable[CommittedFileLike]) -> dict[DatasetKey, list[CommittedFileLike]]:
-    grouped: dict[DatasetKey, list[CommittedFileLike]] = {}
+def _group(files: Iterable[CommittedFileLike]) -> dict[StorageKey, list[CommittedFileLike]]:
+    grouped: dict[StorageKey, list[CommittedFileLike]] = {}
     for file in files:
         grouped.setdefault(file.dataset_key, []).append(file)
     return grouped
@@ -221,8 +251,11 @@ def _available_segments(data_dir: Path, file: CommittedFileLike) -> tuple[Covera
         or committed.physical_hash != file.physical_hash
     ):
         raise CatalogError(f"canonical file changed while deriving coverage: {file.relative_path}")
+    identity = storage_identity(file.dataset_key)
+    if identity.family is DatasetFamily.SETTLED_FUNDING:
+        return ()
     try:
-        frame = read_month_file(file.absolute_path)
+        frame = pl.read_parquet(file.absolute_path)
         if frame is None:
             raise CatalogError(
                 f"canonical file disappeared while deriving coverage: {file.relative_path}"
@@ -237,10 +270,10 @@ def _available_segments(data_dir: Path, file: CommittedFileLike) -> tuple[Covera
             f"canonical file row count changed while deriving coverage: {file.relative_path}"
         )
     try:
-        time_bar = TimeBar.parse(file.dataset_key.timeframe)
+        time_bar = TimeBar.parse(identity.timeframe)
     except Exception as exc:
         raise CatalogError(
-            f"cannot derive candle boundary from timeframe: {file.dataset_key.timeframe!r}"
+            f"cannot derive observation boundary from timeframe: {identity.timeframe!r}"
         ) from exc
     segments: list[CoverageSegment] = []
     previous: datetime | None = None
@@ -273,12 +306,18 @@ def _replace_derived_state(catalog: Catalog, data_dir: Path, files: list[Committ
     with catalog.transaction():
         catalog.connection.execute("DELETE FROM datasets")
         for key, dataset_files in grouped.items():
-            provider_names = {file.provider.name for file in dataset_files}
-            if len(provider_names) != 1:
-                raise CatalogError(
-                    f"conflicting source lineages for {key!r}: {sorted(provider_names)!r}"
-                )
-            catalog.bind_source_lineage(key, next(iter(provider_names)))
+            contributor_managed = [bool(file.contributors) for file in dataset_files]
+            if any(contributor_managed) and not all(contributor_managed):
+                raise CatalogError(f"mixed contributor and legacy source evidence for {key!r}")
+            if not any(contributor_managed):
+                provider_names = {file.provider.name for file in dataset_files}
+                if len(provider_names) != 1:
+                    raise CatalogError(
+                        f"conflicting source lineages for {key!r}: {sorted(provider_names)!r}"
+                    )
+                catalog.bind_source_lineage(key, next(iter(provider_names)))
+            else:
+                catalog.ensure_dataset(key)
             segments: list[CoverageSegment] = []
             for file in sorted(dataset_files, key=lambda item: item.relative_path):
                 catalog.record_file(
@@ -292,6 +331,7 @@ def _replace_derived_state(catalog: Catalog, data_dir: Path, files: list[Committ
                         file.max_timestamp,
                         file.physical_hash,
                         file.schema_version,
+                        file.contributors,
                     )
                 )
                 segments.extend(_available_segments(data_dir, file))

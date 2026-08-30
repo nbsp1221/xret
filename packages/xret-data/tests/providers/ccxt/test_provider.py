@@ -2380,3 +2380,28 @@ def test_observation_uses_pre_call_evidence_time_and_post_call_completion_time()
     assert observation.evidence_at == datetime(2024, 1, 1, 0, 1, 4, tzinfo=UTC)
     assert observation.completed_at == datetime(2024, 1, 1, 0, 1, 6, tzinfo=UTC)
     assert calls == 2
+
+
+@pytest.mark.parametrize("contract_size", ("not-a-number", "0", "NaN", "Infinity", -1))
+def test_discovery_does_not_advertise_oi_for_invalid_contract_size(contract_size) -> None:
+    exchange = FakeExchange(
+        client_id="binanceusdm",
+        markets={
+            "BTC/USDT:USDT": {
+                "id": "BTCUSDT",
+                "symbol": "BTC/USDT:USDT",
+                "base": "BTC",
+                "quote": "USDT",
+                "settle": "USDT",
+                "swap": True,
+                "linear": True,
+                "inverse": False,
+                "contractSize": contract_size,
+            }
+        },
+    )
+    exchange.has["fetchOpenInterestHistory"] = True
+    _register_perp(exchange)
+
+    (definition,) = _market_data().fetch_markets(exchange="binance", market="perpetual")
+    assert definition.open_interest_capabilities == ()

@@ -2,7 +2,7 @@
 
 Trusted market data infrastructure for [Xret](https://github.com/nbsp1221/xret).
 
-Acquire, validate, and store crypto market data with explicit I/O boundaries and fail-closed quality guarantees. Consume typed live bar observations through the same provider-neutral market identity.
+Acquire, validate, and store crypto trade bars, settled funding, mark/index/premium-index reference bars, and sampled open interest with explicit I/O boundaries and fail-closed quality guarantees. Consume typed live trade-bar observations through the same provider-neutral market identity.
 
 ## Install
 
@@ -41,7 +41,8 @@ async with md.live(exchange="binance") as live:
 - `sync` — reconcile missing coverage, commit validated Parquet
 - `scan` — strict local read, raises `CoverageError` on gaps
 - `scan_partial` — local read with structured gap reporting
-- `live` — explicit async bar delivery and optional recent bootstrap, never writes historical state
+- `live` — explicit async trade-bar delivery and optional recent bootstrap, never writes historical state
+- `MarketData(provider="binance-data-vision")` — qualified Binance `BTC/USDT` USDⓈ-M `5m` OI archives only; no CCXT or REST fallback
 
 ## Links
 

@@ -27,6 +27,7 @@ from xret.data.providers import (
     ResolvedBarMarket,
     discovery,
     runtime,
+    validate_provider_conformance,
 )
 from xret.data.providers.runtime import ProviderRuntime
 from xret.data.schema import OHLCV_SCHEMA
@@ -104,6 +105,82 @@ def _fixed_runtime_clock():
     runtime._set_clock_override(lambda: COMPLETED)
     yield
     runtime._set_clock_override(None)
+
+
+def test_public_conformance_validator_is_structural_and_io_free() -> None:
+    provider = FakeProvider()
+
+    descriptor = validate_provider_conformance(provider)
+
+    assert descriptor.name == "test-provider"
+    assert provider.descriptor_calls == 1
+    assert provider.resolve_calls == 0
+    assert provider.observe_calls == 0
+
+
+@pytest.mark.parametrize(
+    "methods",
+    [
+        {"resolve_market": lambda self, identity: None},
+        {"observe_bars": lambda self, request, market: None},
+    ],
+)
+def test_public_conformance_validator_rejects_partial_capability(methods) -> None:
+    provider_type = type(
+        "PartialProvider",
+        (),
+        {
+            "descriptor": ProviderDescriptor("partial", "1", PROVIDER_API_VERSION),
+            **methods,
+        },
+    )
+
+    with pytest.raises(ProviderError, match="partial capability pair"):
+        validate_provider_conformance(provider_type())
+
+
+def test_public_conformance_validator_accepts_oi_only_and_rejects_no_capability() -> None:
+    oi_only = type(
+        "OiOnlyProvider",
+        (),
+        {
+            "descriptor": ProviderDescriptor("oi-only", "1", PROVIDER_API_VERSION),
+            "resolve_open_interest_market": lambda self, identity: None,
+            "observe_open_interest": lambda self, request, market: None,
+        },
+    )()
+    assert validate_provider_conformance(oi_only).name == "oi-only"
+
+    empty = type(
+        "EmptyProvider",
+        (),
+        {"descriptor": ProviderDescriptor("empty", "1", PROVIDER_API_VERSION)},
+    )()
+    with pytest.raises(ProviderError, match="no complete recognized capability pair"):
+        validate_provider_conformance(empty)
+
+
+def test_public_conformance_validator_rejects_untyped_oi_sync_policy() -> None:
+    provider = type(
+        "UntypedPolicyProvider",
+        (),
+        {
+            "descriptor": ProviderDescriptor("bad-policy", "1", PROVIDER_API_VERSION),
+            "open_interest_sync_policy": "revisioned_archive",
+            "resolve_open_interest_market": lambda self, identity: None,
+            "observe_open_interest": lambda self, request, market: None,
+        },
+    )()
+
+    with pytest.raises(ProviderError, match="open_interest_sync_policy"):
+        validate_provider_conformance(provider)
+
+
+def test_conformance_ignores_oi_policy_attribute_without_oi_capability() -> None:
+    provider = FakeProvider()
+    provider.open_interest_sync_policy = "application-owned-metadata"
+
+    assert validate_provider_conformance(provider).name == "test-provider"
 
 
 def test_descriptor_accepts_non_pep440_audit_version() -> None:
@@ -603,7 +680,7 @@ def test_named_provider_chains_load_and_factory_failures(
                 (),
                 {"descriptor": ProviderDescriptor("installed", "1", PROVIDER_API_VERSION)},
             )(),
-            "no callable resolve_market",
+            "no complete recognized capability pair",
         ),
     ],
 )

@@ -272,3 +272,30 @@ def test_a_missing_required_partition_still_fails_closed(tmp_path: Path) -> None
 
     with pytest.raises(CatalogError, match="missing canonical file"):
         lazy_frame_for_facts(data_dir, facts)
+
+
+@pytest.mark.parametrize("corrupt_path", ("/tmp/outside.parquet", "../outside.parquet"))
+def test_catalog_relative_path_cannot_escape_data_dir(tmp_path: Path, corrupt_path: str) -> None:
+    state_dir, data_dir = _store(tmp_path)
+    key = _publish_january(data_dir, state_dir, hours=24, covered=[(0, 24)])
+    with Catalog.open(state_dir / CATALOG_FILE_NAME) as catalog, catalog.transaction():
+        catalog.connection.execute(
+            "UPDATE files SET relative_path = ?",
+            (corrupt_path,),
+        )
+    facts = read_local_facts_for_key(state_dir, data_dir, key, _at(2024, 1, 1), _at(2024, 1, 2))
+    with pytest.raises(CatalogError, match="unsafe canonical path|does not match canonical"):
+        lazy_frame_for_facts(data_dir, facts)
+
+
+def test_catalog_canonical_path_cannot_traverse_symlink(tmp_path: Path) -> None:
+    state_dir, data_dir = _store(tmp_path)
+    key = _publish_january(data_dir, state_dir, hours=24, covered=[(0, 24)])
+    canonical = paths.month_file_path(data_dir, key, YearMonth(2024, 1))
+    outside = tmp_path / "outside.parquet"
+    outside.write_bytes(canonical.read_bytes())
+    canonical.unlink()
+    canonical.symlink_to(outside)
+    facts = read_local_facts_for_key(state_dir, data_dir, key, _at(2024, 1, 1), _at(2024, 1, 2))
+    with pytest.raises(CatalogError, match="outside data directory|must not be a symlink"):
+        lazy_frame_for_facts(data_dir, facts)

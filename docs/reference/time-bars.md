@@ -24,7 +24,7 @@ Current Xret time bars are trade bars:
 
 The eligible event universe is the venue's official executed-trade series for the resolved market as exposed or exactly normalized by the provider. Provider-specific trade-condition filtering must remain consistent for the endpoint family and be part of its qualification evidence.
 
-Mark price, index price, settlement price, midpoint, and quote-derived candles do not satisfy this contract. Xret may introduce separately named bar types for those event universes in the future; they must never be silently stored as trade OHLCV.
+Mark price, index price, settlement price, midpoint, and quote-derived candles do not satisfy this trade contract. Historical mark, index, and premium-index series use the separately named `MarketData.reference_bars(...)` family, independent identities, no volume column, and family-specific validation; they are never silently stored as trade OHLCV.
 
 ## Volume
 
@@ -38,6 +38,14 @@ A provider may satisfy this meaning in either of two ways:
 Quote notional and contract count are not canonical base volume. A provider must reject an endpoint when it cannot convert those values exactly. In particular, Xret does not estimate base volume from quote volume using a candle's open, close, midpoint, or typical price because no single candle price can reconstruct the sum of trade-level base quantities.
 
 “Exact” describes the semantic unit and transformation, not arbitrary-precision arithmetic. The current research schema represents OHLCV values as `Float64`.
+
+## Other time-indexed families
+
+Reference bars use the same timeframe grammar, UTC origins, half-open intervals, aligned inclusive `timestamp`, completed-row rule, and no-synthesis coverage behavior as trade bars. Their OHLC event universe is explicitly selected by `kind`: `mark` and `index` are positive reference-price series, while `premium_index` is a finite dimensionless dislocation that may be negative or zero. Reference bars never contain volume and never satisfy the executed-trade bar contract.
+
+Open interest is a point-in-time gauge sampled at the provider-labeled aligned `timestamp`, not an OHLC interval, flow, turnover measure, or directional long/short signal. `open_interest_amount` is finite nonnegative base-asset-equivalent outstanding exposure; nullable `open_interest_value` is finite nonnegative quote notional. Each expected grid timestamp is its own completeness unit. Xret never forward-fills a missing sample or derives one from neighboring values.
+
+Settled funding is an irregular event family rather than a time bar. `effective_at` preserves the source's final public settlement timestamp. Request bounds are arbitrary UTC-aware half-open instants, and completeness comes from provider-observed spans rather than a fixed schedule or spacing between events. Xret never rounds events, assumes an eight-hour interval, or treats settled rates as historical predictions.
 
 ## Empty intervals and coverage
 

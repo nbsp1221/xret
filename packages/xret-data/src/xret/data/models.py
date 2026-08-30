@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     import polars as pl
 
 __all__ = [
+    "DatasetFamily",
+    "ReferencePriceKind",
     "CoverageStatus",
     "Availability",
     "BarFinality",
@@ -34,10 +36,16 @@ __all__ = [
     "CapabilityNotice",
     "OperationCapability",
     "TimeBarCapability",
+    "ReferenceBarCapability",
     "ProviderEvidence",
     "FetchResult",
     "LiveSubscription",
     "DatasetKey",
+    "SettledFundingKey",
+    "ReferenceBarKey",
+    "OpenInterestKey",
+    "StorageKey",
+    "storage_identity",
     "NONE_SETTLE_SENTINEL",
     "YearMonth",
     "CoverageInterval",
@@ -51,6 +59,23 @@ __all__ = [
 # --------------------------------------------------------------------------
 # Enums
 # --------------------------------------------------------------------------
+
+
+class DatasetFamily(enum.StrEnum):
+    """Closed canonical dataset-family vocabulary."""
+
+    TRADE_BARS = "trade_bars"
+    SETTLED_FUNDING = "settled_funding"
+    REFERENCE_BARS = "reference_bars"
+    OPEN_INTEREST = "open_interest"
+
+
+class ReferencePriceKind(enum.StrEnum):
+    """Closed reference-price series vocabulary."""
+
+    MARK = "mark"
+    INDEX = "index"
+    PREMIUM_INDEX = "premium_index"
 
 
 class CoverageStatus(enum.Enum):
@@ -339,6 +364,149 @@ class DatasetKey:
         )
 
 
+def _require_resolved_perpetual(identity: MarketIdentity) -> None:
+    if identity.market is not Market.PERPETUAL:
+        raise InvalidRequestError("this dataset family requires market='perpetual'")
+    if identity.settle is None:
+        raise InvalidRequestError("this storage key requires a resolved perpetual settlement")
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SettledFundingKey:
+    """Provider-independent identity of settled public funding history."""
+
+    identity: MarketIdentity
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("identity must be a MarketIdentity")
+        _require_resolved_perpetual(self.identity)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ReferenceBarKey:
+    """Provider-independent identity of one reference-price bar series."""
+
+    identity: MarketIdentity
+    kind: ReferencePriceKind
+    timeframe: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("identity must be a MarketIdentity")
+        _require_resolved_perpetual(self.identity)
+        try:
+            object.__setattr__(self, "kind", ReferencePriceKind(self.kind))
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"unrecognized reference price kind: {self.kind!r}") from exc
+        TimeBar.parse(self.timeframe)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OpenInterestKey:
+    """Provider-independent identity of one sampled open-interest series."""
+
+    identity: MarketIdentity
+    timeframe: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.identity, MarketIdentity):
+            raise InvalidRequestError("identity must be a MarketIdentity")
+        _require_resolved_perpetual(self.identity)
+        TimeBar.parse(self.timeframe)
+
+
+StorageKey = DatasetKey | SettledFundingKey | ReferenceBarKey | OpenInterestKey
+
+
+@dataclass(frozen=True, slots=True)
+class _StorageIdentity:
+    """Normalized non-null catalog/path identity; never part of the public API."""
+
+    family: DatasetFamily
+    variant: str
+    exchange: str
+    symbol: str
+    market: Market
+    settle: str
+    timeframe: str
+
+
+def storage_identity(key: StorageKey) -> _StorageIdentity:
+    """Normalize a family-specific key for storage joins and projections."""
+    if isinstance(key, DatasetKey):
+        return _StorageIdentity(
+            DatasetFamily.TRADE_BARS,
+            "",
+            key.exchange,
+            key.symbol,
+            key.market,
+            key.settle,
+            key.timeframe,
+        )
+    identity = key.identity
+    assert identity.settle is not None
+    if isinstance(key, SettledFundingKey):
+        return _StorageIdentity(
+            DatasetFamily.SETTLED_FUNDING,
+            "",
+            identity.exchange,
+            identity.symbol,
+            identity.market,
+            identity.settle,
+            "",
+        )
+    if isinstance(key, ReferenceBarKey):
+        return _StorageIdentity(
+            DatasetFamily.REFERENCE_BARS,
+            key.kind.value,
+            identity.exchange,
+            identity.symbol,
+            identity.market,
+            identity.settle,
+            key.timeframe,
+        )
+    if isinstance(key, OpenInterestKey):
+        return _StorageIdentity(
+            DatasetFamily.OPEN_INTEREST,
+            "",
+            identity.exchange,
+            identity.symbol,
+            identity.market,
+            identity.settle,
+            key.timeframe,
+        )
+    raise TypeError(f"unsupported storage key: {key!r}")
+
+
+def _key_from_storage_identity(identity: _StorageIdentity) -> StorageKey:
+    market_identity = MarketIdentity(
+        exchange=identity.exchange,
+        symbol=identity.symbol,
+        market=identity.market,
+        settle=None if identity.market is Market.SPOT else identity.settle,
+    )
+    if identity.family is DatasetFamily.TRADE_BARS:
+        if identity.variant:
+            raise InvalidRequestError("trade-bar storage variant must be empty")
+        return DatasetKey.from_identity(market_identity, timeframe=identity.timeframe)
+    if identity.family is DatasetFamily.SETTLED_FUNDING:
+        if identity.variant or identity.timeframe:
+            raise InvalidRequestError("settled-funding variant and timeframe must be empty")
+        return SettledFundingKey(identity=market_identity)
+    if identity.family is DatasetFamily.REFERENCE_BARS:
+        return ReferenceBarKey(
+            identity=market_identity,
+            kind=ReferencePriceKind(identity.variant),
+            timeframe=identity.timeframe,
+        )
+    if identity.family is DatasetFamily.OPEN_INTEREST:
+        if identity.variant:
+            raise InvalidRequestError("open-interest storage variant must be empty")
+        return OpenInterestKey(identity=market_identity, timeframe=identity.timeframe)
+    raise InvalidRequestError(f"unsupported dataset family: {identity.family!r}")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class BarRequest:
     """UTC-aware, half-open `[start, end)` request for one bar dataset.
@@ -517,6 +685,24 @@ class TimeBarCapability:
 
 
 @dataclass(frozen=True, slots=True)
+class ReferenceBarCapability:
+    """Provider availability for one reference kind and canonical timeframe."""
+
+    kind: ReferencePriceKind
+    timeframe: str
+    historical: OperationCapability
+
+    def __post_init__(self) -> None:
+        try:
+            object.__setattr__(self, "kind", ReferencePriceKind(self.kind))
+        except (TypeError, ValueError) as exc:
+            raise InvalidRequestError(f"unrecognized reference price kind: {self.kind!r}") from exc
+        TimeBar.parse(self.timeframe)
+        if not isinstance(self.historical, OperationCapability):
+            raise InvalidRequestError("historical capability must be an OperationCapability")
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderEvidence:
     """Provider-native provenance for one remote operation."""
 
@@ -526,6 +712,22 @@ class ProviderEvidence:
     native_market_id: str
     native_symbol: str
     normalizations: tuple[str, ...] = ()
+    reference_target_scope: str | None = None
+    derivative_linear: bool | None = None
+    derivative_inverse: bool | None = None
+    contract_size: str | None = None
+    source_field_mapping: str | None = None
+    contributed_start: datetime | None = None
+    contributed_end: datetime | None = None
+    source_route: str | None = None
+    object_key: str | None = None
+    checksum_algorithm: str | None = None
+    checksum_value: str | None = None
+    source_revision: str | None = None
+    retrieved_at: datetime | None = None
+    source_rows: int | None = None
+    canonical_rows: int | None = None
+    duplicate_rows: int | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -549,6 +751,45 @@ class ProviderEvidence:
             raise InvalidRequestError("provider normalizations must be nonempty strings")
         if len(set(self.normalizations)) != len(self.normalizations):
             raise InvalidRequestError("provider normalizations must not contain duplicates")
+        if self.reference_target_scope not in (None, "contract", "pair"):
+            raise InvalidRequestError("reference_target_scope must be None, 'contract', or 'pair'")
+        for field_name in ("derivative_linear", "derivative_inverse"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, bool):
+                raise InvalidRequestError(f"{field_name} must be bool or None")
+        for field_name in ("contract_size", "source_field_mapping"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise InvalidRequestError(f"{field_name} must be a nonempty string or None")
+        range_values = (self.contributed_start, self.contributed_end)
+        if any(value is not None for value in range_values):
+            if any(value is None for value in range_values):
+                raise InvalidRequestError("contributed_start/end must be paired")
+            assert self.contributed_start is not None and self.contributed_end is not None
+            _ensure_utc_aware(self.contributed_start, field_name="contributed_start")
+            _ensure_utc_aware(self.contributed_end, field_name="contributed_end")
+            if self.contributed_start >= self.contributed_end:
+                raise InvalidRequestError("contributed range must be nonempty")
+        for field_name in ("source_route", "source_revision"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise InvalidRequestError(f"{field_name} must be a nonempty string or None")
+        if (self.checksum_algorithm is None) != (self.checksum_value is None):
+            raise InvalidRequestError("checksum_algorithm/value must be paired")
+        if self.retrieved_at is not None:
+            _ensure_utc_aware(self.retrieved_at, field_name="retrieved_at")
+        counts = (self.source_rows, self.canonical_rows, self.duplicate_rows)
+        if any(value is not None for value in counts):
+            if any(
+                value is None or isinstance(value, bool) or not isinstance(value, int) or value < 0
+                for value in counts
+            ):
+                raise InvalidRequestError("source row counts must be paired nonnegative integers")
+            assert self.source_rows is not None
+            assert self.canonical_rows is not None
+            assert self.duplicate_rows is not None
+            if self.canonical_rows + self.duplicate_rows != self.source_rows:
+                raise InvalidRequestError("source row counts are inconsistent")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -651,7 +892,7 @@ class CatalogValidationResult:
     """Outcome of `validate_catalog`: indexed metadata vs. canonical files."""
 
     is_valid: bool
-    checked_datasets: tuple[DatasetKey, ...] = ()
+    checked_datasets: tuple[StorageKey, ...] = ()
     issues: tuple[str, ...] = ()
 
 
@@ -665,7 +906,7 @@ class CatalogRebuildResult:
     state); those reset to missing/unknown, recorded in `reset_datasets`.
     """
 
-    rebuilt_datasets: tuple[DatasetKey, ...] = ()
+    rebuilt_datasets: tuple[StorageKey, ...] = ()
     recovered_files: int = 0
-    reset_datasets: tuple[DatasetKey, ...] = ()
+    reset_datasets: tuple[StorageKey, ...] = ()
     warnings: tuple[str, ...] = ()

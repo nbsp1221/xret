@@ -7,7 +7,9 @@ This page records combinations that Xret has exercised as an external user would
 | Question | Current answer |
 |---|---|
 | Is qualification required to execute? | No. Qualification is not loaded into runtime behavior. |
-| What historical evidence exists? | 29 venue rows across 45 exact market-family and settlement scopes; see the historical matrix below. |
+| What historical trade-bar evidence exists? | 29 venue rows across 45 exact market-family and settlement scopes; see the historical matrix below. |
+| What derivative-family evidence exists? | One exact Binance Data Vision OI archive scope: Binance `BTC/USDT` USDⓈ-M linear perpetual, `5m`, for the 2020-09-01 UTC object. |
+| Are any CCXT settled-funding, reference-bar, or OI combinations verified? | No. They are capability-available and runtime-validated where advertised, but no such combination is promoted by this page. |
 | What live evidence exists? | 6 exact scopes across Binance, Bybit, and OKX, all for the `1m` initial snapshot-to-live handoff. |
 | Does historical qualification imply live qualification? | No. Historical and live evidence are independent. |
 | Does venue qualification cover every symbol and future provider change? | No. Qualification is scoped evidence, and every actual response is still validated at runtime. |
@@ -17,7 +19,7 @@ This page records combinations that Xret has exercised as an external user would
 
 A provider combination is added to this page only after human-style dogfooding succeeds in a fresh project outside the repository. The evaluator installs the built `xret-data` distribution through uv, uses the public API against the real network, inspects results, and adapts the investigation when behavior warrants additional checks.
 
-The evaluation must be broad enough to exercise the material risks of the provider combination without pretending to test every symbol. It covers representative symbols and the publicly claimed timeframes across realistic short and multi-year ranges, and separately proves the [canonical trade time-bar semantics](../reference/time-bars.md), including as applicable:
+The evaluation must be broad enough to exercise the material risks of the claimed combination without pretending to test every symbol, object, or date. Trade-bar promotion covers representative symbols and the publicly claimed timeframes across realistic short and multi-year ranges. A source-object qualification may instead name one exact object and claim only the adapter properties directly exercised by that object. As applicable, evaluation proves the [canonical time semantics](../reference/time-bars.md), including:
 
 - initial acquisition and canonical storage;
 - exact strict reads and partial reads;
@@ -40,17 +42,18 @@ Qualification applies to a specific combination of:
 provider adapter
 + venue endpoint family
 + market family
-+ bar type
++ bar or observation type
 + exact timeframe
++ source object/date when the claim is artifact-scoped
 ```
 
 Representative symbols exercise shared adapter behavior. Qualification does not mean that only those exact symbols are supported, and evidence from one endpoint or contract family is never generalized to an entire exchange.
 
 This matrix is the public qualification statement for historical bars. CCXT market discovery may expose a venue or market that is absent here. If the operation is available and not known incompatible, historical `fetch` and `sync` attempt it using the same runtime validation and conservative presence-only pagination when no exact bounded policy exists. Absence does not assert that the venue is untrustworthy, nor does it imply complete historical operability. Successfully discovering a market definition, `active=True`, or an advertised timeframe is not sufficient qualification evidence. Market availability, runtime observation, exhaustive coverage, and prior QA evidence remain separate facts.
 
-## Historical qualification at a glance
+## Historical trade-bar qualification at a glance
 
-The complete canonical historical evidence set is listed below. Every entry passed the maintained live-network gate with all mandatory edge cases, 135 additional deterministic observations at the declared 99.9% sampling-confidence target, contract-correct strict and partial coverage behavior, and an independent public-trade/candle semantic witness for every available market family. The confidence target describes the gate's sampling design; it is not a 99.9% promise of future uptime or correctness for every symbol and date.
+The complete canonical historical trade-OHLCV evidence set is listed below. It does not qualify settled funding, reference bars, or open interest through CCXT. Every trade-bar entry passed the maintained live-network gate with all mandatory edge cases, 135 additional deterministic observations at the declared 99.9% sampling-confidence target, contract-correct strict and partial coverage behavior, and an independent public-trade/candle semantic witness for every available market family. The confidence target describes the gate's sampling design; it is not a 99.9% promise of future uptime or correctness for every symbol and date.
 
 | Evidence | Venues |
 |---|---|
@@ -96,6 +99,20 @@ Live-bar qualification is separate and appears under [Currently verified live ba
 The historical qualification excludes combinations that cannot satisfy the canonical contract losslessly. Aster `1h`/`3d`, Binance `3d`, Binance USD-M `1s`/`3d`/`1w`, BingX perpetual `1M`, Bitfinex `1w`, Bitget spot `2h`, Bitso spot `1d`/`1w`, Bitstamp spot `1w`, BTCTurk spot `1w`, Deribit `3h`/`6h`/`12h`/`1d`, HTX `1d`/`1w`/`1M`, Hyperliquid `1w`/`1M`, Kraken Futures `1w`, KuCoin spot `1w`, KuCoin Futures `3m`/`6h`/`1M`, MEXC spot `8h`/`1w`/`1M`, Pacifica perpetual `1h`, WOO spot `1h`, WOO `4h`/`12h`/`1d`/`1w`/`1M`, and XT `3d` are marked historically incompatible when their exact provider metadata advertises them. Historical incompatibility is not inferred as live incompatibility; live has independent capability, evidence, and exact rules. Aster's official spot and futures endpoints reproduce invalid historical `1h` OHLC rows, while its advertised `3d` label is outside Xret's canonical grammar. MEXC's official spot endpoint returns older `1w` bars on a Sunday 16:00 UTC boundary before changing to Monday 00:00 UTC, so Xret excludes that native interval instead of relabeling historically different windows. Pacifica's official endpoint reproduces a historical `1h` candle whose open exceeds its high, so the entire endpoint timeframe is excluded rather than adding a symbol/date waiver. WOO's official historical endpoint returns two conflicting `BTC/USDC` spot `1h` rows for 2025-02-24 02:00 UTC, and its other excluded native intervals likewise reproduce conflicting rows with identical timestamps. Xret excludes the affected endpoint timeframe instead of choosing one value arbitrarily. Binance USD-M `1w` is excluded because the official `BCHUSDT` weekly candle beginning 2020-01-13 violates the OHLC invariant; Xret does not add a symbol/date exception for malformed provider history. BingX spot remains unqualified because its long-interval anchors and candle volume do not match the canonical contract. Exact base volume is reconstructed from verified contract metadata for qualified linear ApeX, HashKey, MEXC, and XT perpetuals; inverse contracts whose aggregate candle volume cannot be converted exactly are excluded.
 
 Native no-trade, pre-listing, and retention gaps remain explicit unavailable coverage. No venue-specific storage exception, synthetic bar, or gap waiver is present in Xret.
+
+## Qualified Binance Data Vision open interest
+
+The separately selected `binance-data-vision` provider is qualified only for this exact source scope:
+
+| Provider | Venue and market | Family | Timeframe | Qualified object |
+|---|---|---|---|---|
+| Binance Data Vision | Binance `BTC/USDT` USDⓈ-M linear perpetual | Historical open interest | `5m` | `data/futures/um/daily/metrics/BTCUSDT/BTCUSDT-metrics-2020-09-01.zip` |
+
+On 2026-08-26, a fresh external Python 3.12 uv consumer installed the built `xret-data` 0.5.1 wheel and fetched that official daily object through `MarketData(provider="binance-data-vision")`. The official SHA-256 sidecar matched; the source contained 576 rows representing two exact copies of each expected slot; Xret reported 288 duplicates, normalized them to 288 ordered canonical samples, returned complete coverage for `[2020-09-01, 2020-09-02)`, and did not use CCXT or Binance REST.
+
+This evidence qualifies the archive adapter's exact checksum, duplicate normalization, schema, symbol, UTC-day, `5m` grid, and amount/value mapping for that object. It does not claim that every published day exists or is immutable, that dates before or after it are complete, that symbols other than `BTC/USDT` are admitted, or that Data Vision offers funding, reference, trade, live, or discovery capabilities. Runtime accepts whole UTC-day requests of 1 through 366 days and reports absent objects or slots as `missing`; those implementation limits are capability boundaries, not blanket verified-history claims.
+
+No CCXT settled-funding, mark/index/premium-index, or open-interest combination has external promotion evidence in this release. CCXT may advertise and successfully execute those capabilities, and Xret validates every response, but capability and a passing call are not entries in this matrix.
 
 ## Known limitations and scopes not verified
 

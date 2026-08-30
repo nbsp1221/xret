@@ -1442,10 +1442,11 @@ def test_read_only_catalog_snapshot_uses_coherent_active_wal_state(tmp_path: Pat
         writer.execute(
             """
             INSERT INTO datasets (
-                exchange, symbol, market, settle, timeframe, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                family, variant, exchange, symbol, market, settle, timeframe,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("committed", "BTC/USDT", "spot", settle, "1m", "now", "now"),
+            ("trade_bars", "", "committed", "BTC/USDT", "spot", settle, "1m", "now", "now"),
         )
         writer.execute("COMMIT")
         wal_path = db_path.with_name(db_path.name + "-wal")
@@ -1461,10 +1462,21 @@ def test_read_only_catalog_snapshot_uses_coherent_active_wal_state(tmp_path: Pat
         writer.execute(
             """
             INSERT INTO datasets (
-                exchange, symbol, market, settle, timeframe, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                family, variant, exchange, symbol, market, settle, timeframe,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            ("uncommitted", "BTC/USDT", "spot", settle, "1m", "now", "now"),
+            (
+                "trade_bars",
+                "",
+                "uncommitted",
+                "BTC/USDT",
+                "spot",
+                settle,
+                "1m",
+                "now",
+                "now",
+            ),
         )
         with Catalog.open_read_only(db_path) as snapshot:
             assert (

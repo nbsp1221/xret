@@ -51,7 +51,7 @@ print(frame)
 
 ## Continue
 
-- [Synchronize and read bars](../guides/synchronization.md)
+- [Synchronize and read market data](../guides/synchronization.md)
 - [Market data API reference](../reference/api.md)
 - [Data lifecycle](../explanation/data-lifecycle.md)
 - [Provider support and trust](../explanation/provider-support.md)

@@ -89,3 +89,17 @@ def test_structured_warnings_are_deduplicated_and_stably_ordered() -> None:
         "b.warning",
         "z.warning",
     ]
+
+
+def test_provider_evidence_rejects_inconsistent_row_counts() -> None:
+    with pytest.raises(InvalidRequestError, match="row counts are inconsistent"):
+        ProviderEvidence(
+            provider_name="fixture",
+            provider_version="1",
+            provider_api_version=1,
+            native_market_id="BTCUSDT",
+            native_symbol="BTC/USDT:USDT",
+            source_rows=0,
+            canonical_rows=1,
+            duplicate_rows=0,
+        )

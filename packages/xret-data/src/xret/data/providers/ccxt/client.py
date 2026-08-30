@@ -31,6 +31,50 @@ class CCXTExchange(Protocol):
         params: dict[str, int | str] | None = None,
     ) -> list[list[float]]: ...
 
+    def fetch_mark_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, int | str] | None = None,
+    ) -> list[list[float]]: ...
+
+    def fetch_index_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, int | str] | None = None,
+    ) -> list[list[float]]: ...
+
+    def fetch_premium_index_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, int | str] | None = None,
+    ) -> list[list[float]]: ...
+
+    def fetch_funding_rate_history(
+        self,
+        symbol: str,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, int | str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    def fetch_open_interest_history(
+        self,
+        symbol: str,
+        timeframe: str = "5m",
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, int | str] | None = None,
+    ) -> list[dict[str, Any]]: ...
+
 
 ExchangeFactory = Callable[[str], CCXTExchange]
 
@@ -146,6 +190,100 @@ def fetch_page(
             if not _is_transient_error(exc) or attempt >= retry.max_retries:
                 raise ProviderError(
                     f"fetchOHLCV failed for {native_symbol} on {exchange.id}: {exc}"
+                ) from exc
+            attempt += 1
+            retry.sleep(retry.backoff(attempt))
+
+
+def fetch_funding_page(
+    exchange: CCXTExchange,
+    native_symbol: str,
+    since_ms: int,
+    page_limit: int,
+    params: dict[str, int | str],
+    retry: RetryPolicy,
+    pacer: RequestPacer,
+) -> list[dict[str, Any]]:
+    """Fetch one unified funding-history page with bounded retries."""
+    attempt = 0
+    while True:
+        try:
+            pacer.wait()
+            return exchange.fetch_funding_rate_history(
+                native_symbol,
+                since_ms,
+                page_limit,
+                params,
+            )
+        except Exception as exc:
+            if not _is_transient_error(exc) or attempt >= retry.max_retries:
+                raise ProviderError(
+                    f"fetchFundingRateHistory failed for {native_symbol} on {exchange.id}: {exc}"
+                ) from exc
+            attempt += 1
+            retry.sleep(retry.backoff(attempt))
+
+
+def fetch_reference_page(
+    exchange: CCXTExchange,
+    method_name: str,
+    native_symbol: str,
+    timeframe: str,
+    since_ms: int | None,
+    page_limit: int | None,
+    params: dict[str, int | str],
+    retry: RetryPolicy,
+    pacer: RequestPacer,
+) -> list[list[float]]:
+    """Fetch one reference OHLC page through a pinned CCXT convenience API."""
+    method = getattr(exchange, method_name, None)
+    if not callable(method):
+        raise ProviderError(f"CCXT {exchange.id!r} has no callable {method_name}()")
+    attempt = 0
+    while True:
+        try:
+            pacer.wait()
+            return method(native_symbol, timeframe, since_ms, page_limit, params)
+        except Exception as exc:
+            if not _is_transient_error(exc) or attempt >= retry.max_retries:
+                raise ProviderError(
+                    f"{method_name} failed for {native_symbol} on {exchange.id}: {exc}"
+                ) from exc
+            attempt += 1
+            retry.sleep(retry.backoff(attempt))
+
+
+def fetch_open_interest_page(
+    exchange: CCXTExchange,
+    native_symbol: str,
+    timeframe: str,
+    since_ms: int,
+    page_limit: int,
+    params: dict[str, int | str],
+    retry: RetryPolicy,
+    pacer: RequestPacer,
+) -> list[dict[str, Any]]:
+    """Fetch one unified open-interest-history page with bounded retries."""
+    attempt = 0
+    while True:
+        try:
+            pacer.wait()
+            return exchange.fetch_open_interest_history(
+                native_symbol, timeframe, since_ms, page_limit, params
+            )
+        except Exception as exc:
+            mro_names = {klass.__name__ for klass in type(exc).__mro__}
+            message = str(exc)
+            if (
+                exchange.id in {"binance", "binanceusdm"}
+                and "BadRequest" in mro_names
+                and "startTime" in message
+                and "invalid" in message
+            ):
+                return []
+            if not _is_transient_error(exc) or attempt >= retry.max_retries:
+                raise ProviderError(
+                    f"fetchOpenInterestHistory failed for {native_symbol} on {exchange.id}: {exc}"
                 ) from exc
             attempt += 1
             retry.sleep(retry.backoff(attempt))

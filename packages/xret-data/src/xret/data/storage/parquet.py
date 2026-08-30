@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, Final, cast
 
 import polars as pl
 from xret.data.errors import CatalogError, InvalidRequestError, SyncError, XretDataError
-from xret.data.models import NONE_SETTLE_SENTINEL, DatasetKey, Market, YearMonth
+from xret.data.models import (
+    NONE_SETTLE_SENTINEL,
+    DatasetKey,
+    Market,
+    ProviderEvidence,
+    StorageKey,
+    YearMonth,
+)
 from xret.data.providers.contracts import DerivativeInterpretation
 from xret.data.quality import enforce_canonical_ohlcv
 from xret.data.schema import IDENTITY_COLUMNS, OHLCV_COLUMNS, OHLCV_SCHEMA
@@ -100,18 +107,35 @@ class ProviderProvenance:
     api_version: int
     market_id: str
     native_symbol: str
+    reference_target_scope: str = ""
+    derivative_linear: bool | None = None
+    derivative_inverse: bool | None = None
+    contract_size: str = ""
+    source_field_mapping: str = ""
 
     def __post_init__(self) -> None:
         for field in ("name", "version", "market_id", "native_symbol"):
             if not getattr(self, field):
                 raise InvalidRequestError(f"provider {field} must not be empty")
+        if self.reference_target_scope not in ("", "contract", "pair"):
+            raise InvalidRequestError(
+                "provider reference_target_scope must be empty, 'contract', or 'pair'"
+            )
         if not isinstance(self.api_version, int) or isinstance(self.api_version, bool):
             raise InvalidRequestError("provider api_version must be an integer")
+        for field_name in ("derivative_linear", "derivative_inverse"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, bool):
+                raise InvalidRequestError(f"provider {field_name} must be bool or None")
+        for field_name in ("contract_size", "source_field_mapping"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str):
+                raise InvalidRequestError(f"provider {field_name} must be a string")
 
 
 @dataclass(frozen=True, slots=True)
 class CommittedFile:
-    dataset_key: DatasetKey
+    dataset_key: StorageKey
     year_month: YearMonth
     relative_path: str
     absolute_path: Path
@@ -121,6 +145,7 @@ class CommittedFile:
     physical_hash: str
     schema_version: int
     provider: ProviderProvenance
+    contributors: tuple[ProviderEvidence, ...] = ()
 
 
 def _derivative_metadata(derivative: DerivativeInterpretation) -> dict[str, str]:
@@ -578,6 +603,16 @@ def read_committed_file(data_dir: Path, path: Path) -> CommittedFile:
     _require_safe_managed_path(data_dir, path, error_cls=CatalogError)
     if not path.is_file():
         raise FileNotFoundError(path)
+    try:
+        relative_parts = path.resolve().relative_to(data_dir.resolve()).parts
+    except ValueError as exc:
+        raise CatalogError(f"{path}: path is outside data directory {data_dir}") from exc
+    if relative_parts and relative_parts[0] == "_xret":
+        from xret.data.storage.family_parquet import read_family_committed_file
+
+        return read_family_committed_file(data_dir, path)
+    if not paths.is_canonical_month_file_path(data_dir, path):
+        raise CatalogError(f"{path}: malformed legacy trade-bar path")
     try:
         frame = pl.read_parquet(path)
     except Exception as exc:  # noqa: BLE001

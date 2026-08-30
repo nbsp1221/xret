@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import threading
 from importlib import metadata
-from typing import cast
 
 from xret.data.errors import InvalidRequestError, ProviderError
 from xret.data.providers.ccxt import CcxtProvider
-from xret.data.providers.contracts import HistoricalBarProvider
-from xret.data.providers.runtime import validate_provider_descriptor
+from xret.data.providers.conformance import validate_provider_conformance
 
 ENTRY_POINT_GROUP = "xret.data.providers"
 
@@ -18,24 +16,16 @@ def _validate_provider_object(
     provider: object,
     *,
     expected_name: str | None,
-) -> HistoricalBarProvider:
-    try:
-        descriptor = validate_provider_descriptor(provider)
-    except ProviderError:
-        raise
-    except Exception as exc:
-        raise ProviderError(f"invalid provider object: {exc}") from exc
+) -> object:
+    descriptor = validate_provider_conformance(provider)
     if expected_name is not None and descriptor.name != expected_name:
         raise ProviderError(
             f"provider entry point {expected_name!r} returned descriptor {descriptor.name!r}"
         )
-    for method_name in ("resolve_market", "observe_bars"):
-        if not callable(getattr(provider, method_name, None)):
-            raise ProviderError(f"provider {descriptor.name!r} has no callable {method_name}()")
-    return cast("HistoricalBarProvider", provider)
+    return provider
 
 
-def load_installed_provider(name: str) -> HistoricalBarProvider:
+def load_installed_provider(name: str) -> object:
     """Load one explicitly named provider factory from installed metadata."""
     try:
         candidates = tuple(metadata.entry_points(group=ENTRY_POINT_GROUP))
@@ -65,16 +55,14 @@ def load_installed_provider(name: str) -> HistoricalBarProvider:
 class ProviderHandle:
     """One per-`MarketData` lazy provider binding."""
 
-    def __init__(self, selection: HistoricalBarProvider | str | None) -> None:
+    def __init__(self, selection: object | None) -> None:
         if isinstance(selection, str) and not selection:
             raise InvalidRequestError("provider name must not be empty")
         self._selection = selection
-        self._resolved: HistoricalBarProvider | None = (
-            selection if selection is not None and not isinstance(selection, str) else None
-        )
+        self._resolved: object | None = None
         self._lock = threading.Lock()
 
-    def get(self) -> HistoricalBarProvider:
+    def get(self) -> object:
         resolved = self._resolved
         if resolved is not None:
             return resolved
@@ -83,9 +71,10 @@ class ProviderHandle:
             if resolved is None:
                 selection = self._selection
                 if selection is None:
-                    resolved = CcxtProvider()
-                else:
-                    assert isinstance(selection, str)
+                    resolved = _validate_provider_object(CcxtProvider(), expected_name=None)
+                elif isinstance(selection, str):
                     resolved = load_installed_provider(selection)
+                else:
+                    resolved = _validate_provider_object(selection, expected_name=None)
                 self._resolved = resolved
             return resolved
