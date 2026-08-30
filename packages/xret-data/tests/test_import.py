@@ -7,6 +7,7 @@ package top level.
 
 from __future__ import annotations
 
+import inspect
 from importlib.util import find_spec
 
 import pytest
@@ -38,6 +39,7 @@ def test_public_surface_exposes_runtime_evidence_contracts() -> None:
         "OpenInterestSyncResult",
         "OpenInterestPartialScanResult",
         "BarUpdate",
+        "BarFetchMode",
         "BarFinality",
         "LiveMarketData",
         "SyncResult",
@@ -77,6 +79,7 @@ def test_public_surface_exposes_runtime_evidence_contracts() -> None:
         "OpenInterestSyncResult",
         "OpenInterestPartialScanResult",
         "BarUpdate",
+        "BarFetchMode",
         "BarFinality",
         "LiveMarketData",
         "SyncResult",
@@ -100,6 +103,15 @@ def test_every_declared_public_name_is_importable(name: str) -> None:
     import xret.data
 
     assert hasattr(xret.data, name)
+
+
+def test_breaking_bar_api_has_explicit_fetch_mode_and_no_bootstrap() -> None:
+    from xret.data import BarDataset, LiveMarketData
+
+    fetch_parameters = inspect.signature(BarDataset.fetch).parameters
+    assert fetch_parameters["mode"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert fetch_parameters["mode"].default is inspect.Parameter.empty
+    assert "bootstrap" not in inspect.signature(LiveMarketData.subscribe_bar_updates).parameters
 
 
 @pytest.mark.parametrize(

@@ -10,9 +10,9 @@ For remote operations, an omitted perpetual settlement is inferred only when pro
 
 ## Remote observation: `fetch`
 
-`fetch` always invokes the selected provider and returns a family-specific result containing an eager Polars `DataFrame`, coverage, gaps, provider evidence, and warnings. It does not read or change canonical local state. A `MarketData(provider=...)` selection is explicit for the whole operation; Xret never chains providers or falls back to CCXT.
+`fetch` always invokes the selected provider and returns a family-specific result containing an eager Polars `DataFrame`, coverage, gaps, provider evidence, and warnings. It does not read or change canonical local state. Trade bars require an explicit `BarFetchMode`: `LATEST` preserves the provider's current observation, including forming or recently closed rows when returned, while `FINAL` applies Xret's finality grace. A `MarketData(provider=...)` selection is explicit for the whole operation; Xret never chains providers or falls back to CCXT.
 
-Returned rows and observation evidence are separate facts. Trade and reference bars use completed aligned intervals, OI uses provider-labeled sample timestamps, and funding uses exact final event timestamps inside arbitrary observed spans. Valid rows prove only their own facts unless the provider supplies stronger exhaustive `ObservedWindow` evidence. Every unproved remainder remains `missing`; qualification is maintained outside this runtime lifecycle as historical QA evidence.
+Returned rows and observation evidence are separate facts. Latest trade-bar rows may still change; final trade and reference bars use completed aligned intervals, OI uses provider-labeled sample timestamps, and funding uses exact final event timestamps inside arbitrary observed spans. Valid rows prove only their own facts unless the provider supplies stronger exhaustive `ObservedWindow` evidence. Every unproved remainder remains `missing`; qualification is maintained outside this runtime lifecycle as historical QA evidence.
 
 ## Canonical reconciliation: `sync`
 
@@ -26,7 +26,7 @@ Ordinary datasets bind one stable provider-name lineage. OI may instead contain 
 
 A live `BarUpdate` is an in-memory observation and carries explicit time-based finality. `FORMING` is still inside its interval, `PROVISIONAL` is time-closed but inside Xret's finality grace, and `FINAL` has passed that grace at Xret's receipt time. None of these states means the value is canonical or persisted.
 
-An opt-in live bootstrap observes a small recent closed window and merges it with updates buffered after the live stream activates. This bridges the initial historical-to-live boundary without weakening `fetch` or `sync` and without opening the catalog or storage. A later explicit `sync()` independently reacquires and validates the timestamp before it can become canonical.
+Live subscription and historical fetch are independent operations. Xret does not fetch or merge historical rows while subscribing and does not promise an atomic boundary between the two streams. An application that needs continuity owns overlap replacement, deduplication, recent-range reconciliation, and reconnect recovery. A later explicit `sync()` independently reacquires and validates a timestamp before it can become canonical.
 
 ## Local analysis: `scan` and `scan_partial`
 

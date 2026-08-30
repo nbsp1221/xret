@@ -16,7 +16,7 @@ from decimal import Decimal
 import pytest
 from xret.data.errors import InvalidRequestError, ProviderError, UnsupportedMarketError
 from xret.data.market_data import MarketData
-from xret.data.models import Availability, BarRequest, Market, MarketIdentity
+from xret.data.models import Availability, BarFetchMode, BarRequest, Market, MarketIdentity
 from xret.data.providers import (
     DerivativeInterpretation,
     ObservedWindow,
@@ -188,7 +188,7 @@ def _observe(
         retry_backoff_base=retry_backoff_base,
         sleep=sleep,
     )
-    return ProviderRuntime(provider).observe(
+    return ProviderRuntime(provider).observe_final(
         BarRequest(
             identity=identity,
             timeframe=timeframe,
@@ -717,7 +717,11 @@ def test_bars_performs_no_io() -> None:
     )
 
     assert calls == []
-    bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+    bars.fetch(
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        mode=BarFetchMode.FINAL,
+    )
     assert calls == ["built"]
 
 
@@ -753,7 +757,11 @@ def test_omitted_settle_infers_the_single_safe_candidate() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="perpetual", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert (frame.data["settle"] == "USDT").all()
@@ -770,7 +778,11 @@ def test_omitted_settle_with_zero_candidates_raises_unsupported_market_error() -
     with pytest.raises(UnsupportedMarketError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="perpetual", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_omitted_settle_with_ambiguous_candidates_raises_unsupported_market_error() -> None:
@@ -800,7 +812,11 @@ def test_omitted_settle_with_ambiguous_candidates_raises_unsupported_market_erro
     with pytest.raises(UnsupportedMarketError, match="ambiguous"):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="perpetual", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_duplicate_same_settle_perpetual_candidates_fail_closed() -> None:
@@ -816,7 +832,11 @@ def test_duplicate_same_settle_perpetual_candidates_fail_closed() -> None:
     with pytest.raises(UnsupportedMarketError, match="ambiguous"):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="perpetual", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
     with pytest.raises(UnsupportedMarketError, match="ambiguous"):
         _market_data().bars(
@@ -825,7 +845,11 @@ def test_duplicate_same_settle_perpetual_candidates_fail_closed() -> None:
             market="perpetual",
             settle="USDT",
             timeframe="1m",
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_explicit_settle_not_listed_raises_unsupported_market_error() -> None:
@@ -835,7 +859,11 @@ def test_explicit_settle_not_listed_raises_unsupported_market_error() -> None:
     with pytest.raises(UnsupportedMarketError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="perpetual", settle="BUSD", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_explicit_settle_never_reads_other_candidates() -> None:
@@ -871,7 +899,11 @@ def test_explicit_settle_never_reads_other_candidates() -> None:
         .bars(
             exchange="binance", symbol="BTC/USDT", market="perpetual", settle="USDT", timeframe="1m"
         )
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert (frame.data["settle"] == "USDT").all()
@@ -891,7 +923,11 @@ def test_spot_fetch_uses_the_public_symbol_as_the_native_symbol() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert exchange.fetch_calls[0][0] == "BTC/USDT"
@@ -978,7 +1014,11 @@ def test_unlisted_spot_symbol_raises_unsupported_market_error() -> None:
     with pytest.raises(UnsupportedMarketError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_resolved_market_without_native_id_fails_closed() -> None:
@@ -1003,6 +1043,7 @@ def test_resolved_market_without_native_id_fails_closed() -> None:
         ).fetch(
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
         )
 
 
@@ -1013,7 +1054,11 @@ def test_missing_fetch_ohlcv_capability_raises_unsupported_market_error() -> Non
     with pytest.raises(UnsupportedMarketError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_unsupported_timeframe_raises_unsupported_market_error() -> None:
@@ -1023,7 +1068,11 @@ def test_unsupported_timeframe_raises_unsupported_market_error() -> None:
     with pytest.raises(UnsupportedMarketError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_absent_or_non_mapping_timeframes_fail_closed() -> None:
@@ -1038,7 +1087,11 @@ def test_absent_or_non_mapping_timeframes_fail_closed() -> None:
         with pytest.raises(UnsupportedMarketError):
             _market_data().bars(
                 exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-            ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+            ).fetch(
+                datetime(2024, 1, 1, tzinfo=UTC),
+                datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+                mode=BarFetchMode.FINAL,
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1151,7 +1204,11 @@ def test_fetch_returns_canonical_schema_with_no_run_id() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert tuple(frame.data.columns) == OHLCV_COLUMNS
@@ -1168,8 +1225,16 @@ def test_fetch_has_no_local_side_effects_and_is_repeatable() -> None:
     _set_now(datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
     bars = _market_data().bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
 
-    first = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
-    second = bars.fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+    first = bars.fetch(
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        mode=BarFetchMode.FINAL,
+    )
+    second = bars.fetch(
+        datetime(2024, 1, 1, tzinfo=UTC),
+        datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+        mode=BarFetchMode.FINAL,
+    )
 
     assert first.data.equals(second.data)
     assert exchange.load_markets_calls == 1
@@ -2074,7 +2139,7 @@ def test_concurrent_same_market_fetches_share_one_stable_serialized_resolution()
     with ThreadPoolExecutor(max_workers=2) as executor:
         frames = tuple(
             executor.map(
-                lambda _: ProviderRuntime(provider).observe(request).frame,
+                lambda _: ProviderRuntime(provider).observe_final(request).frame,
                 range(2),
             )
         )
@@ -2120,7 +2185,11 @@ def test_request_range_filter_is_half_open() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 3, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert frame.data.height == 3
@@ -2149,7 +2218,11 @@ def test_non_ascending_batch_raises_provider_error() -> None:
     with pytest.raises(ProviderError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 @pytest.mark.parametrize(
@@ -2191,10 +2264,36 @@ def test_candle_within_grace_window_is_dropped() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert frame.data["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
+
+
+def test_latest_fetch_preserves_recently_closed_and_forming_candles() -> None:
+    minute = 60_000
+    candles = [_row(0), _row(1 * minute), _row(2 * minute)]
+    exchange = FakeExchange(candles=candles, page_size=10)
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 2, 1, tzinfo=UTC))
+
+    result = (
+        _market_data()
+        .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 3, tzinfo=UTC),
+            mode=BarFetchMode.LATEST,
+        )
+    )
+
+    assert result.data["timestamp"].to_list() == [
+        datetime(2024, 1, 1, 0, minute, tzinfo=UTC) for minute in range(3)
+    ]
 
 
 def test_candle_past_grace_window_is_included() -> None:
@@ -2207,7 +2306,11 @@ def test_candle_past_grace_window_is_included() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 5, tzinfo=UTC))
+        .fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 5, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
     )
 
     assert frame.data.height == 2
@@ -2225,6 +2328,13 @@ def test_default_end_is_the_latest_completed_bar_boundary_with_grace() -> None:
     assert provider_runtime.default_end(time_bar) == datetime(2024, 1, 1, tzinfo=UTC)
 
 
+def test_latest_end_includes_the_interval_open_at_call_time() -> None:
+    time_bar = TimeBar.parse("1m")
+    _set_now(datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC))
+
+    assert provider_runtime.latest_end(time_bar) == datetime(2024, 1, 1, 0, 1, tzinfo=UTC)
+
+
 def test_fetch_with_omitted_end_uses_provider_grace_boundary() -> None:
     exchange = FakeExchange(candles=[_row(0)], page_size=10)
     _register_spot(exchange)
@@ -2233,10 +2343,24 @@ def test_fetch_with_omitted_end_uses_provider_grace_boundary() -> None:
     frame = (
         _market_data()
         .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
-        .fetch(datetime(2023, 12, 31, 23, 59, tzinfo=UTC))
+        .fetch(datetime(2023, 12, 31, 23, 59, tzinfo=UTC), mode=BarFetchMode.FINAL)
     )
 
     assert frame.data.height == 0  # [23:59, 00:00) excludes the t=0 candle
+
+
+def test_latest_fetch_with_omitted_end_includes_the_forming_interval() -> None:
+    exchange = FakeExchange(candles=[_row(0)], page_size=10)
+    _register_spot(exchange)
+    _set_now(datetime(2024, 1, 1, 0, 0, 5, tzinfo=UTC))
+
+    result = (
+        _market_data()
+        .bars(exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m")
+        .fetch(datetime(2024, 1, 1, tzinfo=UTC), mode=BarFetchMode.LATEST)
+    )
+
+    assert result.data["timestamp"].to_list() == [datetime(2024, 1, 1, tzinfo=UTC)]
 
 
 # --------------------------------------------------------------------------
@@ -2273,6 +2397,7 @@ def test_transient_error_retries_and_recovers(monkeypatch: pytest.MonkeyPatch) -
         .fetch(
             datetime(2024, 1, 1, tzinfo=UTC),
             datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
         )
     )
 
@@ -2293,7 +2418,11 @@ def test_transient_error_exhausts_retries_and_raises_provider_error(
     with pytest.raises(ProviderError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
 
 def test_permanent_error_does_not_retry() -> None:
@@ -2306,7 +2435,11 @@ def test_permanent_error_does_not_retry() -> None:
     with pytest.raises(ProviderError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
     assert len(exchange.fetch_calls) == 1
 
@@ -2326,7 +2459,11 @@ def test_provider_error_chains_the_underlying_cause() -> None:
     with pytest.raises(ProviderError) as excinfo:
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1, tzinfo=UTC), datetime(2024, 1, 1, 0, 1, tzinfo=UTC))
+        ).fetch(
+            datetime(2024, 1, 1, tzinfo=UTC),
+            datetime(2024, 1, 1, 0, 1, tzinfo=UTC),
+            mode=BarFetchMode.FINAL,
+        )
 
     assert isinstance(excinfo.value.__cause__, PermanentExchangeError)
 
@@ -2338,7 +2475,7 @@ def test_naive_start_is_rejected() -> None:
     with pytest.raises(InvalidRequestError):
         _market_data().bars(
             exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
-        ).fetch(datetime(2024, 1, 1))  # noqa: DTZ001 - intentionally naive
+        ).fetch(datetime(2024, 1, 1), mode=BarFetchMode.FINAL)  # noqa: DTZ001 - intentionally naive
 
 
 def test_observation_uses_pre_call_evidence_time_and_post_call_completion_time() -> None:

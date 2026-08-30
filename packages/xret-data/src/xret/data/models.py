@@ -26,6 +26,7 @@ __all__ = [
     "ReferencePriceKind",
     "CoverageStatus",
     "Availability",
+    "BarFetchMode",
     "BarFinality",
     "Market",
     "QualitySeverity",
@@ -98,6 +99,13 @@ class Availability(enum.StrEnum):
     AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
     INCOMPATIBLE = "incompatible"
+
+
+class BarFetchMode(enum.StrEnum):
+    """Whether a remote bar fetch returns the latest or final observation."""
+
+    LATEST = "latest"
+    FINAL = "final"
 
 
 class BarFinality(enum.Enum):

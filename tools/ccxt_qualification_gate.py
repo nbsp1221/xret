@@ -1319,6 +1319,8 @@ def _run_case(
     state_root: Path,
     now: datetime,
 ) -> dict[str, Any]:
+    from xret.data import BarFetchMode
+
     start, end = _range(now, case)
     result: dict[str, Any] = {
         "key": _case_key(case),
@@ -1340,7 +1342,7 @@ def _run_case(
         if case.lifecycle == "concurrent":
             result.update(_run_concurrent_case(market_data, bars, case, start, end))
             return result
-        fetched = bars.fetch(start, end)
+        fetched = bars.fetch(start, end, mode=BarFetchMode.FINAL)
         _assert_frame_invariants(fetched, timeframe=case.timeframe, start=start, end=end)
         sync = bars.sync(start, end)
         result["sync"] = {

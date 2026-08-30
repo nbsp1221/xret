@@ -35,7 +35,7 @@ def test_spot_btc_usdt_one_minute_live_update(exchange: str) -> None:
 
 @pytest.mark.network
 @pytest.mark.parametrize("exchange", ["binance", "bybit", "okx"])
-def test_spot_btc_usdt_recent_bootstrap_handoff(
+def test_spot_btc_usdt_live_updates(
     exchange: str,
     tmp_path: Path,
 ) -> None:
@@ -53,7 +53,7 @@ def test_spot_btc_usdt_recent_bootstrap_handoff(
         )
         async with market_data.live(exchange=exchange) as live:
             async with asyncio.timeout(45):
-                await live.subscribe_bar_updates(bars, bootstrap=True)
+                await live.subscribe_bar_updates(bars)
                 updates = [await anext(live) for _ in range(3)]
 
         assert all(isinstance(update, BarUpdate) for update in updates)

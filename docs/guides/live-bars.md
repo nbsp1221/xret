@@ -18,7 +18,7 @@ async def main() -> None:
     )
 
     async with market_data.live(exchange="binance") as live:
-        receipt = await live.subscribe_bar_updates(btc, bootstrap=True)
+        receipt = await live.subscribe_bar_updates(btc)
         print(receipt.source, receipt.warnings)
 
         async for update in live:
@@ -38,9 +38,7 @@ The published live list is therefore evidence, not a three-exchange allowlist. B
 
 One session may subscribe to multiple `BarDataset` values when all were created by the same `MarketData` instance and use the session's exchange. Updates from all subscriptions arrive through the session-wide iterator. A session is one-shot and has one consuming task.
 
-`bootstrap=True` is optional. Without it, the subscription requires only live capability and starts with whatever the provider sends after the stream is activated. With it, Xret additionally requires historical capability for the same scope, first buffers live updates, observes the two most recent closed bar intervals through the same provider, validates and merges timestamp overlaps, and publishes the result in ascending timestamp order before continuing live delivery. This closes the transition race between a completed historical request and a newly opened live stream; it is not a TradingView-specific protocol.
-
-Bootstrap waits for the first live update as evidence that the stream is active. On an illiquid stream this can take time, so apply an application latency budget with `asyncio.timeout()` when needed. Xret does not synthesize a bar for an interval where the provider proves no bar exists.
+Subscription is live-only. It does not request historical bars, wait for the first market-data event, buffer a snapshot handoff, or write canonical storage. Returning from `subscribe_bar_updates()` means the provider session's subscription method completed; it is not a portable provider-level acknowledgement and does not promise that an event will arrive within a particular latency. A healthy event-driven stream can remain quiet until the next trade.
 
 ## Event semantics
 
@@ -50,14 +48,18 @@ Each `BarUpdate` contains canonical `identity` and `timeframe`, the inclusive UT
 - `PROVISIONAL`: the interval ended, but Xret's finality grace has not elapsed.
 - `FINAL`: the observation passed the grace at receipt time.
 
-Finality is an observation-time classification, not persistence state or a provider sequence guarantee. Even a `FINAL` update is not canonical data until an explicit later `sync()` reacquires, validates, and commits that timestamp. Multiple updates with the same timestamp are expected. Timestamp gaps are observable and allowed; a timestamp moving backwards for one subscribed dataset fails the session.
+Finality is an observation-time classification, not persistence state or a provider sequence guarantee. Even a `FINAL` update is not canonical data until an explicit later `sync()` reacquires, validates, and commits that timestamp. Multiple updates with the same timestamp are expected. Timestamp gaps are observable and allowed; a timestamp moving backwards for one subscribed dataset fails the session. Ordering is nondecreasing per dataset; a session with several datasets does not promise global event-time ordering between them.
 
-During bootstrap only, Xret coalesces overlap by timestamp. The last buffered live full-state update wins over a recent snapshot row for the same timestamp. After bootstrap, same-timestamp revisions are delivered normally. Ordering is per dataset; a session with several datasets does not promise global event-time ordering between them.
+## Compose history and live data
+
+Use `BarFetchMode.LATEST` when an application wants the provider's current historical view before or around a live subscription. The result may include the forming bar, and a later live update with the same timestamp is a replacement candidate rather than a duplicate canonical row.
+
+`fetch()` and live subscription are independent primitives. Xret does not guarantee an atomic handoff between them. The application decides whether to fetch before subscribing, subscribe while buffering its own events and then fetch, or refetch a recent range after connecting. It also owns timestamp overlap, deduplication, stale forming-bar replacement, and any stronger continuity policy required by its UI or trading runtime.
 
 ## Failure and continuity
 
-Xret does not silently reconnect, retry, coalesce events, or discard the oldest event. A provider disconnect, malformed update, or bounded-queue overflow is a terminal `ProviderError` for the whole session. Re-entering the same session is invalid; the application decides whether and when to create a new one.
+Xret does not silently reconnect, retry, coalesce events, or discard the oldest event. A provider disconnect, malformed update, or bounded-queue overflow is a terminal `ProviderError` for the whole session. Re-entering the same session is invalid; the application decides whether and when to create a new one, refetch a recent range, and reconcile any disconnect gap.
 
-Live subscription and bootstrap never call `sync`, write Parquet, or record catalog coverage. Bootstrap handles only the initial recent snapshot-to-live handoff. It does not fill a later disconnect gap. After a disconnect, create a new session and reconcile according to the application's recovery policy.
+Live subscription never calls `fetch` or `sync`, writes Parquet, or records catalog coverage.
 
 The current surface supports time-bar updates only. Trades, quotes, order books, raw provider payloads, exchange sequence numbers, long-range replay, recording, fan-out servers, and order execution are outside this contract.

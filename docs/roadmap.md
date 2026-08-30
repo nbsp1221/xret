@@ -23,13 +23,12 @@ Market-data acquisition and order execution are separate responsibilities. They 
 `xret-data` currently provides provider-neutral crypto spot/perpetual trade bars and perpetual derivatives market data with explicit remote and local operations:
 
 - discover current market definitions and family-specific capability metadata;
-- fetch completed trade bars, settled funding events, mark/index/premium-index reference bars, and sampled open interest without changing canonical state;
+- fetch either the provider's latest trade-bar observations or final trade bars, plus settled funding events, mark/index/premium-index reference bars, and sampled open interest, without changing canonical state;
 - synchronize only missing coverage into canonical monthly Parquet, including explicitly owned non-overlapping OI source ranges;
 - read complete local coverage strictly or inspect partial coverage explicitly;
 - validate family-specific schemas, provider results, source lineage/ownership, storage, and catalog recovery;
 - use the built-in CCXT provider, explicitly select the qualified Binance Data Vision `BTC/USDT` USDⓈ-M `5m` OI archive provider, or use the experimental external provider contract;
-- consume provider-neutral trade-bar observations with explicit finality through an async session without mutating historical storage; and
-- opt into a validated recent snapshot-to-live handoff when initializing a continuous consumer.
+- consume provider-neutral trade-bar observations with explicit finality through an async session without mutating historical storage.
 
 See the [market-data API](reference/api.md) and [verified support](quality/verified-support.md) for the maintained contracts and current evidence.
 
@@ -39,6 +38,7 @@ The initial live-bar capability follows these constraints:
 - provider-native symbols and payloads must not become the public API;
 - disconnects, queue overflow, and uncertain continuity must not be hidden;
 - live delivery must not implicitly mutate canonical historical storage;
+- historical/live reconciliation belongs to the application composing the independent APIs;
 - support must remain capability-based, with verified combinations documented separately from theoretically available provider features;
 - application servers, user fan-out, authentication, and UI protocols remain outside `xret-data`.
 

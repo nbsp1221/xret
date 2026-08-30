@@ -6,7 +6,7 @@ Xret exposes one provider-independent trade-OHLCV contract for 24/7 crypto spot 
 
 - `timestamp` is the inclusive actual start of the represented interval, normalized to a UTC millisecond instant.
 - Every bar covers a half-open interval `[timestamp, next_boundary)`.
-- Historical results contain only completed intervals. Live observations expose Xret's receipt-time finality separately.
+- `BarFetchMode.LATEST` may expose the current forming interval, while `BarFetchMode.FINAL`, canonical synchronization, reference bars, and local scans contain only rows accepted by their finality contracts. Live observations expose Xret's receipt-time finality separately.
 - Fixed `s`, `m`, `h`, and `d` multiples use `1970-01-01T00:00:00Z` as their origin.
 - `1w` is a calendar week beginning Monday at `00:00:00Z`.
 - `1M` is a calendar month beginning on its first day at `00:00:00Z`.

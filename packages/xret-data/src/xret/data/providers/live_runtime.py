@@ -5,20 +5,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from xret.data.errors import ProviderError, UnsupportedMarketError
 from xret.data.models import (
     BarFinality,
-    BarRequest,
     BarUpdate,
     DataWarning,
     MarketIdentity,
     ProviderEvidence,
 )
-from xret.data.observation_coverage import evaluate_observation_coverage
 from xret.data.providers.contracts import (
     HistoricalBarProvider,
     LiveBarSession,
@@ -52,16 +49,6 @@ def _bar_finality(
     if received_at < bar_end + DEFAULT_FINALITY_GRACE:
         return BarFinality.PROVISIONAL
     return BarFinality.FINAL
-
-
-def _previous_boundary(time_bar: TimeBar, boundary: datetime) -> datetime:
-    return time_bar.floor(boundary - timedelta(microseconds=1))
-
-
-@dataclass(frozen=True, slots=True)
-class RecentClosedBars:
-    updates: tuple[BarUpdate, ...]
-    is_complete: bool
 
 
 class LiveBarRuntime:
@@ -237,63 +224,6 @@ class LiveBarRuntime:
         ):
             raise ProviderError("provider live warnings hook must return DataWarning values")
         return candidate
-
-    async def recent_closed(
-        self,
-        key: tuple[MarketIdentity, str],
-        *,
-        count: int,
-    ) -> RecentClosedBars:
-        """Observe a small closed window for an active live subscription."""
-        market = self._active.get(key)
-        if market is None:
-            raise ProviderError("recent live bootstrap requires an active subscription")
-        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
-            raise ProviderError("recent live bootstrap count must be a positive integer")
-        identity, timeframe = key
-        time_bar = TimeBar.parse(timeframe)
-        cutover = time_bar.floor(self._clock())
-        start = cutover
-        for _ in range(count):
-            start = _previous_boundary(time_bar, start)
-        request = BarRequest(
-            identity=identity,
-            timeframe=timeframe,
-            start=start,
-            end=cutover,
-        )
-        observation = await asyncio.to_thread(
-            self._historical.observe_recent_closed,
-            request,
-            market=market,
-        )
-        received_at = observation.completed_at
-        updates: list[BarUpdate] = []
-        for row in observation.frame.iter_rows(named=True):
-            timestamp = cast("datetime", row["timestamp"])
-            updates.append(
-                BarUpdate(
-                    identity=identity,
-                    timeframe=timeframe,
-                    timestamp=timestamp,
-                    open=cast("float", row["open"]),
-                    high=cast("float", row["high"]),
-                    low=cast("float", row["low"]),
-                    close=cast("float", row["close"]),
-                    volume=cast("float", row["volume"]),
-                    received_at=received_at,
-                    finality=_bar_finality(timestamp, timeframe, received_at),
-                )
-            )
-        coverage = evaluate_observation_coverage(
-            time_bar=time_bar,
-            start=start,
-            end=cutover,
-            finalizable_end=cutover,
-            timestamps=observation.frame.get_column("timestamp").to_list(),
-            observed=observation.observed,
-        )
-        return RecentClosedBars(tuple(updates), coverage.is_complete)
 
     async def updates(self) -> AsyncIterator[BarUpdate]:
         session = self._require_session()
