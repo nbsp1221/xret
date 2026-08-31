@@ -453,6 +453,43 @@ def test_latest_observation_keeps_rows_inside_finality_grace() -> None:
     ]
 
 
+def test_latest_observation_rejects_rows_after_current_interval() -> None:
+    runtime._set_clock_override(lambda: datetime(2024, 1, 1, 0, 30, tzinfo=UTC))
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=_provider_frame((0, 2)),
+            observed=(ObservedWindow(START, END),),
+        )
+    )
+
+    with pytest.raises(ProviderError, match="beyond the latest observable interval"):
+        ProviderRuntime(provider).observe_latest(REQUEST)
+
+
+def test_latest_fetch_leaves_future_observation_tail_missing() -> None:
+    runtime._set_clock_override(lambda: datetime(2024, 1, 1, 0, 30, tzinfo=UTC))
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=pl.DataFrame(schema=PROVIDER_BAR_SCHEMA),
+            observed=(ObservedWindow(START, END),),
+        )
+    )
+    bars = MarketData(provider=provider).bars(
+        exchange="coinbase",
+        symbol="ETH/USD",
+        market="spot",
+        timeframe="1h",
+    )
+
+    result = bars.fetch(START, END, mode=BarFetchMode.LATEST)
+
+    assert result.covered == ()
+    assert [(gap.start, gap.end, gap.status) for gap in result.gaps] == [
+        (START, datetime(2024, 1, 1, 1, tzinfo=UTC), CoverageStatus.UNAVAILABLE),
+        (datetime(2024, 1, 1, 1, tzinfo=UTC), END, CoverageStatus.MISSING),
+    ]
+
+
 def test_runtime_rejects_identity_columns_in_provider_frame() -> None:
     provider = FakeProvider(
         observation=BarObservation(

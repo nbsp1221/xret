@@ -301,7 +301,7 @@ Canonical open-interest artifacts may contain ordered, non-overlapping contribut
 
 ## 0.6.0 migration
 
-`BarDataset.fetch()` now requires the keyword-only `mode` argument. Use `BarFetchMode.LATEST` when the application needs the provider's current observation, including a forming bar when available, and `BarFetchMode.FINAL` when it needs only rows beyond Xret's finality grace. `sync()` remains final-only regardless of prior fetches and is the only bar operation that can publish canonical state.
+`BarDataset.fetch()` now requires the keyword-only `mode` argument. Use `BarFetchMode.LATEST` when the application needs the provider's current observation, including a forming bar when available, and `BarFetchMode.FINAL` when it needs only rows beyond Xret's finality grace. An explicit `LATEST` range may extend into the future, but Xret accepts evidence only through the interval open when observation began; later coverage remains `missing`, and provider rows beyond that boundary are rejected. `sync()` remains final-only regardless of prior fetches and is the only bar operation that can publish canonical state.
 
 `LiveMarketData.subscribe_bar_updates()` no longer accepts `bootstrap`. It starts only the live stream and performs no historical request, buffering, or snapshot merge. Applications that compose historical and live data own timestamp overlap, deduplication, boundary reconciliation, and reconnect backfill. Xret provides no compatibility alias because retaining `bootstrap` would preserve the removed responsibility boundary.
 

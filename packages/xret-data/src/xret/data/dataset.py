@@ -364,7 +364,11 @@ class BarDataset:
             error_cls=ProviderError,
         )
         observable_end = (
-            request.end
+            provider_runtime.latest_observable_end(
+                time_bar,
+                request.end,
+                observation.evidence_at,
+            )
             if mode is BarFetchMode.LATEST
             else _finalizable_end(
                 time_bar,
