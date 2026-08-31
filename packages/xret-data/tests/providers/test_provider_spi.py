@@ -16,7 +16,7 @@ from xret.data.errors import (
     UnsupportedMarketError,
 )
 from xret.data.market_data import MarketData
-from xret.data.models import BarRequest, CoverageStatus, MarketIdentity
+from xret.data.models import BarFetchMode, BarRequest, CoverageStatus, MarketIdentity
 from xret.data.providers import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -213,7 +213,7 @@ def test_runtime_accepts_a_structural_provider_without_inheritance() -> None:
     provider = FakeProvider()
     structurally_typed: HistoricalBarProvider = provider
 
-    result = ProviderRuntime(structurally_typed).observe(REQUEST)
+    result = ProviderRuntime(structurally_typed).observe_final(REQUEST)
 
     assert result.frame.schema == OHLCV_SCHEMA
     assert result.frame["exchange"].to_list() == ["coinbase"] * 3
@@ -237,7 +237,7 @@ def test_runtime_rejects_wrong_spi_major_before_provider_io() -> None:
     )
 
     with pytest.raises(ProviderError, match="API version"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
     assert provider.resolve_calls == 0
     assert provider.observe_calls == 0
@@ -254,7 +254,7 @@ def test_runtime_rejects_provider_changing_canonical_identity() -> None:
     )
 
     with pytest.raises(ProviderError, match="changed canonical"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
 
 def test_runtime_rejects_unsupported_market_timeframe_before_observation() -> None:
@@ -268,7 +268,7 @@ def test_runtime_rejects_unsupported_market_timeframe_before_observation() -> No
     )
 
     with pytest.raises(UnsupportedMarketError, match="does not support timeframe"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
     assert provider.observe_calls == 0
 
@@ -281,7 +281,7 @@ def test_runtime_accepts_partial_observation_evidence() -> None:
         )
     )
 
-    result = ProviderRuntime(provider).observe(REQUEST)
+    result = ProviderRuntime(provider).observe_final(REQUEST)
 
     assert result.observed == (ObservedWindow(START, datetime(2024, 1, 1, 1, tzinfo=UTC)),)
     assert result.frame.height == 1
@@ -302,7 +302,7 @@ def test_runtime_rejects_overlapping_observation_evidence() -> None:
     )
 
     with pytest.raises(ProviderError, match="ordered and non-overlapping"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
 
 def test_runtime_rejects_mutable_observation_window_collection() -> None:
@@ -313,7 +313,7 @@ def test_runtime_rejects_mutable_observation_window_collection() -> None:
     )
 
     with pytest.raises(ProviderError, match="must be a tuple"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
 
 def test_runtime_rejects_null_timestamp_as_provider_error() -> None:
@@ -328,7 +328,7 @@ def test_runtime_rejects_null_timestamp_as_provider_error() -> None:
     )
 
     with pytest.raises(ProviderError, match="null timestamps"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
 
 def test_runtime_separates_evidence_and_completion_times() -> None:
@@ -346,7 +346,7 @@ def test_runtime_separates_evidence_and_completion_times() -> None:
     )
     runtime._set_clock_override(lambda: next(samples))
 
-    result = ProviderRuntime(provider).observe(REQUEST)
+    result = ProviderRuntime(provider).observe_final(REQUEST)
 
     assert result.evidence_at == datetime(2024, 1, 1, 1, 0, 4, tzinfo=UTC)
     assert result.completed_at == datetime(2024, 1, 1, 1, 0, 6, tzinfo=UTC)
@@ -429,27 +429,64 @@ def test_runtime_accepts_exact_schema_empty_exhaustive_observation() -> None:
         )
     )
 
-    result = ProviderRuntime(provider).observe(REQUEST)
+    result = ProviderRuntime(provider).observe_final(REQUEST)
 
     assert result.frame.schema == OHLCV_SCHEMA
     assert result.frame.is_empty()
 
 
-def test_recent_closed_observation_keeps_rows_inside_finality_grace() -> None:
+def test_latest_observation_keeps_rows_inside_finality_grace() -> None:
     now = datetime(2024, 1, 1, 3, 0, 2, tzinfo=UTC)
     runtime._set_clock_override(lambda: now)
     provider = FakeProvider()
     provider_runtime = ProviderRuntime(provider)
 
-    canonical = provider_runtime.observe(REQUEST)
-    recent = provider_runtime.observe_recent_closed(REQUEST, market=provider.market)
+    final = provider_runtime.observe_final(REQUEST)
+    latest = provider_runtime.observe_latest(REQUEST, market=provider.market)
 
-    assert canonical.frame["timestamp"].to_list() == [
+    assert final.frame["timestamp"].to_list() == [
         datetime(2024, 1, 1, 0, tzinfo=UTC),
         datetime(2024, 1, 1, 1, tzinfo=UTC),
     ]
-    assert recent.frame["timestamp"].to_list() == [
+    assert latest.frame["timestamp"].to_list() == [
         datetime(2024, 1, 1, hour, tzinfo=UTC) for hour in range(3)
+    ]
+
+
+def test_latest_observation_rejects_rows_after_current_interval() -> None:
+    runtime._set_clock_override(lambda: datetime(2024, 1, 1, 0, 30, tzinfo=UTC))
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=_provider_frame((0, 2)),
+            observed=(ObservedWindow(START, END),),
+        )
+    )
+
+    with pytest.raises(ProviderError, match="beyond the latest observable interval"):
+        ProviderRuntime(provider).observe_latest(REQUEST)
+
+
+def test_latest_fetch_leaves_future_observation_tail_missing() -> None:
+    runtime._set_clock_override(lambda: datetime(2024, 1, 1, 0, 30, tzinfo=UTC))
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=pl.DataFrame(schema=PROVIDER_BAR_SCHEMA),
+            observed=(ObservedWindow(START, END),),
+        )
+    )
+    bars = MarketData(provider=provider).bars(
+        exchange="coinbase",
+        symbol="ETH/USD",
+        market="spot",
+        timeframe="1h",
+    )
+
+    result = bars.fetch(START, END, mode=BarFetchMode.LATEST)
+
+    assert result.covered == ()
+    assert [(gap.start, gap.end, gap.status) for gap in result.gaps] == [
+        (START, datetime(2024, 1, 1, 1, tzinfo=UTC), CoverageStatus.UNAVAILABLE),
+        (datetime(2024, 1, 1, 1, tzinfo=UTC), END, CoverageStatus.MISSING),
     ]
 
 
@@ -462,7 +499,7 @@ def test_runtime_rejects_identity_columns_in_provider_frame() -> None:
     )
 
     with pytest.raises(ProviderError, match="schema mismatch"):
-        ProviderRuntime(provider).observe(REQUEST)
+        ProviderRuntime(provider).observe_final(REQUEST)
 
 
 def test_runtime_chains_unknown_provider_failure() -> None:
@@ -475,7 +512,7 @@ def test_runtime_chains_unknown_provider_failure() -> None:
             raise RuntimeError("native client exploded")
 
     with pytest.raises(ProviderError, match="native client exploded") as captured:
-        ProviderRuntime(BrokenProvider()).observe(REQUEST)
+        ProviderRuntime(BrokenProvider()).observe_final(REQUEST)
 
     assert isinstance(captured.value.__cause__, RuntimeError)
 
@@ -487,7 +524,7 @@ def test_runtime_chains_direct_provider_descriptor_failure() -> None:
             raise RuntimeError("descriptor exploded")
 
     with pytest.raises(ProviderError, match="descriptor access failed") as captured:
-        ProviderRuntime(BrokenDescriptorProvider()).observe(REQUEST)  # type: ignore[arg-type]
+        ProviderRuntime(BrokenDescriptorProvider()).observe_final(REQUEST)  # type: ignore[arg-type]
 
     assert isinstance(captured.value.__cause__, RuntimeError)
 
@@ -502,7 +539,7 @@ def test_direct_provider_fetch_uses_public_api_without_storage_side_effects(tmp_
         timeframe="1h",
     )
 
-    result = bars.fetch(START, END)
+    result = bars.fetch(START, END, mode=BarFetchMode.FINAL)
 
     assert result.data.height == 3
     assert result.is_complete
@@ -581,8 +618,8 @@ def test_named_provider_discovery_is_lazy_and_cached(
     assert calls == []
     assert bars.scan_partial(START, END).data.collect().is_empty()
     assert calls == []
-    assert bars.fetch(START, END).data.height == 3
-    assert bars.fetch(START, END).data.height == 3
+    assert bars.fetch(START, END, mode=BarFetchMode.FINAL).data.height == 3
+    assert bars.fetch(START, END, mode=BarFetchMode.FINAL).data.height == 3
     assert calls == [discovery.ENTRY_POINT_GROUP]
 
 
@@ -602,7 +639,7 @@ def test_direct_provider_bypasses_installed_discovery(
             market="spot",
             timeframe="1h",
         )
-        .fetch(START, END)
+        .fetch(START, END, mode=BarFetchMode.FINAL)
     )
 
     assert result.data.height == 3
@@ -620,7 +657,7 @@ def test_named_provider_rejects_unknown_and_duplicate_entry_points(
         exchange="coinbase", symbol="ETH/USD", market="spot", timeframe="1h"
     )
     with pytest.raises(ProviderError, match="unknown installed provider"):
-        unknown.fetch(START, END)
+        unknown.fetch(START, END, mode=BarFetchMode.FINAL)
 
     _installed_entry_points(
         monkeypatch,
@@ -631,7 +668,7 @@ def test_named_provider_rejects_unknown_and_duplicate_entry_points(
         exchange="coinbase", symbol="ETH/USD", market="spot", timeframe="1h"
     )
     with pytest.raises(ProviderError, match="duplicate installed provider"):
-        duplicate.fetch(START, END)
+        duplicate.fetch(START, END, mode=BarFetchMode.FINAL)
 
 
 @pytest.mark.parametrize(
@@ -655,7 +692,7 @@ def test_named_provider_chains_load_and_factory_failures(
     )
 
     with pytest.raises(ProviderError, match=message) as captured:
-        bars.fetch(START, END)
+        bars.fetch(START, END, mode=BarFetchMode.FINAL)
 
     assert isinstance(captured.value.__cause__, cause_type)
 
@@ -697,7 +734,7 @@ def test_named_provider_validates_factory_contract_before_market_io(
     )
 
     with pytest.raises(ProviderError, match=message):
-        bars.fetch(START, END)
+        bars.fetch(START, END, mode=BarFetchMode.FINAL)
 
 
 class RangeProvider:

@@ -10,7 +10,7 @@ This page records combinations that Xret has exercised as an external user would
 | What historical trade-bar evidence exists? | 29 venue rows across 45 exact market-family and settlement scopes; see the historical matrix below. |
 | What derivative-family evidence exists? | One exact Binance Data Vision OI archive scope: Binance `BTC/USDT` USDⓈ-M linear perpetual, `5m`, for the 2020-09-01 UTC object. |
 | Are any CCXT settled-funding, reference-bar, or OI combinations verified? | No. They are capability-available and runtime-validated where advertised, but no such combination is promoted by this page. |
-| What live evidence exists? | 6 exact scopes across Binance, Bybit, and OKX, all for the `1m` initial snapshot-to-live handoff. |
+| What live evidence exists? | 6 exact `1m` trade-bar stream scopes across Binance, Bybit, and OKX; a separate quiet-market setup check covers one Hyperliquid HIP-3 scope without promoting its delivery semantics. |
 | Does historical qualification imply live qualification? | No. Historical and live evidence are independent. |
 | Does venue qualification cover every symbol and future provider change? | No. Qualification is scoped evidence, and every actual response is still validated at runtime. |
 | Where are known exclusions recorded? | [Known limitations and scopes not verified](#known-limitations-and-scopes-not-verified). |
@@ -122,20 +122,20 @@ Bitrue perpetuals were not promoted by the current gate; that missing futures sc
 
 ## Currently verified live bars
 
-The live-bar matrix below was structurally requalified on 2026-08-11 from the built `xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. Each combination opened through the public API, completed an initial bootstrap with two recent closed bars followed by the current forming bar in ascending, duplicate-free timestamp order, and closed cleanly without creating canonical state or catalog paths. On 2026-08-24, CCXT Pro 4.5.75 independently observed complete public-trade minutes and matching `watchOHLCV` updates for all six exact scopes. Across 16,403 eligible executions, every scope reproduced trade-derived OHLC and base-asset volume exactly under the declared numeric representation. Zero-price, zero-quantity Binance USD-M stream records were excluded because they are not executed trades.
+The live-bar matrix below was structurally exercised on 2026-08-11 from the built `xret-data` 0.3.0 wheel in a fresh external uv project with CCXT 4.5.71. That release included a historical bootstrap which opened and closed cleanly without creating canonical state or catalog paths; 0.6.0 removed that orchestration and does not retain it as a current claim. On 2026-08-24, CCXT Pro 4.5.75 independently observed complete public-trade minutes and matching `watchOHLCV` updates for all six exact scopes. Across 16,403 eligible executions, every scope reproduced trade-derived OHLC and base-asset volume exactly under the declared numeric representation. Zero-price, zero-quantity Binance USD-M stream records were excluded because they are not executed trades.
 
 | Provider | Venue | Market family | Bar type | Timeframe | Representative symbol |
 |---|---|---|---|---|---|
-| CCXT Pro | Binance | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
-| CCXT Pro | Binance USD-M | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
-| CCXT Pro | Bybit | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
-| CCXT Pro | Bybit | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
-| CCXT Pro | OKX | Spot | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
-| CCXT Pro | OKX | USDT-settled linear perpetual | Initial snapshot-to-live time-bar handoff | `1m` | `BTC/USDT` |
+| CCXT Pro | Binance | Spot | Trade time-bar stream | `1m` | `BTC/USDT` |
+| CCXT Pro | Binance USD-M | USDT-settled linear perpetual | Trade time-bar stream | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | Spot | Trade time-bar stream | `1m` | `BTC/USDT` |
+| CCXT Pro | Bybit | USDT-settled linear perpetual | Trade time-bar stream | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | Spot | Trade time-bar stream | `1m` | `BTC/USDT` |
+| CCXT Pro | OKX | USDT-settled linear perpetual | Trade time-bar stream | `1m` | `BTC/USDT` |
 
-The Binance USD-M qualification additionally exercised the handoff immediately after a one-minute boundary, while the just-closed bar remained provisional under the finality grace period. It produced consecutive `FINAL`, `PROVISIONAL`, and `FORMING` observations without touching canonical storage.
+On 2026-08-30, a fresh Python 3.14 uv consumer installed the built `xret-data` 0.6.0 wheel. A Binance `BTC/USDT` spot `1m` `LATEST` fetch returned the current forming interval while `FINAL` excluded it, and neither created canonical state. The same consumer created a Hyperliquid HIP-3 `XYZ-SMSN/USDC:USDC` `1m` live subscription receipt and closed the session without consuming or waiting for a first bar event. This proves the quiet-market setup behavior only; it does not promote Hyperliquid bar delivery, continuity, or long-running stability into the matrix.
 
-CCXT Pro may attempt provider-advertised scopes outside this table. The matrix is a connectivity, canonical semantic normalization, initial-handoff, multiplexing, and lifecycle qualification claim for the exact rows shown. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
+CCXT Pro may attempt provider-advertised scopes outside this table. The matrix is a connectivity, canonical semantic normalization, multiplexing, and lifecycle qualification claim for the exact rows shown. It does not prove uninterrupted continuity, exhaustive delivery, canonical persistence of live observations, reconnect behavior, or long-running stability. Xret exposes disconnects and overflow as terminal failures rather than extending this matrix into those claims.
 
 ## Evidence history
 

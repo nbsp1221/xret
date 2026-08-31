@@ -5,7 +5,7 @@ Use explicit verbs to control provider access, canonical storage, and local cove
 ## Bind one dataset
 
 ```python
-from xret.data import MarketData
+from xret.data import BarFetchMode, MarketData
 
 bars = MarketData().bars(
     exchange="binance",
@@ -41,13 +41,17 @@ Funding accepts arbitrary UTC half-open bounds. Reference and OI bounds must ali
 ## Fetch without storing
 
 ```python
-remote = bars.fetch(start="2025-01-01", end="2025-01-02")
+remote = bars.fetch(
+    start="2025-01-01",
+    end="2025-01-02",
+    mode=BarFetchMode.FINAL,
+)
 frame = remote.data
 print(remote.source)
 print(remote.gaps)
 ```
 
-`fetch` always uses the selected provider and never reads or changes canonical local state. Trade bars return `FetchResult`; the derivative families return their corresponding funding, reference-bar, or OI fetch result. Every result contains an eager Polars frame plus coverage, gaps, provider evidence, warnings, `is_complete`, and `require_complete()`. Exhaustive observed windows can prove absence; otherwise only validated returned facts are covered and every unproved remainder is an explicit `missing` gap.
+`fetch` always uses the selected provider and never reads or changes canonical local state. Trade-bar callers must choose `BarFetchMode.LATEST` for the provider's current observation, including a forming or recently closed bar when returned, or `BarFetchMode.FINAL` for rows beyond Xret's finality grace. The derivative families retain their family-specific finality contracts and corresponding funding, reference-bar, or OI fetch result. Every result contains an eager Polars frame plus coverage, gaps, provider evidence, warnings, `is_complete`, and `require_complete()`. Exhaustive observed windows can prove absence; otherwise only validated returned facts are covered and every unproved remainder is an explicit `missing` gap.
 
 Require completeness explicitly when the application needs the entire interval:
 

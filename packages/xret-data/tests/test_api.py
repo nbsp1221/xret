@@ -27,7 +27,14 @@ from xret.data.errors import (
     UnsupportedMarketError,
 )
 from xret.data.market_data import MarketData
-from xret.data.models import CoverageInterval, CoverageStatus, DatasetKey, MarketIdentity, YearMonth
+from xret.data.models import (
+    BarFetchMode,
+    CoverageInterval,
+    CoverageStatus,
+    DatasetKey,
+    MarketIdentity,
+    YearMonth,
+)
 from xret.data.providers import (
     PROVIDER_API_VERSION,
     PROVIDER_BAR_SCHEMA,
@@ -200,7 +207,7 @@ def test_fetch_has_no_storage_side_effect(tmp_path: Path) -> None:
     _register(exchange)
     provider_runtime._set_clock_override(lambda: _now(5))
 
-    result = _bars(_market_data(config)).fetch(_now(0), _now(3))
+    result = _bars(_market_data(config)).fetch(_now(0), _now(3), mode=BarFetchMode.FINAL)
 
     assert result.data.height == 3
     assert result.is_complete
@@ -208,6 +215,39 @@ def test_fetch_has_no_storage_side_effect(tmp_path: Path) -> None:
     assert len(exchange.fetch_calls) == 1
     assert not config.state_dir.exists()
     assert not config.data_dir.exists()
+
+
+def test_fetch_rejects_non_enum_mode_before_provider_io(tmp_path: Path) -> None:
+    config = _configure(tmp_path)
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
+    _register(exchange)
+
+    with pytest.raises(InvalidRequestError, match="mode must be a BarFetchMode"):
+        _bars(_market_data(config)).fetch(
+            _now(0),
+            _now(3),
+            mode="latest",  # type: ignore[arg-type]
+        )
+
+    assert exchange.fetch_calls == []
+    assert not config.state_dir.exists()
+    assert not config.data_dir.exists()
+
+
+def test_latest_fetch_cannot_promote_nonfinal_bars_during_sync(tmp_path: Path) -> None:
+    config = _configure(tmp_path)
+    exchange = FakeExchange(candles=_hourly_candles(range(0, 3)))
+    _register(exchange)
+    provider_runtime._set_clock_override(lambda: _now(2) + timedelta(seconds=1))
+    bars = _bars(_market_data(config))
+
+    latest = bars.fetch(_now(0), _now(3), mode=BarFetchMode.LATEST)
+    synced = bars.sync(_now(0), _now(3))
+    stored = bars.scan_partial(_now(0), _now(3)).data.collect()
+
+    assert latest.data["timestamp"].to_list() == [_now(0), _now(1), _now(2)]
+    assert synced.fetched_rows == 1
+    assert stored["timestamp"].to_list() == [_now(0)]
 
 
 # --------------------------------------------------------------------------
@@ -649,7 +689,7 @@ def test_non_finite_volume_never_reaches_canonical_storage(tmp_path: Path) -> No
     bars = _bars(_market_data(config))
 
     with pytest.raises(ProviderError, match="volume.non_finite"):
-        bars.fetch(_now(0), _now(2))
+        bars.fetch(_now(0), _now(2), mode=BarFetchMode.FINAL)
     with pytest.raises(ProviderError, match="volume.non_finite"):
         bars.sync(_now(0), _now(2))
 
@@ -1501,7 +1541,7 @@ def test_unlisted_symbol_raises_unsupported_market_error(tmp_path: Path) -> None
     _register(exchange)
 
     with pytest.raises(UnsupportedMarketError):
-        _bars(_market_data(config)).fetch(_now(0), _now(1))
+        _bars(_market_data(config)).fetch(_now(0), _now(1), mode=BarFetchMode.FINAL)
 
 
 def test_unsupported_timeframe_raises_unsupported_market_error(tmp_path: Path) -> None:
@@ -1511,7 +1551,7 @@ def test_unsupported_timeframe_raises_unsupported_market_error(tmp_path: Path) -
     provider_runtime._set_clock_override(lambda: _now(5))
 
     with pytest.raises(UnsupportedMarketError):
-        _bars(_market_data(config)).fetch(_now(0), _now(1))
+        _bars(_market_data(config)).fetch(_now(0), _now(1), mode=BarFetchMode.FINAL)
 
 
 # --------------------------------------------------------------------------

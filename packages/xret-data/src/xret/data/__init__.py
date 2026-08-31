@@ -16,6 +16,7 @@ from xret.data.live import LiveMarketData
 from xret.data.market_data import MarketData
 from xret.data.models import (
     Availability,
+    BarFetchMode,
     BarFinality,
     BarUpdate,
     CapabilityNotice,
@@ -65,6 +66,7 @@ __all__ = [
     "OpenInterestSyncResult",
     "OpenInterestPartialScanResult",
     "BarUpdate",
+    "BarFetchMode",
     "BarFinality",
     "Availability",
     "CapabilityNotice",

@@ -26,6 +26,7 @@
 - `SettledFundingKey`
 - `OpenInterestKey`
 - `BarUpdate`
+- `BarFetchMode`
 - `BarFinality`
 - `Availability`
 - `CapabilityNotice`
@@ -189,7 +190,7 @@ Binds a one-shot asynchronous live session for one canonical exchange and perfor
 
 ```python
 async with market_data.live(exchange="binance") as live:
-    receipt = await live.subscribe_bar_updates(bars, bootstrap=True)
+    receipt = await live.subscribe_bar_updates(bars)
     print(receipt.source, receipt.warnings)
     async for update in live:
         ...
@@ -220,9 +221,9 @@ The separately selected installed provider `MarketData(provider="binance-data-vi
 
 Canonical OI artifacts carry ordered, non-overlapping contributor ranges. The catalog separately indexes immutable provider ownership, so a sync selected with the wrong provider fails before publication even when the range is already covered. Data Vision re-observes requested archive days to detect checksum changes; a changed revision set-replaces rows and coverage only inside the same owned certified interval, including deletions, while preserving disjoint contributors. Cross-provider overlap is fetch-only qualification evidence and differing same-key canonical values fail without choosing a winner.
 
-`subscribe_bar_updates(bars, *, bootstrap=False) -> LiveSubscription` starts live-only delivery by default and returns the resolved dataset identity, provider evidence, normalization identifiers, and initial warnings. With `bootstrap=True`, Xret buffers the activated live stream, observes the two most recent closed intervals through the same provider, coalesces timestamp overlap with the last buffered live value taking precedence, emits the bootstrap sequence in ascending timestamp order, and then continues live delivery. The operation performs remote I/O but never reads or changes canonical storage.
+`subscribe_bar_updates(bars) -> LiveSubscription` starts live-only delivery and returns the resolved dataset identity, provider evidence, normalization identifiers, and initial warnings after the provider session's subscription method completes. The receipt does not claim a provider-level acknowledgement, first event, historical/live continuity, or canonical coverage. The operation never performs historical observation or reads or changes canonical storage.
 
-Same-timestamp updates are valid after bootstrap. Backward timestamps, provider failures, malformed events, and bounded queue or bootstrap-buffer overflow fail the whole session with `ProviderError`; Xret does not silently retry, reconnect, or drop old events. Ordering is nondecreasing per dataset, not globally across different datasets in one session. A non-boolean `bootstrap` value raises `InvalidRequestError` before provider I/O. See [Consume live bar updates](../guides/live-bars.md) for lifecycle and continuity guidance.
+Same-timestamp updates are valid. Backward timestamps, provider failures, malformed events, and bounded queue overflow fail the whole session with `ProviderError`; Xret does not silently retry, reconnect, or drop old events. Ordering is nondecreasing per dataset, not globally across different datasets in one session. See [Consume live bar updates](../guides/live-bars.md) for lifecycle and continuity guidance.
 
 ## Time ranges
 
@@ -231,10 +232,14 @@ Every data verb requires `start` and accepts optional `end`. Inputs may be timez
 ## `BarDataset.fetch`
 
 ```python
-fetch(start, end=None) -> FetchResult
+fetch(start, end=None, *, mode: BarFetchMode) -> FetchResult
 ```
 
-Always calls the provider and returns validated completed bars in `result.data`, an eager Polars frame. It never reads or writes canonical local state. With omitted `end`, provider finalization grace determines the latest completed bar boundary.
+Always calls the provider and returns validated bars in `result.data`, an eager Polars frame. It never reads or writes canonical local state. `mode` is required and accepts only the public enum values `BarFetchMode.LATEST` and `BarFetchMode.FINAL`.
+
+`LATEST` preserves every valid row the provider returns inside the request, including a forming interval or a time-closed bar still inside Xret's finality grace. With omitted `end`, Xret requests through the exclusive boundary after the interval open at call time. Xret does not synthesize a current bar when the provider returns none.
+
+`FINAL` filters out rows that have not passed Xret's finality grace. With omitted `end`, the grace determines the latest requested boundary. Neither mode changes the validation of identity, bounds, ordering, duplicates, OHLC relationships, or base-volume semantics, and neither mode makes a row canonical or eligible for persistence.
 
 An endpoint with a maintained bounded-window policy traverses explicit half-open windows and can prove both present and absent bars. An endpoint without that policy uses conservative forward pagination: validated returned bars prove only their own intervals, and every unproved remainder stays `missing`. Qualification is not consulted. Ignored bounds, malformed rows, conflicting duplicates, non-progress, unsupported provider capability, or known exact incompatibility still fails explicitly.
 
@@ -293,6 +298,12 @@ Trade bars retain their existing paths. Settled funding, reference bars, and ope
 Rebuild restores file facts and only row-provable coverage. Trade, reference, and OI rows reconstruct contiguous `available` grids; missing slots and previous `unavailable` evidence return to `missing`. Funding rows do not prove exhaustive observation around irregular events, so funding files are indexed but funding completeness is not reconstructed. Ingestion runs, warnings, quality events, unavailable-only datasets, and other catalog-only history are not invented.
 
 Canonical open-interest artifacts may contain ordered, non-overlapping contributor ranges from different providers. Catalog v6 reconstructs that ownership from Parquet and rejects synchronization by a provider that does not own the requested range. Other families retain one stable provider-name lineage per dataset. Xret has no automatic Parquet repair, cause taxonomy, synthetic values, in-place schema migration, or down-migration.
+
+## 0.6.0 migration
+
+`BarDataset.fetch()` now requires the keyword-only `mode` argument. Use `BarFetchMode.LATEST` when the application needs the provider's current observation, including a forming bar when available, and `BarFetchMode.FINAL` when it needs only rows beyond Xret's finality grace. An explicit `LATEST` range may extend into the future, but Xret accepts evidence only through the interval open when observation began; later coverage remains `missing`, and provider rows beyond that boundary are rejected. `sync()` remains final-only regardless of prior fetches and is the only bar operation that can publish canonical state.
+
+`LiveMarketData.subscribe_bar_updates()` no longer accepts `bootstrap`. It starts only the live stream and performs no historical request, buffering, or snapshot merge. Applications that compose historical and live data own timestamp overlap, deduplication, boundary reconciliation, and reconnect backfill. Xret provides no compatibility alias because retaining `bootstrap` would preserve the removed responsibility boundary.
 
 ## 0.5.1 migration
 

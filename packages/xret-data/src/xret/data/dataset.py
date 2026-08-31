@@ -41,6 +41,7 @@ from xret.data.errors import (
     SyncError,
 )
 from xret.data.models import (
+    BarFetchMode,
     BarRequest,
     CoverageInterval,
     CoverageStatus,
@@ -311,16 +312,20 @@ class BarDataset:
         self,
         start: str | datetime,
         end: str | datetime | None = None,
+        *,
+        mode: BarFetchMode,
     ) -> FetchResult:
-        """Fetch completed bars directly from the provider (Decision 12).
+        """Fetch the selected bar observation directly from the provider.
 
         Always uses the remote provider. Never reads or writes canonical
-        files or catalog coverage. Returns completed canonical rows together
-        with provider evidence, observation coverage, gaps, and warnings.
+        files or catalog coverage. Returns normalized provider observations
+        together with provider evidence, observation coverage, gaps, and
+        warnings.
 
-        `start` is required. When `end` is omitted, it resolves to the end
-        of the latest completed bar at call time, honoring the provider's
-        finalization grace (IR-3).
+        `mode=BarFetchMode.LATEST` preserves forming and recently closed bars
+        when the provider returns them. `mode=BarFetchMode.FINAL` keeps only
+        bars beyond Xret's finality grace. When `end` is omitted, the selected
+        mode determines the exclusive request boundary.
 
         Raises:
             UnsupportedMarketError: an unlisted symbol, an unsupported
@@ -329,31 +334,53 @@ class BarDataset:
             ProviderError: the provider call failed, or the fetched batch
                 failed fatal data-quality validation (P-1).
         """
+        if not isinstance(mode, BarFetchMode):
+            raise InvalidRequestError("mode must be a BarFetchMode")
         time_bar = TimeBar.parse(self.timeframe)
         start_dt = parse_time_input(start)
-        end_dt = provider_runtime.default_end(time_bar) if end is None else parse_time_input(end)
+        if end is None:
+            end_dt = (
+                provider_runtime.latest_end(time_bar)
+                if mode is BarFetchMode.LATEST
+                else provider_runtime.default_end(time_bar)
+            )
+        else:
+            end_dt = parse_time_input(end)
         validate_range(start_dt, end_dt)
         _validate_aligned_range(time_bar, start_dt, end_dt)
         request = BarRequest(
             identity=self.identity, timeframe=self.timeframe, start=start_dt, end=end_dt
         )
         provider = self._effective_provider()
-        observation = ProviderRuntime(provider).observe(request)
+        runtime = ProviderRuntime(provider)
+        observation = (
+            runtime.observe_latest(request)
+            if mode is BarFetchMode.LATEST
+            else runtime.observe_final(request)
+        )
         quality_result = quality.enforce_ohlcv_batch(
             observation.frame,
             request,
             error_cls=ProviderError,
         )
-        finalizable_end = _finalizable_end(
-            time_bar,
-            request.end,
-            observation.evidence_at,
+        observable_end = (
+            provider_runtime.latest_observable_end(
+                time_bar,
+                request.end,
+                observation.evidence_at,
+            )
+            if mode is BarFetchMode.LATEST
+            else _finalizable_end(
+                time_bar,
+                request.end,
+                observation.evidence_at,
+            )
         )
         coverage = evaluate_observation_coverage(
             time_bar=time_bar,
             start=request.start,
             end=request.end,
-            finalizable_end=finalizable_end,
+            finalizable_end=observable_end,
             timestamps=observation.frame.get_column("timestamp").to_list(),
             observed=observation.observed,
         )
@@ -504,7 +531,7 @@ class BarDataset:
                     )
                     if resolved_market is None:
                         resolved_market = runtime_context.resolve_market(resolved_identity)
-                    observation = runtime_context.observe(
+                    observation = runtime_context.observe_final(
                         request,
                         market=resolved_market,
                     )

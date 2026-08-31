@@ -27,14 +27,14 @@ These answers are deliberately independent. A provider can advertise an operatio
 | Unsafe response | Fail explicitly with a domain error before unsafe data is returned or committed. |
 | Incomplete historical evidence | Return explicit gaps; `require_complete()` raises when the caller requires the full range. |
 
-Warnings report facts observed during the current operation, such as partial coverage or a partial live bootstrap. Xret does not warn merely because it has not previously qualified an otherwise available scope.
+Warnings report facts observed during the current operation, such as partial coverage or provider normalization. Xret does not warn merely because it has not previously qualified an otherwise available scope.
 
 ## Historical coverage is separate
 
 A successful historical call can still be incomplete. Some endpoints support exact bounded traversal, while others expose only recent or presence-only history. `FetchResult` and `SyncResult` therefore report `covered`, `gaps`, and `is_complete`.
 
 ```python
-from xret.data import MarketData
+from xret.data import BarFetchMode, MarketData
 
 bars = MarketData().bars(
     exchange="kraken",
@@ -43,7 +43,11 @@ bars = MarketData().bars(
     timeframe="1m",
 )
 
-result = bars.fetch("2026-08-24T00:00:00Z", "2026-08-24T00:05:00Z")
+result = bars.fetch(
+    "2026-08-24T00:00:00Z",
+    "2026-08-24T00:05:00Z",
+    mode=BarFetchMode.FINAL,
+)
 
 print(result.source)
 print(result.is_complete, result.gaps)

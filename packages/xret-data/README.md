@@ -27,21 +27,21 @@ result.require_complete()
 df = bars.scan("2024-01-01", "2024-06-01").collect()
 ```
 
-Live bars use an explicit async session and never change historical storage. Opt into a recent snapshot-to-live handoff when the consumer needs an ordered transition from historical data:
+Live bars use an explicit async session and never fetch or change historical storage. Applications compose historical and live observations according to their own continuity policy:
 
 ```python
 async with md.live(exchange="binance") as live:
-    await live.subscribe_bar_updates(bars, bootstrap=True)
+    await live.subscribe_bar_updates(bars)
     update = await anext(live)
 ```
 
 ## Key contracts
 
-- `fetch` — remote-only observation, never touches local state
+- `fetch` — explicit latest or final remote-only bar observation, never touches local state
 - `sync` — reconcile missing coverage, commit validated Parquet
 - `scan` — strict local read, raises `CoverageError` on gaps
 - `scan_partial` — local read with structured gap reporting
-- `live` — explicit async trade-bar delivery and optional recent bootstrap, never writes historical state
+- `live` — explicit async trade-bar delivery, never fetches or writes historical state
 - `MarketData(provider="binance-data-vision")` — qualified Binance `BTC/USDT` USDⓈ-M `5m` OI archives only; no CCXT or REST fallback
 
 ## Links

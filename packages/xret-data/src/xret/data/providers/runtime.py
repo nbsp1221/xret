@@ -182,6 +182,20 @@ def default_end(time_bar: TimeBar, *, grace: timedelta = DEFAULT_FINALITY_GRACE)
     return time_bar.floor(_clock() - grace)
 
 
+def latest_end(time_bar: TimeBar) -> datetime:
+    """Return the exclusive boundary after the interval open at call time."""
+    return time_bar.next_boundary(time_bar.floor(_clock()))
+
+
+def latest_observable_end(
+    time_bar: TimeBar,
+    request_end: datetime,
+    evidence_at: datetime,
+) -> datetime:
+    """Cap latest evidence at the boundary after the interval open when observed."""
+    return min(request_end, time_bar.next_boundary(time_bar.floor(evidence_at)))
+
+
 def _validate_descriptor(descriptor: object) -> ProviderDescriptor:
     if not isinstance(descriptor, ProviderDescriptor):
         raise ProviderError("provider descriptor must be a ProviderDescriptor")
@@ -312,7 +326,7 @@ class ProviderRuntime:
             ) from exc
         return _validate_resolved_market(identity, resolved)
 
-    def observe(
+    def observe_final(
         self,
         request: BarRequest,
         *,
@@ -325,26 +339,34 @@ class ProviderRuntime:
             time_bar.floor(raw.evidence_at - DEFAULT_FINALITY_GRACE),
         )
         finalized = raw.frame.filter(pl.col("timestamp") < finalizable_end)
-        canonical = _xret_frame(finalized, request, raw.market)
-        enforce_ohlcv_batch(canonical, request, error_cls=ProviderError)
-        return self._result(raw, canonical)
+        normalized = _xret_frame(finalized, request, raw.market)
+        enforce_ohlcv_batch(normalized, request, error_cls=ProviderError)
+        return self._result(raw, normalized)
 
-    def observe_recent_closed(
+    def observe_latest(
         self,
         request: BarRequest,
         *,
-        market: ResolvedBarMarket,
+        market: ResolvedBarMarket | None = None,
     ) -> ValidatedBarObservation:
-        """Validate a closed recent window without applying storage finality.
-
-        This internal observation is for transient live bootstrap only. It
-        performs the same provider, range, schema, and OHLCV validation as the
-        canonical path, but it never writes or claims canonical coverage.
-        """
+        """Validate the provider's latest observation without finality filtering."""
         raw = self._observe_provider(request, market=market)
-        recent = _xret_frame(raw.frame, request, raw.market)
-        enforce_ohlcv_batch(recent, request, error_cls=ProviderError)
-        return self._result(raw, recent)
+        time_bar = TimeBar.parse(request.timeframe)
+        observable_end = latest_observable_end(time_bar, request.end, raw.evidence_at)
+        if any(
+            timestamp >= observable_end for timestamp in raw.frame.get_column("timestamp").to_list()
+        ):
+            raise ProviderError(
+                "provider observation contains rows beyond the latest observable interval"
+            )
+        observed = tuple(
+            ObservedWindow(window.start, min(window.end, observable_end))
+            for window in raw.observed
+            if window.start < observable_end
+        )
+        normalized = _xret_frame(raw.frame, request, raw.market)
+        enforce_ohlcv_batch(normalized, request, error_cls=ProviderError)
+        return self._result(raw, normalized, observed=observed)
 
     def _observe_provider(
         self,
@@ -412,6 +434,8 @@ class ProviderRuntime:
         self,
         raw: _ValidatedProviderObservation,
         frame: pl.DataFrame,
+        *,
+        observed: tuple[ObservedWindow, ...] | None = None,
     ) -> ValidatedBarObservation:
         normalizations: tuple[str, ...] = ()
         normalizations_method = getattr(self._provider, "_historical_normalizations", None)
@@ -426,7 +450,7 @@ class ProviderRuntime:
             normalizations = candidate
         return ValidatedBarObservation(
             frame=frame,
-            observed=raw.observed,
+            observed=raw.observed if observed is None else observed,
             market=raw.market,
             source=ProviderSnapshot(
                 descriptor=self._descriptor,

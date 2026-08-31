@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import enum
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import TracebackType
 
@@ -14,7 +14,6 @@ from xret.data.errors import InvalidRequestError, ProviderError
 from xret.data.models import (
     BarUpdate,
     DatasetKey,
-    DataWarning,
     LiveSubscription,
     MarketIdentity,
 )
@@ -37,13 +36,6 @@ class _State(enum.Enum):
 @dataclass(frozen=True, slots=True)
 class _Failure:
     error: BaseException
-
-
-@dataclass(slots=True)
-class _BootstrapGate:
-    buffer: list[BarUpdate] = field(default_factory=list)
-    ready: asyncio.Event = field(default_factory=asyncio.Event)
-    failure: BaseException | None = None
 
 
 def _default_clock() -> datetime:
@@ -72,10 +64,7 @@ class LiveMarketData:
         self._failure_observed = False
         self._consumer: asyncio.Task[object] | None = None
         self._requested: set[tuple[object, str]] = set()
-        self._routes: dict[
-            tuple[MarketIdentity, str],
-            _BootstrapGate | None,
-        ] = {}
+        self._routes: set[tuple[MarketIdentity, str]] = set()
 
     async def __aenter__(self) -> LiveMarketData:
         if self._state is not _State.CREATED:
@@ -147,15 +136,11 @@ class LiveMarketData:
     async def subscribe_bar_updates(
         self,
         bars: BarDataset,
-        *,
-        bootstrap: bool = False,
     ) -> LiveSubscription:
         if self._state is not _State.OPEN or self._runtime is None:
             raise InvalidRequestError("live subscriptions require an open session")
         if not isinstance(bars, BarDataset):
             raise InvalidRequestError("bars must be a BarDataset")
-        if not isinstance(bootstrap, bool):
-            raise InvalidRequestError("bootstrap must be a bool")
         if bars._provider is not self._provider:
             raise InvalidRequestError(
                 "bars must be created by the same MarketData instance as this live session"
@@ -172,8 +157,7 @@ class LiveMarketData:
         key = (resolved.identity, bars.timeframe)
         if key in self._routes:
             raise InvalidRequestError("the same resolved bar dataset is already subscribed")
-        gate = _BootstrapGate() if bootstrap else None
-        self._routes[key] = gate
+        self._routes.add(key)
         try:
             await self._runtime.subscribe_resolved(resolved, bars.timeframe)
         except asyncio.CancelledError:
@@ -182,30 +166,21 @@ class LiveMarketData:
             )
             raise
         except BaseException:
-            self._routes.pop(key, None)
+            self._routes.discard(key)
             raise
         self._requested.add(requested)
         if self._reader is None:
             self._reader = asyncio.create_task(self._read_updates())
-        bootstrap_partial = False
-        if gate is not None:
-            bootstrap_partial = await self._bootstrap(key, gate)
         evidence = self._runtime.subscription_evidence(resolved, bars.timeframe)
-        warnings = list(self._runtime.subscription_warnings(resolved, bars.timeframe))
-        if bootstrap_partial:
-            warnings.append(
-                DataWarning(
-                    "live.bootstrap_partial",
-                    "The recent historical bootstrap did not prove every requested interval",
-                )
-            )
         return LiveSubscription(
             dataset_key=DatasetKey.from_identity(
                 resolved.identity,
                 timeframe=bars.timeframe,
             ),
             source=evidence,
-            warnings=normalized_warnings(warnings),
+            warnings=normalized_warnings(
+                self._runtime.subscription_warnings(resolved, bars.timeframe)
+            ),
         )
 
     def __aiter__(self) -> LiveMarketData:
@@ -244,39 +219,6 @@ class LiveMarketData:
             error = exc if isinstance(exc, ProviderError) else ProviderError(str(exc))
             self._publish_failure(error)
 
-    async def _bootstrap(
-        self,
-        key: tuple[MarketIdentity, str],
-        gate: _BootstrapGate,
-    ) -> bool:
-        assert self._runtime is not None
-        try:
-            await gate.ready.wait()
-            if gate.failure is not None:
-                raise gate.failure
-            snapshot = await self._runtime.recent_closed(key, count=2)
-            if gate.failure is not None:
-                raise gate.failure
-            merged = {update.timestamp: update for update in snapshot.updates}
-            for update in gate.buffer:
-                merged[update.timestamp] = update
-            for timestamp in sorted(merged):
-                if not self._enqueue(merged[timestamp]):
-                    assert self._failure is not None
-                    raise self._failure
-            self._routes[key] = None
-            return not snapshot.is_complete
-        except asyncio.CancelledError:
-            self._publish_failure(
-                ProviderError("live bootstrap was cancelled after subscription activation")
-            )
-            raise
-        except Exception as exc:
-            if self._failure is None:
-                error = exc if isinstance(exc, ProviderError) else ProviderError(str(exc))
-                self._publish_failure(error)
-            raise
-
     def _route_update(self, update: BarUpdate) -> bool:
         if self._failure is not None:
             return False
@@ -284,19 +226,7 @@ class LiveMarketData:
         if key not in self._routes:
             self._publish_failure(ProviderError("live update has no active public subscription"))
             return False
-        gate = self._routes[key]
-        if gate is None:
-            return self._enqueue(update)
-        if len(gate.buffer) >= self._queue.maxsize:
-            self._publish_failure(
-                ProviderError(
-                    f"live bootstrap buffer exceeded its {self._queue.maxsize}-event capacity"
-                )
-            )
-            return False
-        gate.buffer.append(update)
-        gate.ready.set()
-        return True
+        return self._enqueue(update)
 
     def _enqueue(self, update: BarUpdate) -> bool:
         try:
@@ -319,10 +249,6 @@ class LiveMarketData:
         current = asyncio.current_task()
         if reader is not None and reader is not current and not reader.done():
             reader.cancel()
-        for gate in self._routes.values():
-            if gate is not None:
-                gate.failure = error
-                gate.ready.set()
         while not self._queue.empty():
             try:
                 self._queue.get_nowait()
