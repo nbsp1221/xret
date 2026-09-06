@@ -114,14 +114,22 @@ def normalize_segments(segments: Sequence[CoverageSegment]) -> tuple[CoverageSeg
     the later entry in `segments` wins. Adjacent equal-status segments are
     coalesced.
     """
-    if not segments:
+    candidate = tuple(segments)
+    if not candidate:
         return ()
+    if all(
+        left.end < right.start or (left.end == right.start and left.status is not right.status)
+        for left, right in zip(candidate, candidate[1:], strict=False)
+    ):
+        return candidate
 
-    points = sorted({segment.start for segment in segments} | {segment.end for segment in segments})
+    points = sorted(
+        {segment.start for segment in candidate} | {segment.end for segment in candidate}
+    )
     elementary: list[CoverageSegment] = []
     for lo, hi in zip(points, points[1:], strict=False):
         best: CoverageSegment | None = None
-        for segment in segments:
+        for segment in candidate:
             if segment.start > lo or segment.end < hi:
                 continue
             if best is None or _rank(segment.status) <= _rank(best.status):
