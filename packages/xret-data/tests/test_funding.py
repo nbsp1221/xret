@@ -498,6 +498,26 @@ def test_ccxt_pagination_maps_sub_millisecond_bounds_to_discrete_events() -> Non
     assert calls == [(1, 10, {"until": 1})]
 
 
+@pytest.mark.parametrize(
+    ("requested_end_us", "observed_end_us"),
+    ((500, 500), (1500, 1000)),
+)
+def test_non_binance_funding_observation_stays_within_sub_millisecond_request(
+    requested_end_us: int,
+    observed_end_us: int,
+) -> None:
+    start = datetime(1970, 1, 1, tzinfo=UTC)
+    result = paginate_funding_history(
+        exchange_id="bybit",
+        start=start,
+        end=start.replace(microsecond=requested_end_us),
+        page_limit=10,
+        fetch_page=lambda *_: [{"timestamp": 0, "fundingRate": "0.1"}],
+    )
+
+    assert result.observed == (ObservedWindow(start, start.replace(microsecond=observed_end_us)),)
+
+
 def test_ccxt_pagination_rejects_conflict_ignored_bounds_and_no_progress() -> None:
     start = datetime.fromtimestamp(0, tz=UTC)
     end = datetime.fromtimestamp(20, tz=UTC)

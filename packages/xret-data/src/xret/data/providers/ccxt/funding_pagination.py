@@ -158,7 +158,10 @@ def paginate_funding_history(
         observed = (ObservedWindow(start, end),)
     elif rows:
         observed_end_ms = min(end_ms, rows[-1][0] + 1)
-        observed_end = datetime.fromtimestamp(observed_end_ms / 1000, tz=start.tzinfo)
+        observed_end = min(
+            end,
+            datetime.fromtimestamp(observed_end_ms / 1000, tz=start.tzinfo),
+        )
         observed = (ObservedWindow(start, observed_end),)
     else:
         observed = ()
