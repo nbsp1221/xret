@@ -535,10 +535,14 @@ class OpenInterestDataset:
                             for _requested, observation, _rows in observations:
                                 for contributor in observation.contributors:
                                     replacements = tuple(
-                                        segment
+                                        CoverageSegment(
+                                            max(segment.start, contributor.start),
+                                            min(segment.end, contributor.end),
+                                            segment.status,
+                                        )
                                         for segment in segments
-                                        if segment.start >= contributor.start
-                                        and segment.end <= contributor.end
+                                        if segment.start < contributor.end
+                                        and segment.end > contributor.start
                                     )
                                     catalog.replace_coverage_range(
                                         key,
