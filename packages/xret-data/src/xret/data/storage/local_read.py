@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 
 import polars as pl
@@ -169,10 +169,6 @@ def _family_schema_and_timestamp(facts: LocalReadFacts) -> tuple[pl.Schema, str]
     return OPEN_INTEREST_SCHEMA, "timestamp"
 
 
-def _ceil_to_millisecond(value: datetime) -> datetime:
-    return value + timedelta(microseconds=(-value.microsecond) % 1000)
-
-
 def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyFrame:
     """Keep only rows inside `facts.covered`.
 
@@ -188,32 +184,32 @@ def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyF
     Parquet and then failed before recording coverage.
     """
     schema, timestamp = _family_schema_and_timestamp(facts)
-    discrete_bounds = (
-        tuple(
-            (
-                _ceil_to_millisecond(interval.start),
-                _ceil_to_millisecond(interval.end),
-            )
-            for interval in facts.covered
-        )
-        if storage_identity(facts.dataset_key).family is DatasetFamily.SETTLED_FUNDING
-        else tuple((interval.start, interval.end) for interval in facts.covered)
+    funding = storage_identity(facts.dataset_key).family is DatasetFamily.SETTLED_FUNDING
+    comparison_dtype = (
+        pl.Datetime(time_unit="us", time_zone="UTC") if funding else schema[timestamp]
     )
+    if funding:
+        frame = frame.with_columns(pl.col(timestamp).cast(comparison_dtype))
     bounds = pl.LazyFrame(
         {
-            _COVERED_START: [start for start, _end in discrete_bounds],
-            _COVERED_END: [end for _start, end in discrete_bounds],
+            _COVERED_START: [interval.start for interval in facts.covered],
+            _COVERED_END: [interval.end for interval in facts.covered],
         },
         schema={
-            _COVERED_START: schema[timestamp],
-            _COVERED_END: schema[timestamp],
+            _COVERED_START: comparison_dtype,
+            _COVERED_END: comparison_dtype,
         },
     )
-    return (
+    restricted = (
         frame.sort(timestamp)
         .join_asof(bounds, left_on=timestamp, right_on=_COVERED_START, strategy="backward")
         .filter(pl.col(_COVERED_END).is_not_null() & (pl.col(timestamp) < pl.col(_COVERED_END)))
         .drop(_COVERED_START, _COVERED_END)
+    )
+    return (
+        restricted.with_columns(pl.col(timestamp).cast(schema[timestamp]))
+        if funding
+        else restricted
     )
 
 

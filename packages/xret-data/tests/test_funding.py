@@ -144,6 +144,7 @@ def test_local_funding_scan_preserves_sub_millisecond_request_bounds(tmp_path: P
     first_half = dataset.scan(event, event.replace(microsecond=500)).collect()
     second_half = dataset.scan(event.replace(microsecond=500), event.replace(second=1)).collect()
 
+    assert first_half.schema == SETTLED_FUNDING_SCHEMA
     assert first_half.get_column("effective_at").to_list() == [event]
     assert second_half.is_empty()
 
