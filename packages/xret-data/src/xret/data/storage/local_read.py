@@ -2,7 +2,7 @@
 
 This module owns catalog snapshots, locally resolvable perpetual settlement,
 and canonical Parquet selection.  It never applies strict or partial-read
-policy, acquires locks, mutates storage, or contacts a provider.
+policy, acquires locks, mutates canonical state, or contacts a provider.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def read_local_facts_for_key(
     start: datetime,
     end: datetime,
 ) -> LocalReadFacts:
-    """Return coverage facts without creating or repairing local state."""
+    """Return coverage facts without mutating or repairing logical local state."""
     db_path = state_dir / CATALOG_FILE_NAME
     if not db_path.is_file():
         if paths.classify_managed_storage(data_dir) != "empty":

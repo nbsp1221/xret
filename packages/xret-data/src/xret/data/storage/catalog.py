@@ -382,7 +382,11 @@ _CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
 
 
 def _open_read_only_connection(db_path: Path) -> sqlite3.Connection:
-    """Open the live catalog read-only without creating SQLite artifacts."""
+    """Open the live catalog without permitting logical catalog writes.
+
+    SQLite may still create or update WAL/SHM coordination sidecars while it
+    establishes a coherent read snapshot.
+    """
     connection = sqlite3.connect(
         f"{db_path.resolve().as_uri()}?mode=ro",
         uri=True,

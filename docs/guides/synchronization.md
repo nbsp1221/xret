@@ -99,7 +99,7 @@ lazy = bars.scan(start="2025-01-01", end="2025-02-01")
 frame = lazy.collect()
 ```
 
-`scan` never calls the provider and does not change local state. It raises `CoverageError` for any missing or observed-unavailable interval.
+`scan` never calls the provider and does not change canonical Parquet or logical catalog contents. SQLite may create or update `-wal` and `-shm` coordination sidecars while opening a coherent read snapshot. It raises `CoverageError` for any missing or observed-unavailable interval.
 
 ## Inspect partial local coverage
 
