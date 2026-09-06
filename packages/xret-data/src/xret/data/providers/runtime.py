@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -417,10 +418,12 @@ class ProviderRuntime:
         if timestamps.null_count():
             raise ProviderError("provider observation contains null timestamps")
         timestamp_values = timestamps.to_list()
+        observed_starts = tuple(window.start for window in raw.observed)
         for timestamp in timestamp_values:
             if timestamp < request.start or timestamp >= request.end:
                 raise ProviderError("provider observation contains rows outside the request")
-            if not any(window.start <= timestamp < window.end for window in raw.observed):
+            window_index = bisect_right(observed_starts, timestamp) - 1
+            if window_index < 0 or timestamp >= raw.observed[window_index].end:
                 raise ProviderError("provider observation contains a row outside observed windows")
         return _ValidatedProviderObservation(
             frame=frame,

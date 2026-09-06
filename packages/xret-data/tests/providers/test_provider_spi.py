@@ -287,6 +287,35 @@ def test_runtime_accepts_partial_observation_evidence() -> None:
     assert result.frame.height == 1
 
 
+def test_runtime_matches_rows_to_disjoint_observed_windows() -> None:
+    windows = (
+        ObservedWindow(START, datetime(2024, 1, 1, 1, tzinfo=UTC)),
+        ObservedWindow(datetime(2024, 1, 1, 2, tzinfo=UTC), END),
+    )
+    provider = FakeProvider(
+        observation=BarObservation(frame=_provider_frame((0, 2)), observed=windows)
+    )
+
+    result = ProviderRuntime(provider).observe_final(REQUEST)
+
+    assert result.frame.get_column("timestamp").to_list() == [START, START.replace(hour=2)]
+
+
+def test_runtime_rejects_row_in_gap_between_observed_windows() -> None:
+    provider = FakeProvider(
+        observation=BarObservation(
+            frame=_provider_frame((1,)),
+            observed=(
+                ObservedWindow(START, datetime(2024, 1, 1, 1, tzinfo=UTC)),
+                ObservedWindow(datetime(2024, 1, 1, 2, tzinfo=UTC), END),
+            ),
+        )
+    )
+
+    with pytest.raises(ProviderError, match="outside observed windows"):
+        ProviderRuntime(provider).observe_final(REQUEST)
+
+
 def test_runtime_rejects_overlapping_observation_evidence() -> None:
     provider = FakeProvider(
         observation=BarObservation(
