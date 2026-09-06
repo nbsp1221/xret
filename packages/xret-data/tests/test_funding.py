@@ -136,6 +136,18 @@ def test_fetch_round_trips_signed_rates_exact_timestamps_and_nullable_fields(
     assert not config.state_dir.exists() and not config.data_dir.exists()
 
 
+def test_local_funding_scan_preserves_sub_millisecond_request_bounds(tmp_path: Path) -> None:
+    event = _at(1)
+    dataset, _config = _dataset(tmp_path, FundingProvider([(event, 0.1, None, None)]))
+    dataset.sync(event, event.replace(second=1)).require_complete()
+
+    first_half = dataset.scan(event, event.replace(microsecond=500)).collect()
+    second_half = dataset.scan(event.replace(microsecond=500), event.replace(second=1)).collect()
+
+    assert first_half.get_column("effective_at").to_list() == [event]
+    assert second_half.is_empty()
+
+
 def test_funding_observation_normalizations_are_strict_and_positional_compatible() -> None:
     observation = FundingObservation(_provider_frame([]), ())
     assert observation.normalizations == ()
@@ -464,6 +476,25 @@ def test_ccxt_pagination_deduplicates_overlap_and_preserves_no_schedule() -> Non
         ObservedWindow(datetime.fromtimestamp(0, tz=UTC), datetime.fromtimestamp(20, tz=UTC)),
     )
     assert calls == [0, 7001, 19001]
+
+
+def test_ccxt_pagination_maps_sub_millisecond_bounds_to_discrete_events() -> None:
+    calls = []
+
+    def fetch(since, limit, params):
+        calls.append((since, limit, params))
+        return [{"timestamp": 1, "fundingRate": "0.1"}]
+
+    result = paginate_funding_history(
+        exchange_id="binanceusdm",
+        start=datetime(1970, 1, 1, 0, 0, 0, 500, tzinfo=UTC),
+        end=datetime(1970, 1, 1, 0, 0, 0, 1500, tzinfo=UTC),
+        page_limit=10,
+        fetch_page=fetch,
+    )
+
+    assert [row[0] for row in result.rows] == [1]
+    assert calls == [(1, 10, {"until": 1})]
 
 
 def test_ccxt_pagination_rejects_conflict_ignored_bounds_and_no_progress() -> None:
