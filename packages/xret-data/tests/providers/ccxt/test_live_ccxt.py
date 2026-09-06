@@ -58,6 +58,23 @@ class BlockingCloseExchange(FakeExchange):
         self.closed += 1
 
 
+class BlockingLoadExchange(FakeExchange):
+    def __init__(self, *, close_error: Exception | None = None) -> None:
+        super().__init__([])
+        self.load_started = asyncio.Event()
+        self.close_error = close_error
+
+    async def load_markets(self) -> dict[str, object]:
+        self.load_started.set()
+        await asyncio.Event().wait()
+        return {}
+
+    async def close(self) -> None:
+        self.closed += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
 def _market(symbol: str = "BTC/USDT") -> ResolvedBarMarket:
     identity = MarketIdentity(exchange="binance", symbol=symbol, market="spot")
     return ResolvedBarMarket(
@@ -172,6 +189,45 @@ def test_ccxt_live_session_rejects_missing_watch_capability() -> None:
         async with session:
             with pytest.raises(UnsupportedMarketError, match="watchOHLCV"):
                 await session.subscribe_bar_updates(_market(), "1m")
+        assert client.closed == 1
+
+    asyncio.run(scenario())
+
+
+def test_ccxt_live_session_closes_client_cancelled_during_activation() -> None:
+    async def scenario() -> None:
+        client = BlockingLoadExchange()
+        session = CcxtLiveBarSession(exchange="binance", exchange_factory=lambda _: client)
+
+        async with session:
+            subscription = asyncio.create_task(session.subscribe_bar_updates(_market(), "1m"))
+            await client.load_started.wait()
+            subscription.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await subscription
+            assert client.closed == 1
+
+        assert client.closed == 1
+
+    asyncio.run(scenario())
+
+
+def test_ccxt_live_activation_preserves_cancellation_and_close_failure() -> None:
+    async def scenario() -> None:
+        close_failure = RuntimeError("close failed")
+        client = BlockingLoadExchange(close_error=close_failure)
+        session = CcxtLiveBarSession(exchange="binance", exchange_factory=lambda _: client)
+
+        async with session:
+            subscription = asyncio.create_task(session.subscribe_bar_updates(_market(), "1m"))
+            await client.load_started.wait()
+            subscription.cancel()
+            with pytest.raises(BaseExceptionGroup) as captured:
+                await subscription
+
+        cancellation, cleanup_error = captured.value.exceptions
+        assert isinstance(cancellation, asyncio.CancelledError)
+        assert cleanup_error is close_failure
         assert client.closed == 1
 
     asyncio.run(scenario())
