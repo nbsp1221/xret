@@ -214,6 +214,50 @@ def test_caught_subscription_activation_cancellation_leaves_session_failed() -> 
     asyncio.run(scenario())
 
 
+def test_cancellation_and_provider_close_failure_leave_live_session_failed() -> None:
+    class FailingCancellationSession(FakeLiveSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+
+        async def subscribe_bar_updates(
+            self,
+            market: ResolvedBarMarket,
+            timeframe: str,
+        ) -> None:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError as cancellation:
+                raise BaseExceptionGroup(
+                    "activation cancelled and close failed",
+                    [cancellation, RuntimeError("close failed")],
+                ) from None
+
+    async def scenario() -> None:
+        provider = FakeProvider(FailingCancellationSession())
+        market_data = MarketData(provider=provider)
+        bars = market_data.bars(
+            exchange="binance", symbol="BTC/USDT", market="spot", timeframe="1m"
+        )
+
+        with pytest.raises(ProviderError, match="cancelled during provider activation"):
+            async with market_data.live(exchange="binance") as live:
+                subscription = asyncio.create_task(live.subscribe_bar_updates(bars))
+                await provider.session.started.wait()
+                subscription.cancel()
+                with pytest.raises(BaseExceptionGroup):
+                    await subscription
+                assert live._runtime is not None
+                assert not live._runtime._active
+                with pytest.raises(InvalidRequestError, match="require an open session"):
+                    await live.subscribe_bar_updates(bars)
+
+        assert provider.session.exited == 1
+
+    asyncio.run(scenario())
+
+
 def test_live_requires_subscription_before_iteration_and_is_one_shot() -> None:
     async def scenario() -> None:
         live = MarketData(provider=FakeProvider()).live(exchange="binance")

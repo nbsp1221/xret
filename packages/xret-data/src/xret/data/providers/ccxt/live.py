@@ -46,23 +46,17 @@ async def _close_cancelled_activation(
     cancellation: asyncio.CancelledError,
 ) -> None:
     cleanup_task = asyncio.create_task(client.close())
-    try:
-        await asyncio.shield(cleanup_task)
-    except asyncio.CancelledError as cleanup_cancellation:
-        current_task = asyncio.current_task()
-        if current_task is None or not current_task.cancelling():
-            raise BaseExceptionGroup(
-                "CCXT live activation and client close both cancelled",
-                [cancellation, cleanup_cancellation],
-            ) from None
+    while not cleanup_task.done():
         try:
-            await cleanup_task
-        except BaseException as cleanup_error:
-            raise BaseExceptionGroup(
-                "CCXT live activation cancellation and client close both failed",
-                [cancellation, cleanup_error],
-            ) from None
-        raise
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            if not cleanup_task.done():
+                raise
+            break
+    try:
+        cleanup_task.result()
     except BaseException as cleanup_error:
         raise BaseExceptionGroup(
             "CCXT live activation cancellation and client close both failed",
