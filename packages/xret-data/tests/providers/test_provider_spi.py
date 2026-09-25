@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -314,6 +314,61 @@ def test_runtime_rejects_row_in_gap_between_observed_windows() -> None:
 
     with pytest.raises(ProviderError, match="outside observed windows"):
         ProviderRuntime(provider).observe_final(REQUEST)
+
+
+def test_runtime_window_membership_comparisons_scale_below_quadratic() -> None:
+    class CountedDateTime(datetime):
+        comparisons = 0
+
+        def __le__(self, other: datetime) -> bool:
+            type(self).comparisons += 1
+            return super().__le__(other)
+
+        def __gt__(self, other: datetime) -> bool:
+            type(self).comparisons += 1
+            return super().__gt__(other)
+
+    count = 2_000
+    timestamps = [START + timedelta(seconds=index) for index in range(count)]
+    windows = tuple(
+        ObservedWindow(
+            CountedDateTime.fromtimestamp(timestamp.timestamp(), tz=UTC),
+            timestamp + timedelta(seconds=1),
+        )
+        for timestamp in timestamps
+    )
+    frame = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "open": [100.0] * count,
+            "high": [101.0] * count,
+            "low": [99.0] * count,
+            "close": [100.5] * count,
+            "volume": [10.0] * count,
+        },
+        schema=PROVIDER_BAR_SCHEMA,
+    )
+    provider = FakeProvider(
+        observation=BarObservation(frame=frame, observed=windows),
+        market=ResolvedBarMarket(
+            identity=IDENTITY,
+            native_market_id="ETH-USD",
+            native_symbol="ETH-USD",
+            timeframes=frozenset({"1s"}),
+        ),
+    )
+    request = BarRequest(
+        identity=IDENTITY,
+        timeframe="1s",
+        start=START,
+        end=START + timedelta(seconds=count),
+    )
+
+    CountedDateTime.comparisons = 0
+    result = ProviderRuntime(provider).observe_final(request)
+
+    assert result.frame.height == count
+    assert 0 < CountedDateTime.comparisons < count * 40
 
 
 def test_runtime_rejects_overlapping_observation_evidence() -> None:
