@@ -2,7 +2,7 @@
 
 This module owns catalog snapshots, locally resolvable perpetual settlement,
 and canonical Parquet selection.  It never applies strict or partial-read
-policy, acquires locks, mutates storage, or contacts a provider.
+policy, acquires locks, mutates canonical state, or contacts a provider.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def read_local_facts_for_key(
     start: datetime,
     end: datetime,
 ) -> LocalReadFacts:
-    """Return coverage facts without creating or repairing local state."""
+    """Return coverage facts without mutating or repairing logical local state."""
     db_path = state_dir / CATALOG_FILE_NAME
     if not db_path.is_file():
         if paths.classify_managed_storage(data_dir) != "empty":
@@ -184,21 +184,32 @@ def _restrict_to_covered(frame: pl.LazyFrame, facts: LocalReadFacts) -> pl.LazyF
     Parquet and then failed before recording coverage.
     """
     schema, timestamp = _family_schema_and_timestamp(facts)
+    funding = storage_identity(facts.dataset_key).family is DatasetFamily.SETTLED_FUNDING
+    comparison_dtype = (
+        pl.Datetime(time_unit="us", time_zone="UTC") if funding else schema[timestamp]
+    )
+    if funding:
+        frame = frame.with_columns(pl.col(timestamp).cast(comparison_dtype))
     bounds = pl.LazyFrame(
         {
             _COVERED_START: [interval.start for interval in facts.covered],
             _COVERED_END: [interval.end for interval in facts.covered],
         },
         schema={
-            _COVERED_START: schema[timestamp],
-            _COVERED_END: schema[timestamp],
+            _COVERED_START: comparison_dtype,
+            _COVERED_END: comparison_dtype,
         },
     )
-    return (
+    restricted = (
         frame.sort(timestamp)
         .join_asof(bounds, left_on=timestamp, right_on=_COVERED_START, strategy="backward")
         .filter(pl.col(_COVERED_END).is_not_null() & (pl.col(timestamp) < pl.col(_COVERED_END)))
         .drop(_COVERED_START, _COVERED_END)
+    )
+    return (
+        restricted.with_columns(pl.col(timestamp).cast(schema[timestamp]))
+        if funding
+        else restricted
     )
 
 

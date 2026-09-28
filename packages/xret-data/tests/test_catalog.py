@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,6 +29,7 @@ from xret.data.storage.catalog import (
     apply_update,
     connect,
     detect_incompatible_state,
+    normalize_segments,
     terminal_commit_is_visible,
 )
 
@@ -130,6 +131,20 @@ def test_later_unavailable_update_does_not_downgrade_available_coverage() -> Non
         available,
         CoverageSegment(_dt(3), _dt(4), CoverageStatus.UNAVAILABLE),
     )
+
+
+def test_normalize_segments_preserves_sorted_disjoint_segments() -> None:
+    start = _dt(0)
+    segments = tuple(
+        CoverageSegment(
+            start + timedelta(seconds=index),
+            start + timedelta(seconds=index + 1),
+            CoverageStatus.AVAILABLE if index % 2 == 0 else CoverageStatus.UNAVAILABLE,
+        )
+        for index in range(1_000)
+    )
+
+    assert normalize_segments(segments) == segments
 
 
 def test_missing_is_computed_not_persisted(catalog: Catalog) -> None:

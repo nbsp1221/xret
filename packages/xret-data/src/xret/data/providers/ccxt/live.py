@@ -41,6 +41,29 @@ def create_live_exchange(client_id: str) -> AsyncCcxtExchange:
         raise ProviderError(f"failed to create CCXT Pro client {client_id!r}: {exc}") from exc
 
 
+async def _close_cancelled_activation(
+    client: AsyncCcxtExchange,
+    cancellation: asyncio.CancelledError,
+) -> None:
+    cleanup_task = asyncio.create_task(client.close())
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            if not cleanup_task.done():
+                raise
+            break
+    try:
+        cleanup_task.result()
+    except BaseException as cleanup_error:
+        raise BaseExceptionGroup(
+            "CCXT live activation cancellation and client close both failed",
+            [cancellation, cleanup_error],
+        ) from None
+
+
 class _Failure:
     def __init__(self, error: BaseException) -> None:
         self.error = error
@@ -135,6 +158,9 @@ class CcxtLiveBarSession:
             client = self._exchange_factory(client_id)
             try:
                 loaded = await client.load_markets()
+            except asyncio.CancelledError as cancellation:
+                await _close_cancelled_activation(client, cancellation)
+                raise
             except Exception as exc:
                 with contextlib.suppress(Exception):
                     await client.close()

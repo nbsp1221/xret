@@ -182,6 +182,9 @@ class LiveBarRuntime:
                 f"provider {self._descriptor.name!r} failed to subscribe to "
                 f"{resolved.identity.exchange}/{resolved.identity.symbol} {timeframe}: {exc}"
             ) from exc
+        except BaseException:
+            self._active.pop(key, None)
+            raise
         return key
 
     def subscription_evidence(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from xret.data.errors import ProviderError
@@ -19,8 +19,10 @@ class FundingPaginationResult:
     duplicate_count: int = 0
 
 
-def _epoch_ms(value: datetime) -> int:
-    return int(value.timestamp() * 1000)
+def _epoch_ms_ceiling(value: datetime) -> int:
+    delta = value - datetime(1970, 1, 1, tzinfo=UTC)
+    microseconds = (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+    return -(-microseconds // 1000)
 
 
 def _number(value: object, *, field: str, nullable: bool = False) -> float | None:
@@ -108,7 +110,7 @@ def paginate_funding_history(
     """
     if page_limit <= 0:
         raise ProviderError("funding page limit must be positive")
-    start_ms, end_ms = _epoch_ms(start), _epoch_ms(end)
+    start_ms, end_ms = _epoch_ms_ceiling(start), _epoch_ms_ceiling(end)
     cursor = start_ms
     by_timestamp: dict[int, tuple[int, float, int | None, float | None]] = {}
     duplicates = 0
@@ -156,7 +158,10 @@ def paginate_funding_history(
         observed = (ObservedWindow(start, end),)
     elif rows:
         observed_end_ms = min(end_ms, rows[-1][0] + 1)
-        observed_end = datetime.fromtimestamp(observed_end_ms / 1000, tz=start.tzinfo)
+        observed_end = min(
+            end,
+            datetime.fromtimestamp(observed_end_ms / 1000, tz=start.tzinfo),
+        )
         observed = (ObservedWindow(start, observed_end),)
     else:
         observed = ()

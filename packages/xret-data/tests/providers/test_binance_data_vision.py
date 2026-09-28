@@ -87,16 +87,39 @@ def _dataset(tmp_path, provider):
     )
 
 
-def _rows(count: int = 288):
+def _rows(count: int = 288, *, day: datetime = _DAY):
     return [
         (
-            (_DAY + timedelta(minutes=5 * index)).strftime("%Y-%m-%d %H:%M:%S"),
+            (day + timedelta(minutes=5 * index)).strftime("%Y-%m-%d %H:%M:%S"),
             str(index),
             str(index * 2),
             "BTCUSDT",
         )
         for index in range(count)
     ]
+
+
+def test_multi_day_sync_preserves_coverage_for_each_archive(tmp_path) -> None:
+    next_day = _DAY + timedelta(days=1)
+    payloads = {}
+    for day in (_DAY, next_day):
+        archive, checksum = _archive(_rows(day=day), day=day)
+        payloads[day.date().isoformat()] = (archive, checksum)
+
+    def transport(url: str, limit: int) -> bytes:
+        archive, checksum = next(
+            payload for day, payload in payloads.items() if f"metrics-{day}.zip" in url
+        )
+        payload = checksum if url.endswith(".CHECKSUM") else archive
+        assert len(payload) <= limit
+        return payload
+
+    dataset = _dataset(tmp_path, BinanceDataVisionProvider(transport=transport))
+    end = next_day + timedelta(days=1)
+    result = dataset.sync(_DAY, end).require_complete()
+
+    assert result.fetched_rows == 576
+    assert dataset.scan(_DAY, end).collect().height == 576
 
 
 def test_valid_complete_day_and_installed_entry_point(tmp_path) -> None:

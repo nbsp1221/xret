@@ -160,13 +160,16 @@ class LiveMarketData:
         self._routes.add(key)
         try:
             await self._runtime.subscribe_resolved(resolved, bars.timeframe)
-        except asyncio.CancelledError:
-            self._publish_failure(
-                ProviderError("live subscription was cancelled during provider activation")
-            )
-            raise
-        except BaseException:
+        except BaseException as exc:
             self._routes.discard(key)
+            cancellation = isinstance(exc, asyncio.CancelledError) or (
+                isinstance(exc, BaseExceptionGroup)
+                and exc.split(asyncio.CancelledError)[0] is not None
+            )
+            if cancellation:
+                self._publish_failure(
+                    ProviderError("live subscription was cancelled during provider activation")
+                )
             raise
         self._requested.add(requested)
         if self._reader is None:

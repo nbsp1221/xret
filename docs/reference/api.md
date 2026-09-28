@@ -263,7 +263,7 @@ The first successful synchronization binds a dataset's source lineage to the pro
 scan(start, end=None) -> polars.LazyFrame
 ```
 
-Reads canonical local data only and never changes local state. It requires complete available coverage and raises `CoverageError` for any gap. With omitted `end`, the range ends at the latest local timeframe boundary.
+Reads canonical local data only and never changes canonical Parquet or logical catalog contents. SQLite may create or update `-wal` and `-shm` coordination sidecars while opening a coherent read snapshot. It requires complete available coverage and raises `CoverageError` for any gap. With omitted `end`, the range ends at the latest local timeframe boundary.
 
 ## `BarDataset.scan_partial`
 
@@ -289,7 +289,7 @@ market_data.maintenance.validate()
 market_data.maintenance.rebuild_catalog()
 ```
 
-`validate()` compares the rebuildable SQLite operational index with canonical Parquet metadata and does not mutate state. `rebuild_catalog()` is the exclusive maintenance operation: it rebuilds SQLite only from sufficient current canonical Parquet evidence, never mutates Parquet, and fails closed when evidence is insufficient.
+`validate()` compares the rebuildable SQLite operational index with canonical Parquet metadata and does not mutate canonical Parquet or logical catalog contents; the same SQLite sidecar caveat as local scans applies. `rebuild_catalog()` is the exclusive maintenance operation: it rebuilds SQLite only from sufficient current canonical Parquet evidence, never mutates Parquet, and fails closed when evidence is insufficient.
 
 Catalog schema v6 identifies the closed family vocabulary and indexes open-interest contributor ownership. Xret never migrates an existing catalog in place: normal open paths reject any schema other than exactly v6 without mutation. An operator upgrades by stopping writers, backing up `state_dir` and `data_dir` together, then calling `rebuild_catalog()`. Incompatible catalogs with live WAL/SHM sidecars are not replaced. See [Migrate a local store to catalog v6](../guides/catalog-v6-migration.md) for backup, rebuild, verification, and rollback steps.
 

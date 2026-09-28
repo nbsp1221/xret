@@ -114,14 +114,22 @@ def normalize_segments(segments: Sequence[CoverageSegment]) -> tuple[CoverageSeg
     the later entry in `segments` wins. Adjacent equal-status segments are
     coalesced.
     """
-    if not segments:
+    candidate = tuple(segments)
+    if not candidate:
         return ()
+    if all(
+        left.end < right.start or (left.end == right.start and left.status is not right.status)
+        for left, right in zip(candidate, candidate[1:], strict=False)
+    ):
+        return candidate
 
-    points = sorted({segment.start for segment in segments} | {segment.end for segment in segments})
+    points = sorted(
+        {segment.start for segment in candidate} | {segment.end for segment in candidate}
+    )
     elementary: list[CoverageSegment] = []
     for lo, hi in zip(points, points[1:], strict=False):
         best: CoverageSegment | None = None
-        for segment in segments:
+        for segment in candidate:
             if segment.start > lo or segment.end < hi:
                 continue
             if best is None or _rank(segment.status) <= _rank(best.status):
@@ -374,7 +382,11 @@ _CURRENT_SCHEMA_DDL: Final[tuple[str, ...]] = (
 
 
 def _open_read_only_connection(db_path: Path) -> sqlite3.Connection:
-    """Open the live catalog read-only without creating SQLite artifacts."""
+    """Open the live catalog without permitting logical catalog writes.
+
+    SQLite may still create or update WAL/SHM coordination sidecars while it
+    establishes a coherent read snapshot.
+    """
     connection = sqlite3.connect(
         f"{db_path.resolve().as_uri()}?mode=ro",
         uri=True,
